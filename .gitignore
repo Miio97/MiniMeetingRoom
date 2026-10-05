@@ -1,0 +1,9 @@
+/target/
+/.m2/
+/nbproject/private/
+/nbactions-private.xml
+*.class
+*.log
+.env
+.env.*
+!.env.example
