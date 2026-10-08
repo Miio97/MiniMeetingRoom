@@ -14,13 +14,19 @@ try {
     }
     if ($env:MMR_AUTH_KEYSTORE) { $keyStoreFile = $env:MMR_AUTH_KEYSTORE }
     if ($env:MMR_AUTH_KEYSTORE_PASSWORD) { $keyStorePassword = $env:MMR_AUTH_KEYSTORE_PASSWORD }
-    if ($CertificateHost -notmatch '^[A-Za-z0-9.-]+$') { throw 'Invalid certificate hostname.' }
+    $certificateIp = $null
+    if ([System.Net.IPAddress]::TryParse($CertificateHost, [ref]$certificateIp)) {
+        $certificateIdentity = 'ip:' + $certificateIp.ToString()
+    } elseif ($CertificateHost -match '^[A-Za-z0-9.-]+$') {
+        $certificateIdentity = 'dns:' + $CertificateHost
+    } else { throw 'Invalid certificate hostname or IP address.' }
+    $certificateNames = (@($certificateIdentity, 'dns:localhost', 'ip:127.0.0.1') | Select-Object -Unique) -join ','
     $env:MMR_LOCAL_KEYSTORE_PASSWORD = $keyStorePassword
     $keytool = Resolve-Keytool
     if (-not (Test-Path -LiteralPath $keyStoreFile)) {
         & $keytool -genkeypair -alias auth-server -keyalg RSA -keysize 3072 -validity 365 `
             -storetype PKCS12 -keystore $keyStoreFile -storepass:env MMR_LOCAL_KEYSTORE_PASSWORD `
-            -dname "CN=$CertificateHost" -ext "SAN=dns:$CertificateHost,dns:localhost,ip:127.0.0.1" -noprompt
+            -dname "CN=$CertificateHost" -ext "SAN=$certificateNames" -noprompt
         if ($LASTEXITCODE -ne 0) { throw 'Could not generate the local TLS keystore.' }
     }
     & $keytool -exportcert -rfc -alias auth-server -keystore $keyStoreFile `
