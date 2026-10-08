@@ -1,37 +1,26 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
- */
 package server.database;
-
-/**
- *
- * @author HieuHoc
- */
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.Properties;
+import server.config.ServerConfig;
 
-public class DatabaseConnection {
-    private static final String HOST = "mainline.proxy.rlwy.net";
-    private static final String PORT = "13954";
-    private static final String DATABASE = "railway";
-    private static final String USER = "root";
-    private static final String PASSWORD = "KMEPJjAjbsaZPSYJCnkYfxjTELDVumLj";
-
-    private static final String URL =
-            "jdbc:mysql://" + HOST + ":" + PORT + "/" + DATABASE
-            + "?useUnicode=true"
-            + "&characterEncoding=UTF-8"
-            + "&serverTimezone=UTC"
-            + "&allowPublicKeyRetrieval=true";
+/** Server-side JDBC connections. Credentials belong in ignored local configuration. */
+public final class DatabaseConnection {
+    private DatabaseConnection() {
+    }
 
     public static Connection getConnection() throws SQLException {
-        return DriverManager.getConnection(
-                URL,
-                USER,
-                PASSWORD
-        );
+        String url = ServerConfig.get("db.url", "jdbc:mysql://localhost:3306/Mini_Meeting_Room");
+        Properties options = new Properties();
+        options.setProperty("user", ServerConfig.get("db.user", "root"));
+        options.setProperty("password", ServerConfig.get("db.password", ""));
+        options.setProperty("connectTimeout", "5000");
+        options.setProperty("socketTimeout", "10000");
+        options.setProperty("characterEncoding", "UTF-8");
+        options.setProperty("connectionTimeZone", "UTC");
+        options.setProperty("forceConnectionTimeZoneToSession", "true");
+        return DriverManager.getConnection(url, options);
     }
 }

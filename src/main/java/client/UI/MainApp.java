@@ -6,11 +6,11 @@ import javafx.stage.Stage;
 public class MainApp extends Application {
     private SceneManager manager;
     @Override public void start(Stage stage) {
-        stage.setTitle("Mini Meeting Room · UI Demo");
+        stage.setTitle("Mini Meeting Room");
         manager = new SceneManager(stage);
-        stage.setOnCloseRequest(event -> manager.dispose());
+        stage.setOnCloseRequest(event -> { event.consume(); manager.closeApplication(); });
         manager.auth();
         stage.show();
     }
-    @Override public void stop() { if (manager != null) manager.dispose(); }
+    @Override public void stop() { if (manager != null) manager.shutdown(); }
 }

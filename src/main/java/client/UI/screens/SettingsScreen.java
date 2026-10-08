@@ -26,13 +26,13 @@ public final class SettingsScreen extends BorderPane {
         VBox notifications = card();
         notifications.getChildren().addAll(toggle(manager, "notification", "Âm thanh thông báo", true), toggle(manager, "muteMic", "Tự tắt mic khi vào phòng", false),
             toggle(manager, "muteCamera", "Tự tắt camera khi vào phòng", false), Ui.field("Chất lượng video tối đa", device(manager, "quality", List.of("360p", "720p", "Tự động"))));
-        VBox profile = card(); TextField name = new TextField(manager.user()); TextField email = new TextField("hieu.nguyen@example.com"); email.setEditable(false);
-        Label result = Ui.label("", "success-text"); result.setManaged(false);
-        Button save = Ui.button("Lưu thay đổi", "primary", () -> {
-            if (name.getText().isBlank()) { result.setText("Vui lòng nhập tên hiển thị."); result.getStyleClass().setAll("error-text"); result.setManaged(true); return; }
-            manager.user(name.getText().strip()); setLeft(new Sidebar(manager, "settings")); result.setText("Đã lưu thay đổi."); result.getStyleClass().setAll("success-text"); result.setManaged(true);
-        });
-        profile.getChildren().addAll(Ui.field("Tên hiển thị", name), Ui.field("Email", email), Ui.row(12, Ui.button("Đổi mật khẩu", "secondary", () -> passwordDialog(manager)), save), result);
+        VBox profile = card();
+        TextField username = new TextField(manager.username()), name = new TextField(manager.user()), email = new TextField(manager.email());
+        username.setEditable(false); name.setEditable(false); email.setEditable(false);
+        Button password = Ui.button("Đổi mật khẩu", "secondary", () -> { }); password.setDisable(true);
+        Button save = Ui.button("Lưu thay đổi", "primary", () -> { }); save.setDisable(true);
+        profile.getChildren().addAll(Ui.field("Tên đăng nhập", username), Ui.field("Tên hiển thị", name), Ui.field("Email", email),
+            Ui.row(12, password, save), Ui.label("Thông tin từ tài khoản đã đăng nhập. Chỉnh sửa hồ sơ và đổi mật khẩu sẽ được bổ sung sau.", "caption"));
         tabs.getTabs().addAll(new Tab("Thiết bị", Ui.scroll(devices)), new Tab("Giao diện & thông báo", Ui.scroll(notifications)), new Tab("Tài khoản", Ui.scroll(profile)));
         if (account) tabs.getSelectionModel().select(2);
         VBox.setVgrow(tabs, Priority.ALWAYS); main.getChildren().addAll(Ui.label("Cài đặt", "title"), Ui.label("Thiết lập trải nghiệm họp theo cách của bạn.", "muted"), tabs); setCenter(main);
@@ -49,20 +49,5 @@ public final class SettingsScreen extends BorderPane {
         button.setSelected(Boolean.parseBoolean(manager.preference(key, String.valueOf(initial)))); knob.setTranslateX(button.isSelected() ? 9 : -9);
         button.selectedProperty().addListener((o, old, selected) -> { knob.setTranslateX(selected ? 9 : -9); manager.preferenceSet(key, selected.toString()); });
         HBox row = Ui.row(16, Ui.label(title, "strong"), Ui.spacer(), button); row.setAlignment(Pos.CENTER_LEFT); return row;
-    }
-    private void passwordDialog(SceneManager manager) {
-        Dialog<Void> dialog = new Dialog<>(); dialog.initOwner(manager.stage()); dialog.setTitle("Đổi mật khẩu"); dialog.setHeaderText("Đổi mật khẩu");
-        PasswordField old = new PasswordField(), next = new PasswordField(), repeat = new PasswordField();
-        old.setPromptText("Mật khẩu hiện tại"); next.setPromptText("Ít nhất 6 ký tự"); repeat.setPromptText("Nhập lại mật khẩu mới");
-        Label error = Ui.label("", "error-text"); error.setManaged(false);
-        VBox content = Ui.column(12, Ui.field("Mật khẩu cũ", old), Ui.field("Mật khẩu mới", next), Ui.field("Nhập lại", repeat), error); content.setPrefWidth(380);
-        dialog.getDialogPane().setContent(content);
-        ButtonType save = new ButtonType("Đổi mật khẩu", ButtonBar.ButtonData.OK_DONE); dialog.getDialogPane().getButtonTypes().addAll(new ButtonType("Hủy", ButtonBar.ButtonData.CANCEL_CLOSE), save); Ui.style(dialog);
-        Button submit = (Button) dialog.getDialogPane().lookupButton(save); submit.getStyleClass().add("primary");
-        submit.addEventFilter(javafx.event.ActionEvent.ACTION, event -> {
-            String message = !manager.matchesPassword(old.getText()) ? "Mật khẩu cũ chưa đúng." : next.getText().length() < 6 ? "Mật khẩu mới cần ít nhất 6 ký tự." : !next.getText().equals(repeat.getText()) ? "Mật khẩu nhập lại chưa khớp." : null;
-            if (message != null) { error.setText(message); error.setManaged(true); event.consume(); }
-            else manager.password(next.getText());
-        }); dialog.showAndWait();
     }
 }

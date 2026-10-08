@@ -1,0 +1,14 @@
+# Copy to config/auth-server.properties (ignored by Git).
+# Environment variables MMR_DB_URL / MMR_DB_USER / MMR_DB_PASSWORD override these values.
+db.url=jdbc:mysql://localhost:3306/Mini_Meeting_Room
+db.user=root
+db.password=
+
+# Environment variables: MMR_AUTH_PORT, MMR_AUTH_BIND, MMR_AUTH_KEYSTORE,
+# MMR_AUTH_KEYSTORE_PASSWORD, MMR_AUTH_SESSION_HOURS.
+auth.port=8443
+auth.bind=127.0.0.1
+auth.keystore=config/auth-dev.p12
+# Development only. Use a private password and a trusted certificate for deployment.
+auth.keystorePassword=changeit-local-only
+auth.sessionHours=24

@@ -1,0 +1,6 @@
+# Copy to config/auth-client.properties to override these local defaults.
+# Only the public certificate is needed on a client computer.
+auth.host=localhost
+auth.port=8443
+auth.certificate=config/auth-server.cer
+auth.timeoutMillis=15000

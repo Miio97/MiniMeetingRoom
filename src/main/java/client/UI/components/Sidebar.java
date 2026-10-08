@@ -1,6 +1,7 @@
 package client.UI.components;
 
 import client.UI.SceneManager;
+import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.geometry.Side;
 import javafx.scene.control.*;
@@ -24,7 +25,7 @@ public final class Sidebar extends VBox {
             nav("Lịch sử", "history", selected.equals("history"), manager::history),
             nav("Cài đặt", "settings", selected.equals("settings"), manager::settings), Ui.spacer());
         Label name = Ui.label(manager.user(), "user-name"); name.setWrapText(false); name.setMinWidth(0); name.setMaxWidth(Double.MAX_VALUE);
-        VBox text = Ui.column(2, name, Ui.label("Tài khoản demo", "user-caption"));
+        VBox text = Ui.column(2, name, Ui.label(manager.username(), "user-caption"));
         text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
         HBox profile = Ui.row(8, Ui.avatar(manager.user(), 36), text);
         profile.setMinWidth(0); HBox.setHgrow(profile, Priority.ALWAYS); profile.getStyleClass().add("profile-hit");
@@ -32,11 +33,17 @@ public final class Sidebar extends VBox {
         MenuItem account = new MenuItem("Hồ sơ của tôi", Icons.icon("user", 18));
         account.setOnAction(e -> manager.settingsAccount());
         MenuItem logout = new MenuItem("Đăng xuất", Icons.icon("logout", 16));
+        logout.disableProperty().bind(manager.logoutPendingProperty());
+        logout.textProperty().bind(Bindings.when(manager.logoutPendingProperty()).then("Đang đăng xuất…").otherwise("Đăng xuất"));
         logout.setOnAction(e -> confirmLogout(manager)); menu.getItems().addAll(account, logout);
         menu.getStyleClass().add("profile-menu");
         profile.setOnMouseClicked(e -> menu.show(profile, Side.TOP, 0, -8));
         IconButton exit = new IconButton("close", "Đăng xuất");
         exit.setGraphic(Icons.icon("logout", 16)); exit.getStyleClass().add("logout-button");
+        exit.disableProperty().bind(manager.logoutPendingProperty());
+        Tooltip logoutHint = new Tooltip();
+        logoutHint.textProperty().bind(Bindings.when(manager.logoutPendingProperty()).then("Đang đăng xuất…").otherwise("Đăng xuất"));
+        exit.setTooltip(logoutHint);
         exit.setOnAction(e -> confirmLogout(manager));
         HBox user = Ui.row(6, profile, exit); user.getStyleClass().add("sidebar-user");
         user.setMinHeight(56); user.setMaxHeight(56); getChildren().add(user);
@@ -57,6 +64,6 @@ public final class Sidebar extends VBox {
         dialog.getButtonTypes().setAll(cancel, logout); Ui.style(dialog);
         ((ButtonBar) dialog.getDialogPane().lookup(".button-bar")).setButtonOrder("C+O");
         dialog.getDialogPane().lookupButton(logout).getStyleClass().add("danger");
-        dialog.showAndWait().filter(logout::equals).ifPresent(result -> manager.auth());
+        dialog.showAndWait().filter(logout::equals).ifPresent(result -> manager.logout());
     }
 }
