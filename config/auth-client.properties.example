@@ -1,6 +1,11 @@
 # Copy to config/auth-client.properties to override these local defaults.
 # Only the public certificate is needed on a client computer.
-auth.host=127.0.0.1
+auth.host=localhost
 auth.port=8443
 auth.certificate=config/auth-server.cer
 auth.timeoutMillis=15000
+
+# File host defaults to auth.host; uses auth.certificate and hostname verification.
+# Environment: MMR_FILE_HOST, MMR_FILE_PORT, MMR_FILE_TIMEOUT_MILLIS.
+file.transfer.port=9001
+file.transfer.socket-timeout-ms=30000

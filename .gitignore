@@ -12,6 +12,7 @@
 /config/*.p12
 /config/*.jks
 /config/*.cer
+/storage/
 /logs/diagnostics/
 /.tools/
 /config/*.private.properties
