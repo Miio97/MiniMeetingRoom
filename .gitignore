@@ -13,3 +13,4 @@
 /config/*.jks
 /config/*.cer
 /storage/
+/logs/diagnostics/

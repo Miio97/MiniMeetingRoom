@@ -8,6 +8,11 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.stream.IntStream;
+import common.room.RoomInfo;
+import common.room.RoomParticipant;
+import common.room.RoomRequest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -45,7 +50,7 @@ class AuthWireTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {-1, 0, 16385, Integer.MAX_VALUE})
+    @ValueSource(ints = {-1, 0, AuthWire.MAX_FRAME_BYTES + 1, Integer.MAX_VALUE})
     void rejectsInvalidFrameLengthsBeforeReadingPayload(int length) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         new DataOutputStream(bytes).writeInt(length);
@@ -95,6 +100,25 @@ class AuthWireTest {
         assertFalse(request.toString().contains(token));
         assertFalse(response.toString().contains(token));
         assertTrue(request.toString().contains("LOGIN"));
+        RoomRequest room = new RoomRequest("Meeting", "954321", null, 10);
+        assertFalse(room.toString().contains("954321"));
+        assertFalse(new AuthRequest("CREATE_ROOM", null, null, null, null, token, room).toString().contains("954321"));
+    }
+
+    @Test
+    void preservesRoomRequestsAndFullParticipantSnapshotWithinFrameBound() throws IOException {
+        AuthRequest request = new AuthRequest("CREATE_ROOM", null, null, null, null, "session-token",
+                new RoomRequest("Họp nhóm Java", "123456", null, 250));
+        assertEquals(request, AuthWire.read(input(encode(request)), AuthRequest.class));
+        List<RoomParticipant> members = IntStream.rangeClosed(1, 250)
+                .mapToObj(id -> new RoomParticipant(id, "Đ".repeat(100), id == 1 ? "CHU_PHONG" : "THANH_VIEN"))
+                .toList();
+        AuthResponse response = AuthResponse.roomOk("Đã tham gia", new RoomInfo(8, "Họp nhóm Java",
+                "MMR-0123ABCD", 1, "2026-10-14T10:00:00Z", "DANG_HOAT_DONG", false, 250, 250, members));
+        byte[] bytes = encode(response);
+        assertTrue(bytes.length > 16 * 1024, "A full room no longer fits the original authentication-only frame size");
+        assertTrue(bytes.length - Integer.BYTES <= AuthWire.MAX_FRAME_BYTES);
+        assertEquals(response, AuthWire.read(input(bytes), AuthResponse.class));
     }
 
     private static byte[] encode(Object message) throws IOException {

@@ -42,7 +42,6 @@ import javafx.scene.control.TextField;
 import javafx.scene.control.TabPane;
 import javafx.scene.image.WritableImage;
 import javafx.stage.Stage;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,12 +49,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import server.AuthServer;
+import server.ApplicationService;
+import server.rooms.RoomService;
 import server.auth.AuthService;
 import server.auth.PasswordHasher;
 import server.filetransfer.FileMetadataRepository;
 import server.filetransfer.FileStorageService;
 import server.filetransfer.FileTransferServer;
 import server.filetransfer.TransferConfig;
+import support.FxTestRuntime;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Real JavaFX form actions through TLS sockets and the production service, using only an isolated database. */
@@ -86,10 +88,7 @@ class AuthFlowTest {
                 "-rfc", "-file", certificate.toString());
         serverTls = TlsSupport.server(keys, KEY_PASSWORD.toCharArray());
         clientTls = TlsSupport.client(certificate);
-        CountDownLatch started = new CountDownLatch(1);
-        // A missing graphics runtime must fail this integration check, never skip it silently.
-        Platform.startup(() -> { Platform.setImplicitExit(false); started.countDown(); });
-        assertTrue(started.await(10, TimeUnit.SECONDS), "JavaFX did not initialize");
+        FxTestRuntime.start();
     }
 
     @BeforeEach
@@ -109,7 +108,12 @@ class AuthFlowTest {
                 """);
         AuthService service = new AuthService(() -> DriverManager.getConnection(database), new PasswordHasher(),
                 Clock.systemUTC(), Duration.ofHours(24));
+        ApplicationService application = new ApplicationService(service,
+                new RoomService(() -> DriverManager.getConnection(database), new PasswordHasher(), Clock.systemUTC()));
         server = new AuthServer(serverTls, new InetSocketAddress("127.0.0.1", 0), request -> {
+            if ("LIST_ROOMS".equals(request.action())) {
+                return AuthResponse.roomsOk("Đã tải danh sách phòng.", List.of());
+            }
             actions.add(request.action());
             if ("REGISTER".equals(request.action())) {
                 registrationReceived.countDown();
@@ -122,7 +126,7 @@ class AuthFlowTest {
                     return AuthResponse.error("TEST_INTERRUPTED", "Test server interrupted");
                 }
             }
-            return service.handle(request);
+            return application.handle(request);
         });
         server.start();
         fx(() -> {
@@ -144,11 +148,6 @@ class AuthFlowTest {
             if (server != null) server.close();
             if (database != null) execute("DROP ALL OBJECTS");
         }
-    }
-
-    @AfterAll
-    static void stopJavaFx() throws Exception {
-        fx(() -> { Platform.exit(); return null; });
     }
 
     @Test
@@ -252,12 +251,7 @@ class AuthFlowTest {
 
     @Test
     void roomNavigationAndExistingFileTabUseRealTlsMembershipAndMetadata() throws Exception {
-        String schema = Files.readString(Path.of("database/schema.sql"))
-                .replaceAll("(?m)^\\s*--.*$", "")
-                .replaceFirst("(?s)CREATE DATABASE IF NOT EXISTS Mini_Meeting_Room.*?;", "")
-                .replace("USE Mini_Meeting_Room;", "").replace("ENGINE = InnoDB", "");
-        for (String sql : schema.split(";")) if (!sql.isBlank()
-                && !sql.strip().startsWith("CREATE TABLE Nguoi_Dung") && !sql.strip().startsWith("CREATE TABLE Phien_Dang_Nhap")) execute(sql);
+        createRoomTables();
         TransferConfig config = new TransferConfig(true, "127.0.0.1", 0, 65536, 4, 2, 5000,
                 temporary.resolve("ui-storage-" + UUID.randomUUID()), 1024 * 1024, 8 * 1024 * 1024, 4, Duration.ofHours(1), true);
         FileMetadataRepository repository = new FileMetadataRepository(() -> DriverManager.getConnection(database));
@@ -295,6 +289,35 @@ class AuthFlowTest {
             awaitFx(() -> root() instanceof AuthScreen);
             assertEquals(1, count("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NOT NULL"));
         }
+    }
+
+    @Test
+    void logoutFromJoinedRoomLeavesViaAuthChannelBeforeRevokingSession() throws Exception {
+        createRoomTables(); registrationRelease.countDown();
+        AuthClient auth = new AuthClient("localhost", server.port(), clientTls, 5000);
+        assertTrue(auth.register("LogoutRoomUser", "Người đăng xuất", null, PASSWORD).success());
+        AuthResponse login = auth.login("LogoutRoomUser", PASSWORD);
+        var created = auth.createRoom(login.token(), "Phòng đăng xuất", "1234", 10);
+        assertTrue(created.success());
+        fx(() -> {
+            manager.acceptSession(login); manager.preJoin(created.room());
+            assertTrue(manager.isRoomJoined()); manager.logout();
+            assertTrue(manager.logoutPendingProperty().get()); return null;
+        });
+        awaitFx(() -> root() instanceof AuthScreen && !manager.logoutPendingProperty().get());
+        assertEquals(0, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NOT NULL"));
+        assertEquals(List.of("REGISTER", "LOGIN", "CREATE_ROOM", "LEAVE_ROOM", "LOGOUT"), actions);
+        fx(() -> { assertFalse(manager.isRoomJoined()); assertNull(manager.roomInfo()); assertNull(manager.sessionToken()); return null; });
+    }
+
+    private void createRoomTables() throws Exception {
+        String schema = Files.readString(Path.of("database/schema.sql"))
+                .replaceAll("(?m)^\\s*--.*$", "")
+                .replaceFirst("(?s)CREATE DATABASE IF NOT EXISTS Mini_Meeting_Room.*?;", "")
+                .replace("USE Mini_Meeting_Room;", "").replace("ENGINE = InnoDB", "");
+        for (String sql : schema.split(";")) if (!sql.isBlank()
+                && !sql.strip().startsWith("CREATE TABLE Nguoi_Dung") && !sql.strip().startsWith("CREATE TABLE Phien_Dang_Nhap")) execute(sql);
     }
 
     private void snapshotMeeting() throws Exception {

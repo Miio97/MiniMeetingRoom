@@ -4,6 +4,10 @@ import common.auth.AuthRequest;
 import common.auth.AuthResponse;
 import common.auth.AuthWire;
 import common.auth.TlsSupport;
+import common.room.RoomInfo;
+import common.room.RoomRequest;
+import common.room.RoomValidation;
+import common.diagnostics.Diagnostics;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -17,6 +21,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.util.Properties;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
@@ -24,6 +31,12 @@ import javax.net.ssl.SSLSocket;
 
 /** Blocking network API. Call from a background task, never the JavaFX thread. */
 public final class AuthClient {
+    private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
+            "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
+            "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
+            "ROOM_FULL", "ROOM_ACCESS_DENIED");
+    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "JOIN_ROOM",
+            "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
 
@@ -47,8 +60,48 @@ public final class AuthClient {
         return send(new AuthRequest("LOGOUT", null, null, null, null, token));
     }
 
+    public AuthResponse createRoom(String token, String name, String pin, int capacity) throws IOException {
+        return roomCommand("CREATE_ROOM", token, new RoomRequest(name, pin, null, capacity));
+    }
+
+    public AuthResponse joinRoom(String token, String identifier, String pin) throws IOException {
+        return roomCommand("JOIN_ROOM", token, new RoomRequest(null, pin, identifier, 0));
+    }
+
+    public AuthResponse listRooms(String token) throws IOException {
+        return roomCommand("LIST_ROOMS", token, null);
+    }
+
+    public AuthResponse getRoom(String token, long roomId) throws IOException {
+        return roomCommand("GET_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
+    }
+
+    public AuthResponse leaveRoom(String token, long roomId) throws IOException {
+        return roomCommand("LEAVE_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
+    }
+
+    private AuthResponse roomCommand(String action, String token, RoomRequest parameters) throws IOException {
+        return send(new AuthRequest(action, null, null, null, null, token, parameters));
+    }
+
     private AuthResponse send(AuthRequest request) throws IOException {
+        RequestTiming timing = new RequestTiming(request.action());
+        try {
+            AuthResponse response = sendMeasured(request, timing);
+            Map<String, Object> fields = timing.fields(response.success() ? "success" : "rejected");
+            fields.put("response_code", RESPONSE_CODES.contains(response.code()) ? response.code() : "OTHER");
+            Diagnostics.current().event("auth_client_request", fields);
+            return response;
+        } catch (IOException | RuntimeException failure) {
+            Diagnostics.current().failure("auth_client_request", failure, timing.fields("error"));
+            throw failure;
+        }
+    }
+
+    private AuthResponse sendMeasured(AuthRequest request, RequestTiming timing) throws IOException {
         Settings settings = fixedSettings != null ? fixedSettings : Settings.load();
+        timing.port = settings.port();
+        timing.next("tls_context");
         SSLContext tls = fixedTls;
         if (tls == null) {
             if (!Files.isRegularFile(settings.certificate())) {
@@ -59,9 +112,13 @@ public final class AuthClient {
                 throw new IOException("Không đọc được chứng chỉ máy chủ. Hãy kiểm tra cấu hình kết nối.", e);
             }
         }
+        timing.tlsContextMillis = timing.phaseMillis();
         try (Socket connection = new Socket()) {
+            timing.next("tcp_connect");
             connection.connect(new InetSocketAddress(settings.host(), settings.port()),
                     Math.min(5000, settings.timeoutMillis()));
+            timing.tcpConnectMillis = timing.phaseMillis();
+            timing.next("tls_handshake");
             try (SSLSocket socket = (SSLSocket) tls.getSocketFactory()
                     .createSocket(connection, settings.host(), settings.port(), true)) {
                 socket.setSoTimeout(settings.timeoutMillis());
@@ -70,6 +127,8 @@ public final class AuthClient {
                 parameters.setEndpointIdentificationAlgorithm("HTTPS");
                 socket.setSSLParameters(parameters);
                 socket.startHandshake();
+                timing.tlsHandshakeMillis = timing.phaseMillis();
+                timing.next("response");
                 AuthWire.write(new DataOutputStream(socket.getOutputStream()), request);
                 AuthResponse response = AuthWire.read(new DataInputStream(socket.getInputStream()), AuthResponse.class);
                 if (response.code() == null || response.message() == null
@@ -79,6 +138,20 @@ public final class AuthClient {
                         || response.token() == null || response.token().isBlank() || response.expiresAt() == null))) {
                     throw new IOException("Phản hồi từ máy chủ không hợp lệ.");
                 }
+                if (response.success()) {
+                    switch (request.action()) {
+                        case "CREATE_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
+                            if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
+                        }
+                        case "LIST_ROOMS" -> {
+                            if (response.rooms().size() > 20 || response.rooms().stream().anyMatch(room -> !validRoom(room))) {
+                                throw new IOException("Danh sách phòng từ máy chủ không hợp lệ.");
+                            }
+                        }
+                        default -> { }
+                    }
+                }
+                timing.responseMillis = timing.phaseMillis();
                 return response;
             }
         } catch (SSLHandshakeException e) {
@@ -87,6 +160,47 @@ public final class AuthClient {
             throw new IOException("Không kết nối được máy chủ. Hãy khởi động server và kiểm tra địa chỉ/cổng.", e);
         } catch (SocketTimeoutException e) {
             throw new IOException("Máy chủ phản hồi quá lâu. Vui lòng thử lại.", e);
+        }
+    }
+
+    private static boolean validRoom(RoomInfo room) {
+        return room != null && room.id() > 0 && room.hostId() > 0 && room.name() != null && !room.name().isBlank()
+                && room.code() != null && room.createdAt() != null && room.status() != null
+                && Set.of("CHO", "DANG_HOAT_DONG", "DA_DONG").contains(room.status())
+                && RoomValidation.capacityError(room.capacity()) == null
+                && room.people() >= 0 && room.people() <= room.capacity()
+                && room.participants().size() <= room.capacity()
+                && room.participants().stream().allMatch(person -> person.userId() > 0 && person.displayName() != null
+                && Set.of("CHU_PHONG", "THANH_VIEN").contains(person.role()));
+    }
+
+    /** Only fixed categories and durations enter diagnostics, never authentication payloads. */
+    private static final class RequestTiming {
+        private final long started = System.nanoTime();
+        private final String action;
+        private String phase = "load_settings";
+        private long phaseStarted = started;
+        private int port;
+        private Double tlsContextMillis, tcpConnectMillis, tlsHandshakeMillis, responseMillis;
+
+        RequestTiming(String action) {
+            this.action = ACTIONS.contains(action) ? action : "OTHER";
+        }
+
+        void next(String phase) { this.phase = phase; phaseStarted = System.nanoTime(); }
+        double phaseMillis() { return (System.nanoTime() - phaseStarted) / 1_000_000.0; }
+
+        Map<String, Object> fields(String outcome) {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("action", action); fields.put("phase", phase); fields.put("outcome", outcome);
+            fields.put("total_ms", (System.nanoTime() - started) / 1_000_000.0);
+            fields.put("phase_elapsed_ms", phaseMillis());
+            if (port > 0) fields.put("port", port);
+            if (tlsContextMillis != null) fields.put("tls_context_ms", tlsContextMillis);
+            if (tcpConnectMillis != null) fields.put("tcp_connect_ms", tcpConnectMillis);
+            if (tlsHandshakeMillis != null) fields.put("tls_handshake_ms", tlsHandshakeMillis);
+            if (responseMillis != null) fields.put("response_ms", responseMillis);
+            return fields;
         }
     }
 

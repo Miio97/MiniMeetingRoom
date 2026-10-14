@@ -16,7 +16,8 @@ import java.nio.charset.StandardCharsets;
 
 /** Four-byte big-endian length followed by one UTF-8 JSON object. */
 public final class AuthWire {
-    public static final int MAX_FRAME_BYTES = 16 * 1024;
+    // A full room can contain 250 display names. Keep a finite bound for both directions.
+    public static final int MAX_FRAME_BYTES = 256 * 1024;
     private static final Gson JSON = new Gson();
 
     private AuthWire() { }
