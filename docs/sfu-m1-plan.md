@@ -1,6 +1,6 @@
 # Mốc 1 — thiết kế đề xuất sau cổng media
 
-Tài liệu này là thiết kế, **chưa phải phần triển khai**. Runtime media được chọn là service Go/Pion; JavaFX, auth, room/signaling Java và MySQL Railway giữ vai trò hiện có. Chỉ bắt đầu mã production Mốc 1 khi parent xác nhận bài publisher → SFU → subscriber qua hai transport đã đạt Mốc 0. Không áp dụng migration hoặc tạo dữ liệu thử trên Railway trong bước thiết kế này.
+Đây là bản thiết kế ban đầu; trạng thái triển khai và cách chạy sau khi ghép code nằm ở [sfu-m1-running.md](sfu-m1-running.md). Auth/phòng/signaling và màn hình điều khiển phòng đã được triển khai, còn media control/lease bên dưới thuộc Mốc 2. Người dùng đã báo áp dụng migration phòng thành công; không tự áp dụng lại hoặc tạo dữ liệu test trên Railway.
 
 ## Module và chủ sở hữu
 

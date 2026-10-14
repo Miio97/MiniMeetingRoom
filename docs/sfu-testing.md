@@ -1,6 +1,27 @@
-# Kiểm chứng SFU — Mốc 0
+# Kiểm chứng SFU — Mốc 0 và video tích hợp
 
-**Đã đạt cổng khả thi SFU Mốc 0 trên cùng máy với nguồn tạo sẵn.** Bài thử Java publisher → Go/Pion SFU → Java subscriber đã PASS qua hai transport WebRTC riêng, đối chiếu codec payload không transcode. Mốc 1 đang triển khai; Mốc 2–4 chưa nghiệm thu. Chưa có kết quả camera/microphone thật, khả năng tải hoặc cuộc gọi dài.
+**Mốc 0 và phòng/signaling Mốc 1 đã có bằng chứng thực thi; video hiện đã tích hợp vào phòng SFU.** Native integration trao đổi nguồn video tạo sẵn qua Go và render JavaFX. Theo yêu cầu mới nhất chỉ làm video trước; không đánh dấu hoàn thành Mốc 2 audio/video toàn bộ hoặc Mốc 3–4. Chưa có kết quả camera/microphone vật lý, khả năng tải hoặc cuộc gọi dài.
+
+## Video tích hợp — cập nhật 15/10/2026
+
+- Hồi quy sau luồng quyền mới: **194 tests, 0 failures/errors, 2 skipped**, BUILD SUCCESS (`target/camera-permission-entry-regression.txt`). Hai skip theo cấu hình symlink/performance.
+
+- Quyền khi nhấn Bật camera/chặn vào họp: **16 tests PASS** (`target/camera-permission-entry-integration.txt`). Kiểm tra không tự hỏi khi mở phòng chờ, từ chối và thử lại, quyền đã lưu, view dispose và điều kiện vào họp qua nút lẫn lời gọi trực tiếp. Giao diện chờ bỏ nút quyền và các dòng mô tả thừa. Catalog/file quyền của fixture được cô lập; không mở thiết bị thật hoặc ghi Railway.
+
+- Hồi quy sau camera switch/theme: **194 tests, 0 failures/errors, 2 skipped**, BUILD SUCCESS (`target/camera-switch-theme-regression.txt`). Hai skip vẫn theo cấu hình symlink/performance. Các kết quả 189/183 bên dưới là lần kiểm tra trước bản sửa này.
+
+- Camera vật lý/nhấn liên tục/theme: **16 tests PASS**, gồm năm VideoCallIntegrationTest, bảy CameraControlsTest, ba CameraSwitchTest và một ThemeManagerTest (`target/camera-switch-theme-integration.txt`). Cố ý giữ khởi tạo capture rồi nhấn 100 lần: đích cuối tắt, không start nguồn; bật lại rồi nhấn 101 lần: publication SFU được dọn. Theme được đổi bằng nút thật, đối chiếu màu nền phòng họp/dialog và giữ nguyên Scene. Nguồn video tạo sẵn, không mở camera vật lý. Kiểm tra metadata trên máy thật: SDK có sáu mục, bộ lọc chỉ giữ webcam USB2.0 HD UVC WebCam (`target/camera-picker-inventory.txt`). Không gỡ/cài driver hoặc sửa Railway.
+
+- Bản sửa camera/nhận video: **10 tests PASS**, gồm bốn VideoCallIntegrationTest và sáu CameraControlsTest (`target/camera-receive-final-integration.txt`). Client nhận chạy ở JVM riêng vẫn có frame/ảnh JavaFX khi cố ý giữ catalog camera chờ; cấu hình camera chỉ nằm trong dialog Cài đặt. Test catalog giả xác minh mặc định ưu tiên webcam vật lý, vẫn tôn trọng camera ảo đã chọn và việc khám phá bị kẹt không chặn đọc/ghi quyền. H2/TLS cô lập, nguồn I420 tạo bằng mã, không bật camera thật.
+- Hồi quy mới nhất: **189 tests, 0 failures/errors, 2 skipped**, BUILD SUCCESS (`target/camera-receive-regression.txt`). Hai skip vẫn là quyền symlink Windows và kiểm tra performance truyền tệp opt-in.
+- Kiểm tra metadata thiết bị thật (không capture) tái hiện ByteCast VirtualCamera2 bị kẹt đọc định dạng. Helper Java mới kết thúc sau khoảng 8 giây, sau đó đọc được 12 định dạng UVC trong khoảng 0,6 giây. Chưa nghiệm thu bật đồng thời webcam ở hai cửa sổ; một webcam có thể bị driver giữ độc quyền.
+
+- Regression Java sau tích hợp giao diện chính: 183 tests, 0 failures, 0 errors, 2 skipped (quyền symlink Windows và performance truyền tệp opt-in); BUILD SUCCESS. Kết quả `target/unified-room-regression.txt`.
+- Go: bốn bài top-level PASS kiểm tra auth/lease/generation, codec packet ownership, fanout Pion thật/cross-room/revoke, và queue keyframe hữu hạn khi writer không tiêu thụ.
+- Native: ba bài `VideoCallIntegrationTest` PASS, không skip: ba client nhận sáu luồng remote và ảnh JavaFX; tắt/bật lại camera, host stop/kick và logout trong cuộc gọi. Bài giao diện chính dùng dialog tạo phòng, tham gia bằng ID/PIN, xem trước cục bộ rồi vào MeetingScreen; xác minh không publish trước khi vào họp. Gửi/tải tệp trong cùng phòng có đối chiếu nội dung; leave thu hồi file và camera, người khác vẫn phát. H2 và certificate test riêng; không ghi dữ liệu thử lên Railway. Nguồn I420 tạo bằng mã 320×240, không mở webcam/microphone. Kết quả `target/unified-video-integration.txt`, ảnh `target/video-main-meeting-preview.png`.
+- Chạy lại bằng `scripts/test-video-call.ps1`. Điều kiện và giới hạn ở [video-call.md](video-call.md). Camera thật, hai máy, TURN, mất mạng, tải 5/10 client và 30 phút vẫn chưa chạy.
+
+Các phần Mốc 0 dưới đây giữ lại bằng chứng khảo sát trước khi tích hợp, không phải hiện trạng tính năng video.
 
 ## Điều kiện baseline
 
@@ -75,7 +96,7 @@ Nguồn thử: PCM 48 kHz mono, tone 440 Hz, chunk 10 ms; I420 320×240, moving 
 1. Đã chọn Go/Pion v4.2.23, build/chạy trên Windows x64; JavaFX/auth/room/signaling tiếp tục ở Java. Chi phí và ranh giới thư viện ở tài liệu kiến trúc.
 2. Đã chạy một publisher → engine server → một subscriber, Opus/VP8, hai WebRTC transport và đối chiếu packet/payload/hash. Queue giới hạn 256 packet/2 MiB/750 ms mỗi route và cleanup ngắn đã kiểm thử; chưa đo tổng RSS/native memory của service.
 3. Đã quan sát PLI và có route feedback; người vào muộn, drop recovery/chậm subscriber, multi-source switching, NACK/RTX dưới mất mạng và congestion control đầy đủ chưa nghiệm thu.
-4. Mốc 1 cần session/token server-side, room/membership và signaling thật; H2/TLS test token sai/hết hạn/thu hồi, PIN, cross-room, race capacity, request retry và shutdown. Thử nghiệm Mốc 0 chưa cấp quyền publish/subscribe bằng session sản phẩm.
+4. Mốc 1 đã có session/token server-side, room/membership, signaling và màn hình điều khiển phòng thật. Tests H2/TLS/JavaFX cùng cách chạy sau khi ghép code ở [sfu-m1-running.md](sfu-m1-running.md). Bước video mới đã nối quyền publish/subscribe với session sản phẩm; xem mục cập nhật ở đầu tài liệu.
 
 ## Kế hoạch nghiệm thu chưa chạy
 
@@ -83,11 +104,17 @@ Nguồn thử: PCM 48 kHz mono, tone 440 Hz, chunk 10 ms; I420 320×240, moving 
 |---|---|
 | Đường publisher → SFU → subscriber không transcode | PASS Mốc 0: một publisher/một subscriber, nguồn tạo sẵn cùng máy; chưa phải cuộc gọi sản phẩm |
 | 2/3 client JavaFX có audio/video thiết bị thật | Chưa chạy; cần người dùng bật thiết bị |
-| Mute/camera/leave, người vào muộn/screenshare/đổi thiết bị | Chưa triển khai |
-| Host controls, session revocation trong gọi, reconnect/ICE restart | Chưa triển khai |
+| Camera/leave, host stop/kick, logout trong video | PASS native với nguồn tạo sẵn; thiết bị vật lý chưa chạy |
+| Mute, screenshare, đổi thiết bị, reconnect/ICE restart | Chưa triển khai/nghiệm thu; camera tắt/bật dùng PC và publication mới |
 | Multi-room isolation, subscriber chậm, loss/jitter/bandwidth | Chưa chạy |
 | 2/3/5/10 client và cuộc gọi 30 phút | Chưa chạy |
 | Thread/socket/native RSS/cache sau cleanup dài hạn | Chưa đo; hai cycle client probe và một chu kỳ SFU ngắn không chứng minh không rò rỉ |
 | LAN/Internet, TURN/certificate/SAN/firewall/NAT | Chưa chạy |
 
 Khi triển khai sẽ giữ cùng phần cứng, mạng, codec/resolution/FPS/bitrate/thời lượng/diagnostics giữa các lần so sánh. Client cùng máy chỉ là bài integration và có thể bị giới hạn capture/encode/decode; không suy ra năng lực server thực tế. Ngưỡng nghiệm thu hiệu suất sẽ chốt bằng baseline thật, không bịa mục tiêu.
+
+## Kiểm chứng sau khi ghép code ngày 2026-10-14
+
+Baseline bản ghép: 162 bài, 0 failure/error, 2 skip. Sau bổ sung Mốc 1: 176 bài, 0 failure/error, 2 skip (test symlink thiếu quyền Windows và test hiệu suất truyền tệp cần opt-in). Hai màn hình JavaFX không hiển thị chạy create/join/leave qua TLS thật, xác nhận danh sách và quyền host; không dùng mock room/member, không có dữ liệu thử Railway.
+
+Probe `m1-merged-sfu-probe-20261014-01` chạy lại trên Windows: Go unit tests PASS và một native SFU integration test PASS, không skip, 4.565 giây. Log `client-media-probe-20261014T142854.085Z-36504-eacb66b1.txt` nằm trong `logs/diagnostics`; các byte codec được ghi bằng `ingress_codec_bytes`/`forwarded_codec_bytes` để giữ nguyên filter chặn payload. Đây vẫn là media tạo sẵn cùng máy, không phải nghiệm thu cuộc gọi JavaFX hoặc thiết bị thật.

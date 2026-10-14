@@ -184,6 +184,32 @@ class RoomFlowTest {
         snapshot("room-meeting.png", root(), 1280, 800);
     }
 
+    @Test void returningToLobbyReusesRecentListAndManualRefreshStillQueriesServer() throws Exception {
+        hiddenClient(host);
+        long requests = actions.stream().filter("LIST_ROOMS"::equals).count();
+        FxTestRuntime.call(() -> { manager.lobby(); root().applyCss(); root().layout(); return null; });
+        assertEquals(requests, actions.stream().filter("LIST_ROOMS"::equals).count());
+        FxTestRuntime.call(() -> { node(root(), "refresh-rooms", Button.class).fire(); return null; });
+        FxTestRuntime.await(() -> !node(root(), "refresh-rooms", Button.class).isDisabled());
+        assertEquals(requests + 1, actions.stream().filter("LIST_ROOMS"::equals).count());
+    }
+
+    @Test void blockedBackgroundListDoesNotDelayForegroundRoomAction() throws Exception {
+        var room = fixture.client().createRoom(host.token(), "Responsive room", "1234", 3).room();
+        hiddenClient(host); blockedAction = "LIST_ROOMS";
+        FxTestRuntime.call(() -> { node(root(), "refresh-rooms", Button.class).fire(); return null; });
+        assertTrue(blockedRequestReceived.await(3, TimeUnit.SECONDS));
+        CountDownLatch foreground = new CountDownLatch(1);
+        FxTestRuntime.call(() -> {
+            manager.runAuthRequest(() -> fixture.client().getRoom(host.token(), room.id()), response -> {
+                if (response.success()) foreground.countDown();
+            }, failure -> { });
+            return null;
+        });
+        assertTrue(foreground.await(3, TimeUnit.SECONDS), "A polling response must not queue ahead of the user's action");
+        blockedRequestRelease.countDown();
+    }
+
     @Test
     void lobbyRejectsWrongPinJoinsRealRoomByIdAndBackButtonRemovesMembership() throws Exception {
         RoomInfo room = fixture.client().createRoom(host.token(), "Họp hai máy", "7642", 10).room();

@@ -38,9 +38,13 @@ Thực hiện các thao tác cần kiểm thử, đóng client và dừng server
 
 `response_ms` của client là thời gian ghi yêu cầu, chờ server/database, đọc và kiểm tra phản hồi xác thực. Đây là thời gian một vòng yêu cầu ứng dụng, không phải RTT mạng thuần và không phải độ trễ audio/video. `handler_ms` của server bao gồm công việc service/database, không tách riêng từng truy vấn SQL. Các thời lượng dùng đồng hồ đơn điệu; thời điểm UTC dùng để đối chiếu bài kiểm thử. Đồng hồ khác nhau trên các máy chưa đủ để suy ra độ trễ truyền một chiều.
 
-## Tích hợp với WebRTC và SFU sau này
+## Tích hợp với WebRTC và SFU
 
-Luồng họp của giao diện hiện chưa tích hợp media, signaling hoặc SFU; sự kiện khởi động vẫn ghi `media_status=not_implemented`. Đã có harness kiểm chứng WebRTC native riêng ở profile `media-probe`, dùng nguồn được tạo bằng mã trong test. Harness này không biến giao diện demo thành cuộc gọi thật. Module không lấy các số RTT/jitter/loss ngẫu nhiên của UI demo làm dữ liệu thực.
+Các nút **Tạo phòng / Tham gia phòng** hiện dẫn vào phòng video native trên giao diện chính; `client_ready` ghi `media_status=video_available` (khả năng của ứng dụng, không khẳng định camera đang phát). Phòng mới hiển thị “Chưa có dữ liệu mạng” khi chưa đo được, không mở NetworkStatsDialog mô phỏng. Các phòng auth cũ giữ luồng trước đây. Module không lấy RTT/jitter/loss ngẫu nhiên của UI demo làm dữ liệu thực. Xem [video-call.md](video-call.md) cho bài native integration và giới hạn.
+
+Go media ghi file `.txt` riêng với vai trò `sfu`, schema v1 và sample `video.engine.sample` mỗi 5 giây: ingress/forwarded codec bytes và packets, queue/drop/PLI/write errors, active peers/leases, Go heap/goroutines. Counter là tích lũy; không đưa thẳng vào MediaSample delta. Keyframe count là số lần writer thử gửi PLI. Go heap không phải RSS. Native test ghi `video.integration.received`: frame callback, cập nhật ảnh và render drop tích lũy; cập nhật WritableImage không chứng minh FPS compositor. `video.revoked` đo vòng RPC thu hồi, không suy ra thời điểm frame cuối xuất hiện ở màn hình.
+
+Reporter nhận các event video và giữ phân biệt từng process. RTT/jitter/loss/native RSS, FPS encode/decode và freeze production chưa đo; vẫn unavailable. `MMR_DIAGNOSTICS_ENABLED=false` tắt cả Go và Java diagnostics, không thay đổi routing.
 
 Khi có engine WebRTC/SFU, adapter gọi `Diagnostics.current().mediaSample(MediaSample)` với số liệu đo được. `MediaSample` nhận mã track dạng số cục bộ, loại AUDIO/VIDEO/SCREEN, độ dài cửa sổ đo, số gói và byte gửi/nhận/mất, RTT, jitter và số frame encode/decode/drop. Không dùng ID hoặc tên người dùng làm mã track.
 
@@ -128,3 +132,13 @@ API `event` kiểm tra tối đa 32 trường đầu vào; key phải đúng d�
 | `MMR_DIAGNOSTICS_QUEUE_CAPACITY` | `1024` | Số sự kiện chờ ghi, từ 8 đến 8192 |
 
 JVM properties tương ứng là `mmr.diagnostics.enabled`, `dir`, `runId`, `sampleSeconds`, `maxBytes`, `queueCapacity`, ưu tiên hơn biến môi trường. Khi so sánh hai phiên bản, giữ cùng cấu hình logger và cùng điều kiện tải. Ghi log cũng dùng tài nguyên; kết quả có logger phải được so sánh với kết quả có cùng chế độ ghi.
+
+## Phòng/signaling Mốc 1
+
+Video client ghi `video.client.operation.failed` với phase cố định `capture`, `preview`, `publish`, `subscribe` hoặc `camera_formats` và code lỗi được allowlist. Báo cáo nhận các phase này; không ghi lỗi native nguyên văn, tên/descriptor camera, SDP/ICE hoặc nội dung hình. Ví dụ `CAMERA_CATALOG_TIMEOUT` ở `camera_formats` cho biết truy vấn metadata thiết bị quá thời hạn; phân biệt với lỗi WebRTC ở `subscribe`. Thông số định dạng được đọc trong Java helper riêng, helper không khởi tạo logger hay bật capture.
+
+Giữ schema `mmr.diagnostics.v1` và filter bí mật hiện tại. `signaling.request.completed` ghi `queue_ms` từ lúc xếp vào business executor tới lúc bắt đầu handler, `handler_ms` là thời gian handler và validate/DB trong cùng tác vụ; gồm cả tác vụ lỗi, không phải RTT mạng. `action` được server ánh xạ theo tập lệnh cố định, loại không biết thành `OTHER`, không ghi request/body/token/PIN/SDP/ICE. `meeting.state` ghi `room_count` và `participant_count` tại thời điểm thay đổi/cleanup; đây là snapshot, không phải delta hoặc công suất SFU.
+
+Report reader nhận những event/metric này và nhóm latency theo action; p50/p95/p99 lấy từ mẫu thời gian gốc. Unknown media vẫn là `null`, Mốc 1 không tự tạo thống kê media. Cả auth, signaling và file service trong `MeetingServerMain` dùng một diagnostics owner; tắt bằng cấu hình logger hiện có.
+
+`signaling.connection.closed` ghi `reason` được ánh xạ theo allowlist (`SESSION_CHECK_TIMEOUT`, `SESSION_CHECK_FAILED`, `SESSION_EXPIRED`, `SESSION_INVALID`, `SESSION_REVOKED`, `AUTH_TIMEOUT`, `SERVER_BUSY`, `REQUEST_TIMEOUT`, `OUTPUT_BACKPRESSURE`, `FRAME_LIMIT`, `SERVER_SHUTDOWN`, `MAT_KET_NOI`, còn lại `OTHER`). Không ghi token/hash phiên hay exception message. Phân biệt việc timeout kiểm tra DB với việc token đã hết hạn.

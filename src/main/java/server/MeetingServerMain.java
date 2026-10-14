@@ -26,28 +26,42 @@ public final class MeetingServerMain {
             try {
                 MeetingSecrets secrets = MeetingSecrets.load();
                 AtomicReference<SignalingServer> signalingReference = new AtomicReference<>();
+                AtomicReference<server.media.VideoCoordinator> videoReference = new AtomicReference<>();
                 Gson json = new Gson();
                 try (RoomService rooms = new RoomService(new RoomRepository(), Clock.systemUTC(), secrets.instanceId(),
                         secrets.receiptKey(), ServerConfig.getInt("meeting.maxParticipants", 10), event -> {
                             SignalingServer server = signalingReference.get();
+                            var video = videoReference.get(); if (video != null) video.roomEvent(event);
                             if (server != null) server.event(event.recipientConnectionId(), event.type(), event.roomId(),
                                     event.revision(), json.toJsonTree(event.body()).getAsJsonObject());
                         })) {
                     rooms.start(); // Preflight/reconcile only; never creates tables.
-                    char[] password = ServerConfig.get("auth.keystorePassword", "changeit").toCharArray();
+                    var transferConfig = server.filetransfer.TransferConfig.load();
+                    if (transferConfig.enabled()) {
+                        try (var connection = server.database.DatabaseConnection.getConnection(); var statement = connection.createStatement()) {
+                            statement.executeQuery("SELECT Transfer_Id, Ma_Tep, Ma_Tin_Nhan, Duong_Dan_Luu_Tru FROM Tep_Dinh_Kem WHERE 1=0").close();
+                            statement.executeQuery("SELECT Ma_Tin_Nhan, Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Ngay_Xoa FROM Tin_Nhan WHERE 1=0").close();
+                        }
+                    }
+                    char[] password = ServerConfig.get("auth.keystorePassword", "changeit-local-only").toCharArray();
                     javax.net.ssl.SSLContext tls;
                     try { tls = TlsSupport.server(Path.of(ServerConfig.get("auth.keystore", "config/auth-dev.p12")), password); }
                     finally { java.util.Arrays.fill(password, '\0'); }
-                    try (SignalingServer signaling = new SignalingServer(tls,
+                    try (var media = server.media.VideoServiceProcess.start();
+                            var video = new server.media.VideoCoordinator(rooms, media.client());
+                            SignalingServer signaling = new SignalingServer(tls,
                             new InetSocketAddress(ServerConfig.get("signaling.bind", "127.0.0.1"), ServerConfig.getInt("signaling.port", 8444)),
-                            new SessionValidator(), new MeetingHandler(rooms), rooms.serverEpoch(),
+                            new SessionValidator(), new MeetingHandler(rooms, video), rooms.serverEpoch(),
                             new SignalingServer.Options(ServerConfig.getInt("signaling.maxConnections", 64),
                                     ServerConfig.getInt("signaling.maxBytes", common.signaling.SignalWire.DEFAULT_MAX_BYTES),
                                     ServerConfig.getInt("signaling.requestsPerSecond", 20)))) {
                         signalingReference.set(signaling);
+                        videoReference.set(video);
                         AuthService auth = new AuthService(hash -> { signaling.revokeSession(hash); rooms.revokeSession(hash); });
                         try (AuthServer authServer = new AuthServer(tls,
-                                new InetSocketAddress(ServerConfig.get("auth.bind", "127.0.0.1"), ServerConfig.getInt("auth.port", 8443)), auth::handle)) {
+                                new InetSocketAddress(ServerConfig.get("auth.bind", "127.0.0.1"), ServerConfig.getInt("auth.port", 8443)),
+                                new ApplicationService(auth, new server.rooms.RoomService(true))::handle);
+                                var files = AuthServer.fileServer(tls, transferConfig)) {
                             Thread shutdown = new Thread(() -> {
                                 try {
                                     signaling.close();
@@ -55,12 +69,18 @@ public final class MeetingServerMain {
                                     try { authServer.close(); }
                                     catch (java.io.IOException failure) {
                                         Diagnostics.current().failure("meeting.auth.close_failed", failure, Map.of("phase", "close"));
-                                    } finally { rooms.close(); }
+                                    } finally {
+                                        try { if (files != null) files.close(); }
+                                        catch (java.io.IOException failure) {
+                                            Diagnostics.current().failure("meeting.files.close_failed", failure, Map.of("phase", "close"));
+                                        } finally { rooms.close(); video.close(); media.close(); server.database.DatabaseConnection.close(); }
+                                    }
                                 }
                             }, "meeting-shutdown");
                             Runtime.getRuntime().addShutdownHook(shutdown);
                             try {
                                 authServer.start(); signaling.start();
+                                if (files != null) files.start();
                                 System.out.println("MMR_MEETING_SERVER_READY");
                                 signaling.awaitTermination();
                             } finally {
@@ -74,7 +94,7 @@ public final class MeetingServerMain {
                 Diagnostics.current().failure("meeting.startup.failed", failure, Map.of("phase", "startup"));
                 System.err.println("MMR_MEETING_STARTUP_FAILED: check reviewed schema, server configuration and ports.");
                 throw new IllegalStateException("MEETING_STARTUP_FAILED");
-            }
+            } finally { server.database.DatabaseConnection.close(); }
         }
     }
 }

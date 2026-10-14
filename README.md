@@ -1,6 +1,6 @@
 # MiniMeetingRoom
 
-Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên và chia sẻ tệp đã kết nối backend. Phòng dùng kênh TCP/TLS auth hiện có; dữ liệu tệp dùng dịch vụ TCP/TLS riêng. Chat văn bản, thiết bị và media vẫn có phần mô phỏng.
+Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên, video call và chia sẻ tệp đã kết nối backend. Form tạo/tham gia có sẵn dùng signaling TCP/TLS cho phòng mới; dữ liệu tệp dùng dịch vụ TCP/TLS riêng với cùng membership. Chat văn bản vẫn là bản xem trước; voice chat và chia sẻ màn hình chưa triển khai.
 
 ## Truyền tệp qua TCP/TLS
 
@@ -8,9 +8,15 @@ Tab **Tệp** hỗ trợ chọn tệp, tải lên/tải xuống theo luồng, ki
 
 Với database đã tồn tại, áp dụng **một lần** [migration 001](database/migrations/001_file_transfer.sql) trước khi bật dịch vụ tệp; server không tự sửa database. Database mới dùng [schema.sql](database/schema.sql), không chạy thêm migration này. Xem [báo cáo, cấu hình, hướng dẫn hai client và giới hạn hiện tại](docs/file-transfer.md). Phần hướng dẫn auth bên dưới vẫn áp dụng; khi dùng tệp qua LAN cần mở thêm cổng TCP 9001 và cấu hình `file.transfer.bind`.
 
-Mốc 0 SFU có [kiến trúc và quyết định engine](docs/sfu-architecture.md), [kết quả/cách chạy kiểm chứng](docs/sfu-testing.md). Native WebRTC chỉ được thêm trong profile thử nghiệm `media-probe`; ứng dụng chưa có cuộc gọi qua SFU. Chuyển media sang runtime riêng cần được chốt trước khi triển khai tiếp.
+Video qua WebRTC/Pion chạy ngay từ **Tạo phòng / Tham gia phòng → trước khi vào phòng → màn hình họp**, không cần nút SFU riêng. Camera xem trước chỉ hiển thị cục bộ; vào phòng mới gửi video nếu bạn đã bật. Năm bài native integration đã kiểm thử 2/3 client với nguồn hình tạo sẵn, gồm hai JVM cùng máy, giao diện chính và gửi/tải tệp trong cùng phòng; camera thật cần người dùng chủ động nghiệm thu. Xem [cách chạy video call](docs/video-call.md), [kiến trúc](docs/sfu-architecture.md) và [kiểm thử](docs/sfu-testing.md).
+
+Camera chỉ hỏi quyền khi nhấn **Bật camera** nếu chưa được cho phép; quyền đã chấp nhận được ghi nhớ trên máy. Từ chối hoặc đóng hộp thoại sẽ không cho vào giao diện họp; có thể nhấn Bật camera để thử lại. Không còn nút Quyền camera/Tìm camera. Phòng chờ bỏ các dòng đếm camera, mô tả kỹ thuật và thông báo tính năng chưa triển khai; chỉ hiện lỗi khi cần. Nút **Ẩn/Hiện thanh công cụ** trong cuộc họp giúp tăng vùng video mà không dừng media. Quyền camera của Windows vẫn cần cho phép ứng dụng desktop truy cập.
+
+Chọn thiết bị ở **Cài đặt** trong cuộc họp; danh sách ẩn các camera ảo OBS/ByteCast và chỉ đếm camera còn lại. Nút **Camera** nhận nhấn liên tục, áp dụng trạng thái cuối cùng thay vì xếp hàng nhiều lần mở thiết bị; thời gian capture/WebRTC vẫn phụ thuộc thiết bị và kết nối. Driver camera đọc chậm được tách khỏi worker nhận video; định dạng có timeout trong Java helper riêng và được tái sử dụng trong phiên để bật lại nhanh hơn. **Sáng/Tối** trong Cài đặt đổi đồng thời giao diện cuộc họp và dialog. Thử hai cửa sổ với một webcam: bật camera ở một cửa sổ, để camera cửa sổ kia tắt để kiểm tra nhận hình. Không cần migration database cho bản sửa này.
 
 ## Chạy trên máy phát triển
+
+Trong NetBeans, **Run File** `src/main/java/server/Main.java` để khởi động toàn bộ server; chờ `MMR_MEETING_SERVER_READY`, sau đó **Run File** `src/main/java/client/Main.java`. `server.Main` dùng cùng bộ khởi động với script dưới đây, bao gồm auth, phòng, signaling, truyền tệp (theo cấu hình) và media video.
 
 Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy trên máy local; database MySQL vẫn ở Railway**. Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans), kết nối tới Railway và các bảng cần thiết trong database hiện có. Không cần khởi động MySQL local. Nếu database đã có đủ bảng thì không chạy lại schema.
 
@@ -18,7 +24,7 @@ Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy tr�
 2. Mở PowerShell tại thư mục dự án và chạy server:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\scripts\start-server.ps1
+   powershell -ExecutionPolicy Bypass -File .\scripts\start-meeting-server.ps1
    ```
 
    Script tự tạo chứng chỉ TLS phát triển nếu chưa có, rồi khởi động `server.AuthServer` tại `127.0.0.1:8443`. Giữ terminal này mở. Server kiểm tra bảng bằng truy vấn chỉ đọc, không tự tạo hay sửa database.

@@ -1,10 +1,26 @@
-# Kiến trúc SFU — cổng kiểm chứng Mốc 0
+# Kiến trúc SFU — phòng, signaling và video
 
 Ngày khảo sát: 14/10/2026. Base commit: `30039612adb101b07858cf808f7cc008aeb26adf`.
 
-**Quyết định runtime: JavaFX và backend Java giữ auth/room/signaling; Go/Pion chịu transport media và router SFU tự viết.** Người dùng đã giao quyền chọn phương án phù hợp. Cổng Mốc 0 đã PASS đường Java publisher → Pion → Java subscriber trên cùng máy với nguồn tạo sẵn, hai WebRTC transport riêng và assertion codec payload giữ nguyên. Mốc 1 đang triển khai; media chưa tích hợp vào ứng dụng. Dependency client thử nghiệm chỉ nằm trong Maven profile `media-probe`; bằng chứng thực thi và giới hạn nằm trong [sfu-testing.md](sfu-testing.md).
+**Quyết định runtime: JavaFX và backend Java giữ auth/room/signaling; Go/Pion chịu transport media và router SFU tự viết.** Người dùng đã giao quyền chọn phương án phù hợp. Mốc 0 và phòng/signaling Mốc 1 đã có bằng chứng thực thi. Theo yêu cầu mới nhất, bước tiếp theo chỉ triển khai video; voice chat và screenshare để sau. Dependency `webrtc-java:0.19.0` đã nằm trong runtime client. Ba client native trao đổi nguồn video tạo sẵn qua engine thật và render JavaFX; chưa nghiệm thu camera vật lý hay mạng LAN/Internet. Xem [video-call.md](video-call.md) và [sfu-testing.md](sfu-testing.md).
 
-## Hiện trạng đã đọc từ repository
+## Mốc 1 sau khi ghép code
+
+Mốc 1 có session validation, RoomService/Repository và TCP/TLS 8444. `MeetingServerMain` giữ auth/phòng/truyền tệp của đồng đội và thêm signaling trong cùng JVM. Form tạo/join có sẵn hiện dùng signaling cho phòng mới rồi vào PreJoinScreen/MeetingScreen; không cần nút SFU riêng. Snapshot chứa RoomInfo do server tạo để FilePanel dùng cùng ID database và membership. LIST_ROOMS đọc cả phòng signaling; kênh auth vẫn chặn GET/JOIN/LEAVE trên các phòng có marker `MMR_Phong_Van_Hanh` để không có hai chủ sở hữu membership. VideoCoordinator nối quyền phòng với Go bằng lease tối đa 15 giây; publish/subscribe/stop/state kiểm tra phiên và membership. Không thêm schema cho video.
+
+## Luồng video hiện đã tích hợp
+
+```mermaid
+flowchart LR
+    C[JavaFX + webrtc-java] -->|TCP TLS: auth và signaling| S[Java backend]
+    S -->|phiên, phòng, lịch sử| DB[(MySQL Railway)]
+    S -->|loopback HTTP + secret: lease và SDP| G[Go/Pion + router tự viết]
+    C <-->|ICE + DTLS SRTP: VP8| G
+```
+
+MeetingSession sở hữu VideoCallController; view chỉ mượn mailbox/binding. Pre-join có track xem trước cục bộ; vào MeetingScreen mới dựng PC publish nếu người dùng đã bật camera. Chuyển view chỉ gỡ binding, giữ capture owner. Client có một PC gửi camera và một PC nhận cho mỗi nguồn khác; full ICE gathering, client offer owner, không renegotiate cùng PC. Go giữ publication/lease/route trong RAM, forward codec payload với queue riêng từng receiver, RTCP keyframe qua worker riêng. Java quản lý child process và shutdown. Callback native giữ/release frame đúng vòng đời, chuyển I420 sang RGB ngoài FX thread; mailbox hữu hạn cập nhật ảnh tối đa 10 lần/giây. Thiết bị chỉ mở sau thao tác bật camera. Logout/leave/kick thu hồi quyền; mất kết nối không tự bật camera lại. Chi tiết giới hạn trong [video-call.md](video-call.md).
+
+## Hiện trạng lúc khảo sát Mốc 0
 
 | Thành phần | Trạng thái thực tế |
 |---|---|
@@ -49,7 +65,9 @@ Lựa chọn giữ một JVM cần tự làm JNI packet bridge hoặc kiểm ch�
 
 Việc chọn runtime đáp ứng mục 3.6 của [prompt](sfu-build-prompt.md). Đường chuyển tiếp qua engine đã chạy thành công ở cổng Mốc 0 với một publisher/một subscriber; kết quả này cho phép bắt đầu Mốc 1 theo thứ tự, chưa nghiệm thu Mốc 2–4.
 
-## Luồng sản phẩm dự kiến (chưa triển khai)
+## Thiết kế ban đầu Mốc 0 (lưu để đối chiếu)
+
+Phần dưới mô tả kế hoạch tại thời điểm khảo sát; hiện trạng video ở mục trên và `video-call.md` thay thế những nhận xét “chưa triển khai” bên dưới. Audio, screenshare, reconnect/ICE restart và tải dài hạn vẫn chưa được nghiệm thu.
 
 ```mermaid
 flowchart LR
