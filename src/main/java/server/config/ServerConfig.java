@@ -27,7 +27,7 @@ public final class ServerConfig {
 
     public static String get(String key, String fallback) {
         String environmentName = ENVIRONMENT_KEYS.getOrDefault(key,
-                "MMR_" + key.replace('.', '_').toUpperCase(Locale.ROOT));
+                "MMR_" + key.replace('.', '_').replace('-', '_').toUpperCase(Locale.ROOT));
         String environmentValue = System.getenv(environmentName);
         return environmentValue != null ? environmentValue : FILE_PROPERTIES.getProperty(key, fallback);
     }

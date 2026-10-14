@@ -147,6 +147,8 @@ CREATE TABLE Thanh_Vien_Phong (
         'MAT_KET_NOI'
     ) NULL,
 
+    INDEX IX_ThanhVienPhong_QuyenTep (Ma_Phong, Ma_Nguoi_Dung, Roi_Phong_Luc),
+
     CONSTRAINT FK_ThanhVienPhong_Phong
         FOREIGN KEY (Ma_Phong)
         REFERENCES Phong_Hop(Ma_Phong)
@@ -187,6 +189,8 @@ CREATE TABLE Tin_Nhan (
 
     Ngay_Xoa TIMESTAMP NULL,
 
+    INDEX IX_TinNhan_PhongTep (Ma_Phong, Ma_Tin_Nhan),
+
     CONSTRAINT FK_TinNhan_Phong
         FOREIGN KEY (Ma_Phong)
         REFERENCES Phong_Hop(Ma_Phong)
@@ -222,7 +226,13 @@ CREATE TABLE Tep_Dinh_Kem (
 
     Ma_Kiem_Tra VARCHAR(128),
 
+    -- Only verified files are published here; retries reuse this transfer identifier.
+    Transfer_Id VARCHAR(36) NULL,
+
     Ngay_Tao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT UQ_TepDinhKem_Transfer
+        UNIQUE (Transfer_Id),
 
     CONSTRAINT FK_TepDinhKem_TinNhan
         FOREIGN KEY (Ma_Tin_Nhan)

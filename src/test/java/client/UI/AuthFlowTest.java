@@ -2,7 +2,11 @@ package client.UI;
 
 import client.UI.screens.AuthScreen;
 import client.UI.screens.LobbyScreen;
+import client.UI.screens.PreJoinScreen;
+import client.UI.screens.MeetingScreen;
+import client.UI.screens.MeetingEndedScreen;
 import client.auth.AuthClient;
+import client.filetransfer.FileTransferClient;
 import common.auth.AuthResponse;
 import common.auth.TlsSupport;
 import java.awt.image.BufferedImage;
@@ -35,6 +39,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TabPane;
 import javafx.scene.image.WritableImage;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -44,8 +49,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import server.AuthServer;
+import server.ApplicationService;
+import server.rooms.RoomService;
 import server.auth.AuthService;
 import server.auth.PasswordHasher;
+import server.filetransfer.FileMetadataRepository;
+import server.filetransfer.FileStorageService;
+import server.filetransfer.FileTransferServer;
+import server.filetransfer.TransferConfig;
 import support.FxTestRuntime;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -97,6 +108,8 @@ class AuthFlowTest {
                 """);
         AuthService service = new AuthService(() -> DriverManager.getConnection(database), new PasswordHasher(),
                 Clock.systemUTC(), Duration.ofHours(24));
+        ApplicationService application = new ApplicationService(service,
+                new RoomService(() -> DriverManager.getConnection(database), new PasswordHasher(), Clock.systemUTC()));
         server = new AuthServer(serverTls, new InetSocketAddress("127.0.0.1", 0), request -> {
             if ("LIST_ROOMS".equals(request.action())) {
                 return AuthResponse.roomsOk("Đã tải danh sách phòng.", List.of());
@@ -113,7 +126,7 @@ class AuthFlowTest {
                     return AuthResponse.error("TEST_INTERRUPTED", "Test server interrupted");
                 }
             }
-            return service.handle(request);
+            return application.handle(request);
         });
         server.start();
         fx(() -> {
@@ -234,6 +247,88 @@ class AuthFlowTest {
         });
         assertEquals(1, count("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NOT NULL"));
         assertEquals(List.of("REGISTER", "LOGIN", "LOGIN", "LOGIN", "LOGOUT"), actions);
+    }
+
+    @Test
+    void roomNavigationAndExistingFileTabUseRealTlsMembershipAndMetadata() throws Exception {
+        createRoomTables();
+        TransferConfig config = new TransferConfig(true, "127.0.0.1", 0, 65536, 4, 2, 5000,
+                temporary.resolve("ui-storage-" + UUID.randomUUID()), 1024 * 1024, 8 * 1024 * 1024, 4, Duration.ofHours(1), true);
+        FileMetadataRepository repository = new FileMetadataRepository(() -> DriverManager.getConnection(database));
+        FileStorageService storage = new FileStorageService(config.storagePath(), config.quotaBytes(), config.maxFileBytes(), 4, config.expiry(), true);
+        try (FileTransferServer fileServer = new FileTransferServer(serverTls, config, repository, storage)) {
+            fileServer.start();
+            AuthClient auth = new AuthClient("localhost", server.port(), clientTls, 5000);
+            registrationRelease.countDown(); assertTrue(auth.register("FileUser", "Người chia sẻ", null, PASSWORD).success());
+            AuthResponse login = auth.login("FileUser", PASSWORD); assertTrue(login.success());
+            FileTransferClient transfers = new FileTransferClient("localhost", fileServer.port(), clientTls, 5000);
+            fx(() -> {
+                manager.shutdown(); manager = new SceneManager(stage, auth, transfers); manager.acceptSession(login); manager.lobby();
+                manager.createRoom("Phòng kiểm thử tệp", "1234", 10, false);
+                assertTrue(root().isDisabled()); return null;
+            });
+            awaitFx(() -> root() instanceof PreJoinScreen);
+            long roomId = fx(() -> manager.serverRoom().id());
+            assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+            Path source = temporary.resolve("Báo cáo UI.pdf"); Files.writeString(source, "File transferred through TLS for UI metadata test.");
+            var cancellation = new FileTransferClient.Cancellation();
+            var upload = transfers.prepareUpload(roomId, source, UUID.randomUUID(), cancellation, null);
+            transfers.upload(login.token(), upload, cancellation, null);
+            fx(() -> {
+                manager.meeting(); root().applyCss(); root().layout();
+                TabPane tabs = nodes(root()).filter(TabPane.class::isInstance).map(TabPane.class::cast).findFirst().orElseThrow();
+                tabs.getSelectionModel().select(2); root().applyCss(); root().layout(); return null;
+            });
+            awaitFx(() -> root() instanceof MeetingScreen && hasLabel("Báo cáo UI.pdf") && hasLabel("Sẵn sàng tải"));
+            snapshotMeeting();
+            fx(() -> { assertFalse(stage.isShowing()); manager.ended(5, 1); return null; });
+            awaitFx(() -> root() instanceof MeetingEndedScreen);
+            assertEquals(0, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+            assertEquals(1, count("SELECT COUNT(*) FROM Tep_Dinh_Kem"));
+            fx(() -> { manager.logout(); return null; });
+            awaitFx(() -> root() instanceof AuthScreen);
+            assertEquals(1, count("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NOT NULL"));
+        }
+    }
+
+    @Test
+    void logoutFromJoinedRoomLeavesViaAuthChannelBeforeRevokingSession() throws Exception {
+        createRoomTables(); registrationRelease.countDown();
+        AuthClient auth = new AuthClient("localhost", server.port(), clientTls, 5000);
+        assertTrue(auth.register("LogoutRoomUser", "Người đăng xuất", null, PASSWORD).success());
+        AuthResponse login = auth.login("LogoutRoomUser", PASSWORD);
+        var created = auth.createRoom(login.token(), "Phòng đăng xuất", "1234", 10);
+        assertTrue(created.success());
+        fx(() -> {
+            manager.acceptSession(login); manager.preJoin(created.room());
+            assertTrue(manager.isRoomJoined()); manager.logout();
+            assertTrue(manager.logoutPendingProperty().get()); return null;
+        });
+        awaitFx(() -> root() instanceof AuthScreen && !manager.logoutPendingProperty().get());
+        assertEquals(0, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NOT NULL"));
+        assertEquals(List.of("REGISTER", "LOGIN", "CREATE_ROOM", "LEAVE_ROOM", "LOGOUT"), actions);
+        fx(() -> { assertFalse(manager.isRoomJoined()); assertNull(manager.roomInfo()); assertNull(manager.sessionToken()); return null; });
+    }
+
+    private void createRoomTables() throws Exception {
+        String schema = Files.readString(Path.of("database/schema.sql"))
+                .replaceAll("(?m)^\\s*--.*$", "")
+                .replaceFirst("(?s)CREATE DATABASE IF NOT EXISTS Mini_Meeting_Room.*?;", "")
+                .replace("USE Mini_Meeting_Room;", "").replace("ENGINE = InnoDB", "");
+        for (String sql : schema.split(";")) if (!sql.isBlank()
+                && !sql.strip().startsWith("CREATE TABLE Nguoi_Dung") && !sql.strip().startsWith("CREATE TABLE Phien_Dang_Nhap")) execute(sql);
+    }
+
+    private void snapshotMeeting() throws Exception {
+        WritableImage image = fx(() -> {
+            Parent view = root(); view.resize(1280, 800); view.setOpacity(1); view.applyCss(); view.layout();
+            return view.snapshot(new SnapshotParameters(), null);
+        });
+        BufferedImage png = new BufferedImage((int) image.getWidth(), (int) image.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < png.getHeight(); y++) for (int x = 0; x < png.getWidth(); x++) png.setRGB(x, y, image.getPixelReader().getArgb(x, y));
+        Path output = Path.of("target", "qa", "file-tab.png"); Files.createDirectories(output.getParent());
+        assertTrue(ImageIO.write(png, "png", output.toFile()));
     }
 
     private Parent root() { return stage.getScene().getRoot(); }

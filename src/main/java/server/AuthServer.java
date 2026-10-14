@@ -33,6 +33,10 @@ import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import server.config.ServerConfig;
 import server.database.DatabaseConnection;
+import server.filetransfer.FileMetadataRepository;
+import server.filetransfer.FileStorageService;
+import server.filetransfer.FileTransferServer;
+import server.filetransfer.TransferConfig;
 
 /** TLS/TCP authentication server. One bounded JSON request per connection. */
 public final class AuthServer implements AutoCloseable {
@@ -210,6 +214,7 @@ public final class AuthServer implements AutoCloseable {
     public static void main(String[] args) {
         Diagnostics diagnostics = Diagnostics.start("server");
         AtomicReference<AuthServer> runningServer = new AtomicReference<>();
+        AtomicReference<FileTransferServer> runningFiles = new AtomicReference<>();
         AtomicBoolean cleanupStarted = new AtomicBoolean();
         Runnable cleanup = () -> {
             if (!cleanupStarted.compareAndSet(false, true)) return;
@@ -219,6 +224,9 @@ public final class AuthServer implements AutoCloseable {
             } catch (IOException error) {
                 diagnostics.failure("server.shutdown.failed", error, Map.of());
             } finally {
+                FileTransferServer files = runningFiles.get();
+                if (files != null) try { files.close(); }
+                catch (IOException error) { diagnostics.failure("server.file_shutdown.failed", error, Map.of()); }
                 diagnostics.close();
             }
         };
@@ -235,6 +243,7 @@ public final class AuthServer implements AutoCloseable {
             hookRegistered = true;
             bindAddress = ServerConfig.get("auth.bind", bindAddress);
             port = ServerConfig.getInt("auth.port", port);
+            TransferConfig transferConfig = TransferConfig.load();
             startupStep = "kết nối MySQL và kiểm tra bảng";
             startupPhase = "database_preflight";
             long databaseAt = System.nanoTime();
@@ -244,6 +253,10 @@ public final class AuthServer implements AutoCloseable {
                 statement.executeQuery("SELECT Ma_Phien, Ma_Nguoi_Dung, Token_Bam, Het_Han_Luc, Thu_Hoi_Luc FROM Phien_Dang_Nhap WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Phong, Ma_Phong_Tham_Gia, Ten_Phong, Ma_PIN_Bam, Ma_Chu_Phong, Trang_Thai, Da_Khoa, So_Nguoi_Toi_Da, Ngay_Tao, Ngay_Dong FROM Phong_Hop WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Thanh_Vien_Phong, Ma_Phong, Ma_Nguoi_Dung, Vai_Tro, Tham_Gia_Luc, Roi_Phong_Luc, Ly_Do_Roi FROM Thanh_Vien_Phong WHERE 1=0").close();
+                if (transferConfig.enabled()) {
+                    statement.executeQuery("SELECT Transfer_Id, Ma_Tep, Ma_Tin_Nhan, Duong_Dan_Luu_Tru FROM Tep_Dinh_Kem WHERE 1=0").close();
+                    statement.executeQuery("SELECT Ma_Tin_Nhan, Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Ngay_Xoa FROM Tin_Nhan WHERE 1=0").close();
+                }
             }
             diagnostics.event("server.startup.database_checked", Map.of("database_ms", elapsedMillis(databaseAt)));
             startupStep = "nạp chứng chỉ TLS";
@@ -259,7 +272,14 @@ public final class AuthServer implements AutoCloseable {
             AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port),
                     new ApplicationService()::handle);
             runningServer.set(server);
+            startupPhase = "file_listener_bind";
+            FileTransferServer files = fileServer(tls, transferConfig);
+            runningFiles.set(files);
             server.start();
+            if (files != null) {
+                files.start();
+                System.out.println("File transfer TCP/TLS đã sẵn sàng tại " + transferConfig.bind() + ":" + files.port());
+            }
             diagnostics.event("server.startup.completed", Map.of("port", server.port(), "startup_ms", elapsedMillis(startupAt)));
             System.out.println("Auth server TLS đã sẵn sàng tại " + listenerAddress(server));
             startupPhase = "listener_run";
@@ -269,7 +289,7 @@ public final class AuthServer implements AutoCloseable {
                     Map.of("phase", startupPhase, "port", port, "total_ms", elapsedMillis(startupAt)));
             System.err.println("Không thể mở auth server tại " + bindAddress + ":" + port
                     + " (BindException: " + e.getMessage() + ").");
-            System.err.println("Cổng có thể đã được một server khác sử dụng hoặc auth.bind không phải địa chỉ của máy này."
+            System.err.println("Kiểm tra cổng auth/file.transfer.port và địa chỉ bind: cổng có thể đã được server khác sử dụng."
                     + " Nếu auth server đã chạy, chỉ cần chạy client; để khởi động lại, hãy dừng server cũ trước.");
             exitCode = 1;
         } catch (SQLException e) {
@@ -277,7 +297,8 @@ public final class AuthServer implements AutoCloseable {
                     Map.of("phase", startupPhase, "total_ms", elapsedMillis(startupAt)));
             System.err.println("Không khởi động được auth server ở bước kết nối MySQL/kiểm tra bảng"
                     + " (SQLState=" + e.getSQLState() + "). Kiểm tra db.url, db.user, db.password"
-                    + " trong config/auth-server.properties hoặc các biến MMR_DB_*.");
+                    + " trong config/auth-server.properties hoặc các biến MMR_DB_*."
+                    + " Nếu thiếu Transfer_Id, áp dụng database/migrations/001_file_transfer.sql trước khi bật file transfer.");
             exitCode = 1;
         } catch (Exception e) {
             diagnostics.failure("server.startup.failed", e,
@@ -334,5 +355,13 @@ public final class AuthServer implements AutoCloseable {
 
     private static String listenerAddress(AuthServer server) {
         return server.listener.getInetAddress().getHostAddress() + ":" + server.port();
+    }
+
+    private static FileTransferServer fileServer(SSLContext tls, TransferConfig config) throws IOException {
+        if (!config.enabled()) return null;
+        FileStorageService storage = new FileStorageService(config.storagePath(), config.quotaBytes(),
+                config.maxFileBytes(), config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());
+        try { return new FileTransferServer(tls, config, new FileMetadataRepository(), storage); }
+        catch (IOException | RuntimeException e) { storage.close(); throw e; }
     }
 }

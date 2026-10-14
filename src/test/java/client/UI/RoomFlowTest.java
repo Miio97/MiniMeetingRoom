@@ -4,11 +4,13 @@ import client.UI.dialogs.CreateRoomDialog;
 import client.UI.screens.LobbyScreen;
 import client.UI.screens.MeetingScreen;
 import client.UI.screens.PreJoinScreen;
+import client.filetransfer.FileTransferClient;
 import common.auth.AuthResponse;
 import common.room.RoomInfo;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -22,6 +24,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TabPane;
 import javafx.scene.image.WritableImage;
 import javafx.stage.Stage;
 import org.junit.jupiter.api.AfterEach;
@@ -32,6 +35,10 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import support.FxTestRuntime;
 import support.RoomTestFixture;
+import server.filetransfer.FileMetadataRepository;
+import server.filetransfer.FileStorageService;
+import server.filetransfer.FileTransferServer;
+import server.filetransfer.TransferConfig;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Existing forms drive production room commands through TLS without opening visible windows. */
@@ -40,6 +47,9 @@ class RoomFlowTest {
     @TempDir static Path temporary;
     private static RoomTestFixture.Tls tls;
     private RoomTestFixture fixture;
+    private FileStorageService fileStorage;
+    private FileTransferServer fileServer;
+    private FileTransferClient fileClient;
     private SceneManager manager;
     private Stage stage;
     private CreateRoomDialog dialog;
@@ -71,11 +81,33 @@ class RoomFlowTest {
             }
         });
         host = fixture.account("HostUser", "Chủ phòng Khoa");
+        startFileService();
+    }
+
+    private void startFileService() throws Exception {
+        // The meeting screen starts file polling even when the test only exercises room controls.
+        // Keep that traffic on the same temporary database and TLS certificates as the room fixture.
+        String schema = Files.readString(Path.of("database/schema.sql"))
+                .replaceAll("(?m)^\\s*--.*$", "").replace("ENGINE = InnoDB", "");
+        for (String sql : schema.split(";")) {
+            String statement = sql.strip();
+            if (statement.startsWith("CREATE TABLE Tin_Nhan") || statement.startsWith("CREATE TABLE Tep_Dinh_Kem")) {
+                fixture.execute(statement);
+            }
+        }
+        TransferConfig config = new TransferConfig(true, "127.0.0.1", 0, 65536, 2, 1, 5000,
+                Files.createTempDirectory(temporary, "room-ui-storage-"), 1024 * 1024, 8 * 1024 * 1024,
+                2, Duration.ofHours(1), true);
+        fileStorage = new FileStorageService(config.storagePath(), config.quotaBytes(), config.maxFileBytes(),
+                config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());
+        fileServer = new FileTransferServer(tls.server(), config, new FileMetadataRepository(fixture::connection), fileStorage);
+        fileServer.start();
+        fileClient = new FileTransferClient("localhost", fileServer.port(), tls.client(), 5000);
     }
 
     private void hiddenClient(AuthResponse session) throws Exception {
         FxTestRuntime.call(() -> {
-            stage = new Stage(); manager = new SceneManager(stage, fixture.client());
+            stage = new Stage(); manager = new SceneManager(stage, fixture.client(), fileClient);
             manager.acceptSession(session); manager.lobby();
             root().applyCss(); root().layout(); assertFalse(stage.isShowing()); return null;
         });
@@ -89,7 +121,13 @@ class RoomFlowTest {
             if (manager != null) FxTestRuntime.call(() -> {
                 if (dialog != null) dialog.close(); manager.shutdown(); stage.hide(); return null;
             });
-        } finally { if (fixture != null) fixture.close(); }
+        } finally {
+            try {
+                if (fileClient != null) fileClient.close();
+                if (fileServer != null) fileServer.close();
+                else if (fileStorage != null) fileStorage.close(); // Constructor failure still releases the storage lock.
+            } finally { if (fixture != null) fixture.close(); }
+        }
     }
 
     @Test
@@ -135,6 +173,10 @@ class RoomFlowTest {
         snapshot("room-prejoin.png", root(), 1100, 700);
         FxTestRuntime.call(() -> { node(root(), "enter-meeting", Button.class).fire(); return null; });
         FxTestRuntime.await(() -> root() instanceof MeetingScreen);
+        FxTestRuntime.await(() -> {
+            TabPane tabs = nodes(root()).filter(TabPane.class::isInstance).map(TabPane.class::cast).findFirst().orElseThrow();
+            return hasLabel((Parent) tabs.getTabs().get(2).getContent(), "Chưa có tệp trong phòng.");
+        });
         FxTestRuntime.call(() -> {
             assertTrue(hasLabel(root(), "1/10 người")); assertFalse(hasLabel(root(), "UI DEMO"));
             assertFalse(stage.isShowing()); return null;
