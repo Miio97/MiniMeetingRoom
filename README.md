@@ -8,6 +8,8 @@ Tab **Tệp** hỗ trợ chọn tệp, tải lên/tải xuống theo luồng, ki
 
 Với database đã tồn tại, áp dụng **một lần** [migration 001](database/migrations/001_file_transfer.sql) trước khi bật dịch vụ tệp; server không tự sửa database. Database mới dùng [schema.sql](database/schema.sql), không chạy thêm migration này. Xem [báo cáo, cấu hình, hướng dẫn hai client và giới hạn hiện tại](docs/file-transfer.md). Phần hướng dẫn auth bên dưới vẫn áp dụng; khi dùng tệp qua LAN cần mở thêm cổng TCP 9001 và cấu hình `file.transfer.bind`.
 
+Mốc 0 SFU có [kiến trúc và quyết định engine](docs/sfu-architecture.md), [kết quả/cách chạy kiểm chứng](docs/sfu-testing.md). Native WebRTC chỉ được thêm trong profile thử nghiệm `media-probe`; ứng dụng chưa có cuộc gọi qua SFU. Chuyển media sang runtime riêng cần được chốt trước khi triển khai tiếp.
+
 ## Chạy trên máy phát triển
 
 Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy trên máy local; database MySQL vẫn ở Railway**. Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans), kết nối tới Railway và các bảng cần thiết trong database hiện có. Không cần khởi động MySQL local. Nếu database đã có đủ bảng thì không chạy lại schema.

@@ -1,0 +1,10 @@
+# Add public settings to auth-server.properties / auth-client.properties as appropriate.
+# The existing ignored server config keeps Railway credentials and TLS private keys.
+signaling.bind=127.0.0.1
+signaling.host=localhost
+signaling.port=8444
+signaling.maxBytes=131072
+meeting.maxParticipants=10
+# Capacity is a server policy for initial tests, not a measured SFU capacity.
+# Stable server instance + request HMAC key are generated in ignored meeting-server.private.properties.
+# Never copy that private file, the auth server config or keystore to a client.
