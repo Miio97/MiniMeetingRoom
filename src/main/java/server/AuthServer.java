@@ -27,6 +27,10 @@ import javax.net.ssl.SSLSocket;
 import server.auth.AuthService;
 import server.config.ServerConfig;
 import server.database.DatabaseConnection;
+import server.filetransfer.FileMetadataRepository;
+import server.filetransfer.FileStorageService;
+import server.filetransfer.FileTransferServer;
+import server.filetransfer.TransferConfig;
 
 /** TLS/TCP authentication server. One bounded JSON request per connection. */
 public final class AuthServer implements AutoCloseable {
@@ -130,11 +134,17 @@ public final class AuthServer implements AutoCloseable {
         try {
             bindAddress = ServerConfig.get("auth.bind", bindAddress);
             port = ServerConfig.getInt("auth.port", port);
+            TransferConfig transferConfig = TransferConfig.load();
             startupStep = "kết nối MySQL và kiểm tra bảng";
             // Read-only preflight: never create or alter the user's existing database.
             try (Connection connection = DatabaseConnection.getConnection(); Statement statement = connection.createStatement()) {
                 statement.executeQuery("SELECT Ma_Nguoi_Dung, Ten_Dang_Nhap, Mat_Khau_Bam, Ten_Hien_Thi, Email, Trang_Thai, Lan_Dang_Nhap_Cuoi FROM Nguoi_Dung WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Phien, Ma_Nguoi_Dung, Token_Bam, Het_Han_Luc, Thu_Hoi_Luc FROM Phien_Dang_Nhap WHERE 1=0").close();
+                if (transferConfig.enabled()) {
+                    statement.executeQuery("SELECT Transfer_Id, Ma_Tep, Ma_Tin_Nhan, Duong_Dan_Luu_Tru FROM Tep_Dinh_Kem WHERE 1=0").close();
+                    statement.executeQuery("SELECT Ma_Phong, Ma_PIN_Bam, Da_Khoa FROM Phong_Hop WHERE 1=0").close();
+                    statement.executeQuery("SELECT Ma_Phong, Ma_Nguoi_Dung, Roi_Phong_Luc FROM Thanh_Vien_Phong WHERE 1=0").close();
+                }
             }
             startupStep = "nạp chứng chỉ TLS";
             char[] password = ServerConfig.get("auth.keystorePassword", "changeit-local-only").toCharArray();
@@ -142,24 +152,31 @@ public final class AuthServer implements AutoCloseable {
             try { tls = TlsSupport.server(Path.of(ServerConfig.get("auth.keystore", "config/auth-dev.p12")), password); }
             finally { Arrays.fill(password, '\0'); }
             startupStep = "mở cổng TCP/TLS";
-            AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port),
-                    new AuthService()::handle);
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                try { server.close(); } catch (IOException ignored) { }
-            }, "auth-shutdown"));
-            server.start();
-            System.out.println("Auth server TLS đã sẵn sàng tại " + listenerAddress(server));
-            server.awaitTermination();
+            try (AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port), new AuthService()::handle);
+                    FileTransferServer files = fileServer(tls, transferConfig)) {
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    try { server.close(); } catch (IOException e) { System.err.println("Auth shutdown: " + e.getClass().getSimpleName()); }
+                    if (files != null) try { files.close(); } catch (IOException e) { System.err.println("File shutdown: " + e.getClass().getSimpleName()); }
+                }, "meeting-shutdown"));
+                server.start();
+                if (files != null) {
+                    files.start();
+                    System.out.println("File transfer TCP/TLS đã sẵn sàng tại " + transferConfig.bind() + ":" + files.port());
+                }
+                System.out.println("Auth server TLS đã sẵn sàng tại " + listenerAddress(server));
+                server.awaitTermination();
+            }
         } catch (BindException e) {
-            System.err.println("Không thể mở auth server tại " + bindAddress + ":" + port
-                    + " (BindException: " + e.getMessage() + ").");
-            System.err.println("Cổng có thể đã được một server khác sử dụng hoặc auth.bind không phải địa chỉ của máy này."
+            System.err.println("Không thể mở cổng server (auth=" + bindAddress + ":" + port
+                    + ", BindException: " + e.getMessage() + ").");
+            System.err.println("Cổng auth hoặc file.transfer.port có thể đã được server khác sử dụng; kiểm tra địa chỉ bind."
                     + " Nếu auth server đã chạy, chỉ cần chạy client; để khởi động lại, hãy dừng server cũ trước.");
             System.exit(1);
         } catch (SQLException e) {
             System.err.println("Không khởi động được auth server ở bước kết nối MySQL/kiểm tra bảng"
                     + " (SQLState=" + e.getSQLState() + "). Kiểm tra db.url, db.user, db.password"
-                    + " trong config/auth-server.properties hoặc các biến MMR_DB_*.");
+                    + " trong config/auth-server.properties hoặc các biến MMR_DB_*."
+                    + " Nếu chưa có Transfer_Id, chạy database/migrations/001_file_transfer.sql trước khi bật file transfer.");
             System.exit(1);
         } catch (Exception e) {
             System.err.println("Không khởi động được auth server ở bước " + startupStep
@@ -171,5 +188,13 @@ public final class AuthServer implements AutoCloseable {
 
     private static String listenerAddress(AuthServer server) {
         return server.listener.getInetAddress().getHostAddress() + ":" + server.port();
+    }
+
+    private static FileTransferServer fileServer(SSLContext tls, TransferConfig config) throws IOException {
+        if (!config.enabled()) return null;
+        FileStorageService storage = new FileStorageService(config.storagePath(), config.quotaBytes(),
+                config.maxFileBytes(), config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());
+        try { return new FileTransferServer(tls, config, new FileMetadataRepository(), storage); }
+        catch (IOException | RuntimeException e) { storage.close(); throw e; }
     }
 }

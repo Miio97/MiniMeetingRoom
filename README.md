@@ -1,12 +1,18 @@
 # MiniMeetingRoom
 
-Ứng dụng desktop Java 21/JavaFX. Đăng ký, đăng nhập và đăng xuất đã kết nối MySQL qua server TCP/TLS riêng. Các chức năng phòng họp, chat, thiết bị và media hiện vẫn dùng dữ liệu demo.
+Ứng dụng desktop Java 21/JavaFX. Đăng ký, đăng nhập và đăng xuất đã kết nối MySQL qua server TCP/TLS riêng. Tạo/tham gia/rời phòng và chia sẻ tệp đã được nối với backend; chat văn bản, danh sách người tham gia, thiết bị và media vẫn có phần mô phỏng.
+
+## Truyền tệp qua TCP/TLS
+
+Tab **Tệp** hỗ trợ chọn tệp, tải lên/tải xuống theo luồng, kiểm tra SHA-256, tiến độ, tạm dừng, tiếp tục và hủy. Server kiểm tra phiên cùng quyền thành viên phòng; client cùng phòng cập nhật metadata mỗi 3 giây. `server.AuthServer` hiện khởi động cả auth trên cổng **8443** và dịch vụ tệp riêng trên cổng **9001**.
+
+Với database đã tồn tại, áp dụng **một lần** [migration 001](database/migrations/001_file_transfer.sql) trước khi bật dịch vụ tệp; server không tự sửa database. Database mới dùng [schema.sql](database/schema.sql), không chạy thêm migration này. Xem [báo cáo, cấu hình, hướng dẫn hai client và giới hạn hiện tại](docs/file-transfer.md). Phần hướng dẫn auth bên dưới vẫn áp dụng; khi dùng tệp qua LAN cần mở thêm cổng TCP 9001 và cấu hình `file.transfer.bind`.
 
 ## Chạy trên máy phát triển
 
-Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans) và MySQL có các bảng trong `database/schema.sql`. Nếu database đã có đủ bảng thì không chạy lại schema.
+Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy trên máy local; database MySQL vẫn ở Railway**. Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans), kết nối tới Railway và các bảng cần thiết trong database hiện có. Không cần khởi động MySQL local. Nếu database đã có đủ bảng thì không chạy lại schema.
 
-1. Cấu hình database trong `config/auth-server.properties`. File này chỉ nằm trên máy server và được Git bỏ qua. Bản mẫu là `config/auth-server.properties.example`. Kết nối có sẵn trong dự án đã được chuyển sang file cục bộ này.
+1. Giữ thông tin Railway hiện có trong các khóa `db.url`, `db.user`, `db.password` của `config/auth-server.properties`. File chỉ nằm trên máy chạy server và được Git bỏ qua. `db.url` dùng dạng `jdbc:mysql://<host-public>:<port>/<database>?sslMode=REQUIRED` với host, port và tên database thực tế của Railway. Bản mẫu `config/auth-server.properties.example` dùng placeholder để không chứa thông tin đăng nhập thật; không chép đè cấu hình đang hoạt động bằng placeholder. Client kết nối `localhost`; server lắng nghe `127.0.0.1` trên các cổng 8443 và 9001. Client không chứa thông tin đăng nhập database.
 2. Mở PowerShell tại thư mục dự án và chạy server:
 
    ```powershell
@@ -34,11 +40,11 @@ Quy tắc đăng ký được dùng chung ở giao diện và server. Server ki�
 
 `BindException` ở `127.0.0.1:8443` thường có nghĩa là auth server đã chạy trong terminal hoặc NetBeans khác. Mỗi địa chỉ/cổng chỉ dùng cho một auth server đang lắng nghe. Nếu server đã sẵn sàng, chỉ chạy client; nếu cần khởi động lại, dừng server cũ bằng **Stop** trong NetBeans hoặc **Ctrl+C** ở terminal server trước. Nếu đã cấu hình `auth.bind` khác, kiểm tra địa chỉ đó thuộc máy đang chạy server.
 
-`DatabaseConnection` kết nối tới MySQL Railway bằng cấu hình trong `config/auth-server.properties`; `TestDatabase` chỉ kiểm tra kết nối và các bảng. Auth server mở một cổng TCP/TLS riêng cho client, rồi sử dụng `DatabaseConnection` để truy vấn Railway. Thông báo lỗi khởi động phân biệt bước MySQL, chứng chỉ TLS và mở cổng.
+`DatabaseConnection` của server local kết nối tới MySQL Railway theo cấu hình trong `config/auth-server.properties`. `TestDatabase` chỉ kiểm tra kết nối và các bảng. Client gọi server local qua TCP/TLS; chỉ server sử dụng JDBC để truy vấn Railway. Thông báo lỗi khởi động phân biệt bước MySQL, chứng chỉ TLS và mở cổng. Việc không có listener MySQL ở `localhost:3306` không ảnh hưởng mô hình này.
 
 ## Cấu hình kết nối
 
-Server đọc `config/auth-server.properties`; đổi đường dẫn bằng JVM property `-Dmmr.server.config=...`. Client đọc `config/auth-client.properties` nếu có; bản mẫu là `config/auth-client.properties.example`, JVM property là `-Dmmr.client.config=...`. Đường dẫn tương đối tính từ thư mục chạy dự án. File `.env` không được tự động nạp.
+Server đọc `config/auth-server.properties`; đổi đường dẫn bằng JVM property `-Dmmr.server.config=...`. Client đọc `config/auth-client.properties` nếu có; bản mẫu là `config/auth-client.properties.example`, JVM property là `-Dmmr.client.config=...`. Đường dẫn tương đối tính từ thư mục chạy dự án. File `.env` không được tự động nạp. Các biến `MMR_DB_*` nếu đã đặt sẽ ưu tiên hơn file; khởi động lại server sau khi chỉnh cấu hình vì file được nạp một lần khi tiến trình khởi tạo.
 
 | Biến môi trường | Ý nghĩa |
 |---|---|

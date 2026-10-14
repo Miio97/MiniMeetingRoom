@@ -4,6 +4,8 @@ import client.UI.mock.MockData;
 import client.UI.screens.*;
 import client.UI.components.Ui;
 import client.auth.AuthClient;
+import client.filetransfer.FileTransferClient;
+import common.filetransfer.RoomInfo;
 import common.auth.AuthResponse;
 import common.auth.AuthUser;
 import javafx.animation.FadeTransition;
@@ -25,6 +27,10 @@ import java.net.UnknownHostException;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 
 /** Điều hướng và dừng animation của màn hình cũ, tránh Timeline chạy ngầm. */
@@ -33,6 +39,13 @@ public final class SceneManager {
     private Runnable cleanup = () -> { };
     private ParallelTransition transition;
     private final AuthClient authClient;
+    private final FileTransferClient fileTransferClient;
+    private RoomInfo serverRoom;
+    private final java.util.List<MockData.Room> recentRooms = new java.util.ArrayList<>();
+    private final ExecutorService roomWorker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+        new ArrayBlockingQueue<>(8), runnable -> {
+            Thread worker = new Thread(runnable, "mini-meeting-room"); worker.setDaemon(true); return worker;
+        }, new ThreadPoolExecutor.AbortPolicy());
     private final ExecutorService authWorker = Executors.newSingleThreadExecutor(runnable -> {
         Thread worker = new Thread(runnable, "mini-meeting-auth"); worker.setDaemon(true); return worker;
     });
@@ -43,18 +56,25 @@ public final class SceneManager {
     private volatile boolean closing;
     private volatile boolean closed;
     private PauseTransition closeDeadline;
+    private PauseTransition leaveDeadline;
     private MockData.Room room = MockData.rooms().getFirst();
     private boolean mic = true, camera = true, locked;
     private final java.util.Map<String, String> preferences = new java.util.HashMap<>();
     public String preference(String key, String fallback) { return preferences.getOrDefault(key, fallback); }
     public void preferenceSet(String key, String value) { preferences.put(key, value); }
-    public SceneManager(Stage stage) { this(stage, new AuthClient()); }
-    SceneManager(Stage stage, AuthClient authClient) {
+    public SceneManager(Stage stage) { this(stage, new AuthClient(), new FileTransferClient()); }
+    SceneManager(Stage stage, AuthClient authClient) { this(stage, authClient, new FileTransferClient()); }
+    SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient) {
         this.stage = java.util.Objects.requireNonNull(stage);
         this.authClient = java.util.Objects.requireNonNull(authClient);
+        this.fileTransferClient = java.util.Objects.requireNonNull(fileTransferClient);
     }
     public Stage stage() { return stage; }
     public AuthClient authClient() { return authClient; }
+    public FileTransferClient fileTransferClient() { return fileTransferClient; }
+    public String sessionToken() { return sessionToken; }
+    public RoomInfo serverRoom() { return serverRoom; }
+    public java.util.List<MockData.Room> recentRooms() { return java.util.List.copyOf(recentRooms); }
     public AuthUser authenticatedUser() { return authenticatedUser; }
     public String user() { return authenticatedUser == null ? "" : authenticatedUser.displayName(); }
     public String username() { return authenticatedUser == null ? "" : authenticatedUser.username(); }
@@ -96,13 +116,29 @@ public final class SceneManager {
         if (sessionToken == null) { clearSession(); auth(); return; }
         logoutPending.set(true); stage.getScene().getRoot().setDisable(true);
         String token = sessionToken;
-        runAuthRequest(() -> authClient.logout(token), response -> {
+        RoomInfo leaving = serverRoom;
+        java.util.concurrent.atomic.AtomicBoolean roomLeft = new java.util.concurrent.atomic.AtomicBoolean();
+        dispose();
+        runAuthRequest(() -> {
+            if (leaving != null) {
+                try { fileTransferClient.leaveRoom(token, leaving.id()); roomLeft.set(true); }
+                catch (IOException error) { System.getLogger(SceneManager.class.getName()).log(System.Logger.Level.WARNING, "Could not leave room before logout", error); }
+            }
+            return authClient.logout(token);
+        }, response -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
             if (response.success()) { clearSession(); auth(); }
-            else logoutError(response.message());
+            else { restoreAfterLogoutFailure(roomLeft.get()); logoutError(response.message()); }
         }, error -> {
-            logoutPending.set(false); stage.getScene().getRoot().setDisable(false); logoutError(connectionError(error));
+            logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
+            restoreAfterLogoutFailure(roomLeft.get()); logoutError(connectionError(error));
         });
+    }
+    private void restoreAfterLogoutFailure(boolean roomLeft) {
+        if (roomLeft) { serverRoom = null; lobby(); }
+        else if (stage.getScene().getRoot() instanceof MeetingScreen) meeting();
+        else if (stage.getScene().getRoot() instanceof PreJoinScreen) preJoin(room);
+        else if (stage.getScene().getRoot() instanceof LobbyScreen) lobby();
     }
     private void logoutError(String message) {
         Alert alert = new Alert(Alert.AlertType.ERROR); alert.initOwner(stage); alert.setTitle("Chưa thể đăng xuất");
@@ -111,7 +147,7 @@ public final class SceneManager {
         Ui.style(alert); alert.showAndWait();
     }
     private void clearSession() {
-        authenticatedUser = null; sessionToken = null; preferences.clear();
+        authenticatedUser = null; sessionToken = null; serverRoom = null; recentRooms.clear(); preferences.clear();
         mic = true; camera = true; locked = false; room = MockData.rooms().getFirst();
     }
     /** Giữ cửa sổ tối đa 6 giây để thử thu hồi phiên trước khi đóng. */
@@ -124,7 +160,17 @@ public final class SceneManager {
         }
         closeDeadline = new PauseTransition(Duration.seconds(6)); closeDeadline.setOnFinished(event -> finishClose()); closeDeadline.play();
         String token = sessionToken;
+        RoomInfo leaving = serverRoom;
+        FileTransferClient.Cancellation leaveCancellation = new FileTransferClient.Cancellation();
+        if (leaving != null) {
+            leaveDeadline = new PauseTransition(Duration.seconds(2));
+            leaveDeadline.setOnFinished(event -> leaveCancellation.cancel()); leaveDeadline.play();
+        }
         authWorker.execute(() -> {
+            if (leaving != null) {
+                try { fileTransferClient.leaveRoom(token, leaving.id(), leaveCancellation); }
+                catch (IOException error) { System.getLogger(SceneManager.class.getName()).log(System.Logger.Level.DEBUG, "Could not leave room while closing", error); }
+            }
             revokeQuietly(token);
             revokeQuietly(pendingToken); pendingToken = null;
             if (!closed) Platform.runLater(() -> { if (!closed) finishClose(); });
@@ -138,12 +184,14 @@ public final class SceneManager {
         if (closed) return;
         closed = true;
         if (closeDeadline != null) closeDeadline.stop();
-        clearSession(); pendingToken = null; authWorker.shutdownNow(); stage.hide(); Platform.exit();
+        if (leaveDeadline != null) leaveDeadline.stop();
+        clearSession(); pendingToken = null; authWorker.shutdownNow(); roomWorker.shutdownNow(); fileTransferClient.close(); stage.hide(); Platform.exit();
     }
     public void shutdown() {
         closing = true; closed = true; dispose();
         if (closeDeadline != null) closeDeadline.stop();
-        clearSession(); pendingToken = null; authWorker.shutdownNow();
+        if (leaveDeadline != null) leaveDeadline.stop();
+        clearSession(); pendingToken = null; authWorker.shutdownNow(); roomWorker.shutdownNow(); fileTransferClient.close();
     }
     public MockData.Room room() { return room; }
     public boolean mic() { return mic; }
@@ -175,12 +223,17 @@ public final class SceneManager {
         });
     }
     private boolean hasSession() { if (closing) return false; if (authenticatedUser == null) { auth(); return false; } return true; }
-    public void lobby() { if (!hasSession()) return; LobbyScreen view = new LobbyScreen(this); show(view, 1100, 700, true, view::dispose); }
+    public void lobby() {
+        if (!hasSession()) return;
+        if (serverRoom != null) { leaveRoom(this::lobby); return; }
+        LobbyScreen view = new LobbyScreen(this); show(view, 1100, 700, true, view::dispose);
+    }
     public void history() { if (hasSession()) show(new HistoryScreen(this), 1100, 700, true, () -> { }); }
     public void settings() { if (hasSession()) show(new SettingsScreen(this, false), 1100, 700, true, () -> { }); }
     public void settingsAccount() { if (hasSession()) show(new SettingsScreen(this, true), 1100, 700, true, () -> { }); }
     public void preJoin(MockData.Room next) {
         if (!hasSession()) return;
+        if (serverRoom == null || !serverRoom.code().equals(next.code())) { joinRoom(next.code(), next.pin()); return; }
         room = next;
         if (Boolean.parseBoolean(preference("muteMic", "false"))) mic = false;
         if (Boolean.parseBoolean(preference("muteCamera", "false"))) camera = false;
@@ -189,10 +242,62 @@ public final class SceneManager {
     }
     public void meeting() {
         if (!hasSession()) return;
+        if (serverRoom == null) { joinRoom(room.code(), room.pin()); return; }
         MeetingScreen view = new MeetingScreen(this);
         show(view, 1280, 800, true, view::dispose);
     }
-    public void ended(long seconds, int count) { if (hasSession()) show(new MeetingEndedScreen(this, seconds, count), 1100, 700, true, () -> { }); }
+    public void ended(long seconds, int count) {
+        if (!hasSession()) return;
+        leaveRoom(() -> show(new MeetingEndedScreen(this, seconds, count), 1100, 700, true, () -> { }));
+    }
+    public void createRoom(String name, String pin, int capacity, boolean locked) {
+        if (!hasSession()) return;
+        String token = sessionToken;
+        roomRequest(() -> fileTransferClient.createRoom(token, name, pin, capacity), result -> acceptRoom(result, pin));
+    }
+    public void joinRoom(String code, String pin) {
+        if (!hasSession()) return;
+        String token = sessionToken;
+        roomRequest(() -> fileTransferClient.joinRoom(token, code, pin), result -> acceptRoom(result, pin));
+    }
+    private void acceptRoom(RoomInfo result, String pin) {
+        serverRoom = java.util.Objects.requireNonNull(result); locked = false;
+        MockData.Room display = new MockData.Room(result.name(), result.code(), 1, "Đã tham gia", pin, result.capacity());
+        recentRooms.removeIf(existing -> existing.code().equals(display.code())); recentRooms.addFirst(display);
+        if (recentRooms.size() > 20) recentRooms.removeLast();
+        preJoin(display);
+    }
+    private void leaveRoom(Runnable next) {
+        RoomInfo leaving = serverRoom; if (leaving == null) { next.run(); return; }
+        // Stop file activity before revoking server-side membership.
+        dispose(); String token = sessionToken;
+        boolean wasMeeting = stage.getScene().getRoot() instanceof MeetingScreen;
+        roomRequest(() -> { fileTransferClient.leaveRoom(token, leaving.id()); return Boolean.TRUE; }, ignored -> { serverRoom = null; next.run(); }, error -> {
+            if (wasMeeting) meeting(); else preJoin(room);
+            roomError(connectionError(error));
+        });
+    }
+    private <T> void roomRequest(Callable<T> request, Consumer<T> success) {
+        roomRequest(request, success, error -> roomError(connectionError(error)));
+    }
+    private <T> void roomRequest(Callable<T> request, Consumer<T> success, Consumer<Throwable> failure) {
+        if (closing) return;
+        Parent original = stage.getScene().getRoot(); original.setDisable(true);
+        try {
+            roomWorker.execute(() -> {
+                try {
+                    T result = request.call();
+                    Platform.runLater(() -> { if (!closing) { original.setDisable(false); success.accept(result); } });
+                } catch (Exception error) {
+                    Platform.runLater(() -> { if (!closing) { original.setDisable(false); failure.accept(error); } });
+                }
+            });
+        } catch (RejectedExecutionException busy) { original.setDisable(false); roomError("Có quá nhiều yêu cầu phòng. Vui lòng thử lại."); }
+    }
+    private void roomError(String text) {
+        Alert alert = new Alert(Alert.AlertType.ERROR); alert.initOwner(stage); alert.setTitle("Không thể kết nối phòng");
+        alert.setHeaderText("Yêu cầu phòng chưa hoàn tất"); alert.setContentText(text); Ui.style(alert); alert.showAndWait();
+    }
     private void show(Parent root, int width, int height, boolean resize, Runnable onDispose) {
         dispose(); cleanup = onDispose;
         boolean expanded = stage.isMaximized() || stage.isFullScreen();

@@ -33,6 +33,7 @@ public final class MeetingScreen extends BorderPane {
     private final Timeline clock;
     private Timeline panelAnimation;
     private final ControlBar controls;
+    private final FilePanel filePanel;
     private final Label lockLabel = Ui.label("", "caption");
     private final Label participantCount = Ui.label("", "caption");
     private boolean sharing, panelOpen = true;
@@ -49,7 +50,8 @@ public final class MeetingScreen extends BorderPane {
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, badge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
         Tab participants = new Tab("Thành viên", new ParticipantPanel(people, p -> disableMedia(p, true), p -> disableMedia(p, false), this::removeParticipant, () -> { manager.locked(!manager.locked()); updateLock(); }, this::leave));
-        Tab chat = new Tab("Chat", new ChatPanel(manager.user())); Tab files = new Tab("Tệp", new FilePanel(manager.stage(), manager.user()));
+        filePanel = new FilePanel(manager);
+        Tab chat = new Tab("Chat", new ChatPanel(manager.user())); Tab files = new Tab("Tệp", filePanel);
         tabs.getTabs().addAll(participants, chat, files); tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); VBox.setVgrow(tabs, Priority.ALWAYS);
         IconButton close = new IconButton("close", "Đóng panel"); close.setOnAction(e -> togglePanel(-1));
         HBox panelHeader = Ui.row(8, Ui.label("Trong cuộc họp", "strong"), Ui.spacer(), close); panelHeader.setPadding(new Insets(12, 14, 8, 16)); panel.getChildren().addAll(panelHeader, tabs); panel.getStyleClass().add("meeting-panel");
@@ -61,7 +63,7 @@ public final class MeetingScreen extends BorderPane {
         controls.users.active(true);
         count = new Spinner<>(1, manager.room().capacity(), people.size()); count.setEditable(false); count.setPrefWidth(84); count.setAccessibleText("Số thành viên mô phỏng");
         count.valueProperty().addListener((obs, old, value) -> { if (!syncingCount) setCount(value); });
-        HBox demo = Ui.row(10, Ui.label("UI DEMO", "eyebrow"), Ui.label("Số người", "caption"), count, Ui.label("Tối đa " + manager.room().capacity(), "caption")); demo.setAlignment(Pos.CENTER);
+        HBox demo = Ui.row(10, Ui.label("MEDIA / CHAT DEMO", "eyebrow"), Ui.label("Số người mô phỏng", "caption"), count, Ui.label("Tệp dùng TCP/TLS thật", "caption")); demo.setAlignment(Pos.CENTER);
         VBox bottom = Ui.column(10, controls, demo); bottom.setAlignment(Pos.CENTER); bottom.setPadding(new Insets(8, 16, 16, 16)); setBottom(bottom);
         people.addListener((ListChangeListener<MockData.Participant>) change -> {
             peakPeople = Math.max(peakPeople, people.size());
@@ -159,5 +161,5 @@ public final class MeetingScreen extends BorderPane {
     }
     private void updatePanelButtons() { controls.chat.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 1); controls.users.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 0); }
     private void leave() { manager.ended(elapsed(), peakPeople); }
-    public void dispose() { clock.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose); }
+    public void dispose() { filePanel.close(); clock.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose); }
 }

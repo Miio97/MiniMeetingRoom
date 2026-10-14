@@ -29,7 +29,7 @@ public final class LobbyScreen extends BorderPane {
         pulse = new FadeTransition(Duration.seconds(1.2), dot); pulse.setFromValue(1); pulse.setToValue(.35); pulse.setAutoReverse(true); pulse.setCycleCount(Animation.INDEFINITE); pulse.play();
         main.getChildren().add(Ui.row(12, Ui.column(8, Ui.label(days[today.getDayOfWeek().getValue() - 1] + ", " + today.format(DateTimeFormatter.ofPattern("dd/MM")), "date-label"),
             Ui.label("Xin chào, " + parts[parts.length - 1], "title"), Ui.label("Hôm nay bạn muốn kết nối với ai?", "muted")), Ui.spacer(), status));
-        Runnable createRoom = () -> new CreateRoomDialog(manager.stage()).showAndWait().ifPresent(result -> { manager.locked(result.locked()); manager.preJoin(result.room()); });
+        Runnable createRoom = () -> new CreateRoomDialog(manager.stage()).showAndWait().ifPresent(result -> manager.createRoom(result.room().name(), result.room().pin(), result.room().capacity(), result.locked()));
         VBox createText = Ui.column(14, Icons.icon("video", 28), Ui.label("Tạo phòng mới", "subtitle"),
             Ui.label("Một không gian riêng cho nhóm của bạn.\nMời mọi người và bắt đầu trò chuyện.", "muted"), Ui.button("Tạo phòng", "primary", createRoom));
         createText.setMaxWidth(Double.MAX_VALUE);
@@ -50,30 +50,23 @@ public final class LobbyScreen extends BorderPane {
         Button enter = Ui.button("Tham gia", "primary", () -> {
             error.setManaged(true); error.setVisible(true);
             if (code.getText().isBlank() || !pin.getText().matches("\\d{4,6}")) { error.setText("Nhập mã phòng và PIN gồm 4–6 số."); return; }
-            MockData.Room room = MockData.rooms().stream().filter(r -> r.code().equalsIgnoreCase(code.getText().strip())).findFirst().orElse(new MockData.Room("Phòng họp của bạn", code.getText().strip().toUpperCase(), 6, "Vừa tham gia", pin.getText(), 10));
-            if (!room.pin().equals(pin.getText())) { error.setText("PIN phòng demo chưa đúng. Thử 1234."); return; }
-            if (room.people() >= room.capacity()) { error.setText("Phòng đã đủ người."); return; }
-            manager.locked(false); manager.preJoin(room);
+            manager.joinRoom(code.getText().strip().toUpperCase(java.util.Locale.ROOT), pin.getText());
         }); enter.setMaxWidth(Double.MAX_VALUE);
         join.getChildren().addAll(Ui.label("Tham gia phòng", "subtitle"), Ui.label("Nhập mã và PIN được chia sẻ với bạn.", "muted"), inputs, error, enter);
         HBox actions = Ui.row(20, create, join); actions.setAlignment(Pos.TOP_LEFT);
         create.setMinWidth(0); join.setMinWidth(0); create.setPrefWidth(350); join.setPrefWidth(420);
         HBox.setHgrow(create, Priority.ALWAYS); HBox.setHgrow(join, Priority.ALWAYS);
-        main.getChildren().addAll(actions, Ui.row(12, Ui.label("Phòng gần đây", "subtitle"), Ui.spacer(), Ui.label("4 cuộc trò chuyện", "caption")));
+        main.getChildren().addAll(actions, Ui.row(12, Ui.label("Phòng gần đây", "subtitle"), Ui.spacer(), Ui.label("Trong phiên đăng nhập này", "caption")));
         VBox rooms = new VBox(12);
-        int index = 0;
-        for (MockData.Room room : MockData.rooms()) {
-            boolean live = index++ % 2 == 0;
-            Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
+        for (MockData.Room room : manager.recentRooms()) {
+            Label badge = Ui.label("Đã tham gia", "room-live");
             Label title = Ui.label(room.name(), "room-title");
-            VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label(room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + room.time(), "room-meta"));
+            VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label(room.code() + "  ·  Tối đa " + room.capacity() + " người", "room-meta"));
             text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
-            Button action = Ui.button(live ? "Vào lại" : "Xem lại", live ? "primary" : "secondary", () -> {
-                if (live) { manager.locked(false); manager.preJoin(room); }
-                else HistoryScreen.showDetails(manager, room.name(), room.code(), room.people(), 45);
-            }); action.setMinWidth(90);
+            Button action = Ui.button("Vào lại", "primary", () -> manager.preJoin(room)); action.setMinWidth(90);
             HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); rooms.getChildren().add(item);
         }
+        if (manager.recentRooms().isEmpty()) rooms.getChildren().add(Ui.label("Chưa có phòng. Tạo phòng hoặc nhập mã và PIN để tham gia.", "caption"));
         main.getChildren().add(rooms); setCenter(Ui.scroll(main));
     }
     public void dispose() { pulse.stop(); }
