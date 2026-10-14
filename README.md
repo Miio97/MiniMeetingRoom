@@ -6,7 +6,7 @@
 
 Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans) và MySQL có các bảng trong `database/schema.sql`. Nếu database đã có đủ bảng thì không chạy lại schema.
 
-1. Cấu hình database trong `config/auth-server.properties`. File này chỉ nằm trên máy server và được Git bỏ qua. Bản mẫu là `config/auth-server.properties.example`. Kết nối có sẵn trong dự án đã được chuyển sang file cục bộ này.
+1. Cấu hình database trong `config/auth-server.properties`. File này chỉ nằm trên máy server và được Git bỏ qua. Bản mẫu là `config/auth-server.properties.example`. Để chạy server và client trên cùng máy nhưng tiếp tục dùng Railway, đặt `db.url`, `db.user`, `db.password` theo database Railway hiện có; đặt `auth.bind=127.0.0.1`, `auth.port=8443`, `auth.keystore=config/auth-dev.p12`. Trong `config/auth-client.properties`, đặt `auth.host=127.0.0.1`, `auth.port=8443`, `auth.certificate=config/auth-server.cer`. Không cần cài MySQL local khi dùng Railway.
 2. Mở PowerShell tại thư mục dự án và chạy server:
 
    ```powershell
@@ -73,6 +73,8 @@ Mật khẩu được băm PBKDF2-HMAC-SHA256 với salt ngẫu nhiên và 600.0
 Tài khoản `BI_KHOA` hoặc `VO_HIEU_HOA` không được đăng nhập. Tài khoản có sẵn cần có mật khẩu theo định dạng băm service hỗ trợ; ứng dụng không chấp nhận mật khẩu văn bản thuần trong DB.
 
 ## Kiểm thử
+
+Server và client tự ghi nhật ký kiểm thử `.txt` trong `logs/diagnostics/`, gồm tài nguyên JVM, thời gian TCP/TLS/xác thực, hàng đợi và lỗi được lọc thông tin nhạy cảm. Xem [cách chạy và đọc nhật ký](docs/diagnostics.md). Thông số media hiện vẫn là demo; nhật ký chỉ nhận số liệu WebRTC/SFU thực tế khi phần media được triển khai.
 
 ```powershell
 mvn test

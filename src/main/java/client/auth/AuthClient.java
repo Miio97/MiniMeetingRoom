@@ -4,6 +4,7 @@ import common.auth.AuthRequest;
 import common.auth.AuthResponse;
 import common.auth.AuthWire;
 import common.auth.TlsSupport;
+import common.diagnostics.Diagnostics;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -17,6 +18,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.util.Properties;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
@@ -24,6 +28,8 @@ import javax.net.ssl.SSLSocket;
 
 /** Blocking network API. Call from a background task, never the JavaFX thread. */
 public final class AuthClient {
+    private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
+            "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
 
@@ -48,7 +54,23 @@ public final class AuthClient {
     }
 
     private AuthResponse send(AuthRequest request) throws IOException {
+        RequestTiming timing = new RequestTiming(request.action());
+        try {
+            AuthResponse response = sendMeasured(request, timing);
+            Map<String, Object> fields = timing.fields(response.success() ? "success" : "rejected");
+            fields.put("response_code", RESPONSE_CODES.contains(response.code()) ? response.code() : "OTHER");
+            Diagnostics.current().event("auth_client_request", fields);
+            return response;
+        } catch (IOException | RuntimeException failure) {
+            Diagnostics.current().failure("auth_client_request", failure, timing.fields("error"));
+            throw failure;
+        }
+    }
+
+    private AuthResponse sendMeasured(AuthRequest request, RequestTiming timing) throws IOException {
         Settings settings = fixedSettings != null ? fixedSettings : Settings.load();
+        timing.port = settings.port();
+        timing.next("tls_context");
         SSLContext tls = fixedTls;
         if (tls == null) {
             if (!Files.isRegularFile(settings.certificate())) {
@@ -59,9 +81,13 @@ public final class AuthClient {
                 throw new IOException("Không đọc được chứng chỉ máy chủ. Hãy kiểm tra cấu hình kết nối.", e);
             }
         }
+        timing.tlsContextMillis = timing.phaseMillis();
         try (Socket connection = new Socket()) {
+            timing.next("tcp_connect");
             connection.connect(new InetSocketAddress(settings.host(), settings.port()),
                     Math.min(5000, settings.timeoutMillis()));
+            timing.tcpConnectMillis = timing.phaseMillis();
+            timing.next("tls_handshake");
             try (SSLSocket socket = (SSLSocket) tls.getSocketFactory()
                     .createSocket(connection, settings.host(), settings.port(), true)) {
                 socket.setSoTimeout(settings.timeoutMillis());
@@ -70,6 +96,8 @@ public final class AuthClient {
                 parameters.setEndpointIdentificationAlgorithm("HTTPS");
                 socket.setSSLParameters(parameters);
                 socket.startHandshake();
+                timing.tlsHandshakeMillis = timing.phaseMillis();
+                timing.next("response");
                 AuthWire.write(new DataOutputStream(socket.getOutputStream()), request);
                 AuthResponse response = AuthWire.read(new DataInputStream(socket.getInputStream()), AuthResponse.class);
                 if (response.code() == null || response.message() == null
@@ -79,6 +107,7 @@ public final class AuthClient {
                         || response.token() == null || response.token().isBlank() || response.expiresAt() == null))) {
                     throw new IOException("Phản hồi từ máy chủ không hợp lệ.");
                 }
+                timing.responseMillis = timing.phaseMillis();
                 return response;
             }
         } catch (SSLHandshakeException e) {
@@ -87,6 +116,36 @@ public final class AuthClient {
             throw new IOException("Không kết nối được máy chủ. Hãy khởi động server và kiểm tra địa chỉ/cổng.", e);
         } catch (SocketTimeoutException e) {
             throw new IOException("Máy chủ phản hồi quá lâu. Vui lòng thử lại.", e);
+        }
+    }
+
+    /** Only fixed categories and durations enter diagnostics, never authentication payloads. */
+    private static final class RequestTiming {
+        private final long started = System.nanoTime();
+        private final String action;
+        private String phase = "load_settings";
+        private long phaseStarted = started;
+        private int port;
+        private Double tlsContextMillis, tcpConnectMillis, tlsHandshakeMillis, responseMillis;
+
+        RequestTiming(String action) {
+            this.action = Set.of("REGISTER", "LOGIN", "LOGOUT").contains(action) ? action : "OTHER";
+        }
+
+        void next(String phase) { this.phase = phase; phaseStarted = System.nanoTime(); }
+        double phaseMillis() { return (System.nanoTime() - phaseStarted) / 1_000_000.0; }
+
+        Map<String, Object> fields(String outcome) {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("action", action); fields.put("phase", phase); fields.put("outcome", outcome);
+            fields.put("total_ms", (System.nanoTime() - started) / 1_000_000.0);
+            fields.put("phase_elapsed_ms", phaseMillis());
+            if (port > 0) fields.put("port", port);
+            if (tlsContextMillis != null) fields.put("tls_context_ms", tlsContextMillis);
+            if (tcpConnectMillis != null) fields.put("tcp_connect_ms", tcpConnectMillis);
+            if (tlsHandshakeMillis != null) fields.put("tls_handshake_ms", tlsHandshakeMillis);
+            if (responseMillis != null) fields.put("response_ms", responseMillis);
+            return fields;
         }
     }
 
