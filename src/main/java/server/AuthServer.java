@@ -31,7 +31,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
-import server.auth.AuthService;
 import server.config.ServerConfig;
 import server.database.DatabaseConnection;
 
@@ -243,6 +242,8 @@ public final class AuthServer implements AutoCloseable {
             try (Connection connection = DatabaseConnection.getConnection(); Statement statement = connection.createStatement()) {
                 statement.executeQuery("SELECT Ma_Nguoi_Dung, Ten_Dang_Nhap, Mat_Khau_Bam, Ten_Hien_Thi, Email, Trang_Thai, Lan_Dang_Nhap_Cuoi FROM Nguoi_Dung WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Phien, Ma_Nguoi_Dung, Token_Bam, Het_Han_Luc, Thu_Hoi_Luc FROM Phien_Dang_Nhap WHERE 1=0").close();
+                statement.executeQuery("SELECT Ma_Phong, Ma_Phong_Tham_Gia, Ten_Phong, Ma_PIN_Bam, Ma_Chu_Phong, Trang_Thai, Da_Khoa, So_Nguoi_Toi_Da, Ngay_Tao, Ngay_Dong FROM Phong_Hop WHERE 1=0").close();
+                statement.executeQuery("SELECT Ma_Thanh_Vien_Phong, Ma_Phong, Ma_Nguoi_Dung, Vai_Tro, Tham_Gia_Luc, Roi_Phong_Luc, Ly_Do_Roi FROM Thanh_Vien_Phong WHERE 1=0").close();
             }
             diagnostics.event("server.startup.database_checked", Map.of("database_ms", elapsedMillis(databaseAt)));
             startupStep = "nạp chứng chỉ TLS";
@@ -256,7 +257,7 @@ public final class AuthServer implements AutoCloseable {
             startupStep = "mở cổng TCP/TLS";
             startupPhase = "listener_bind";
             AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port),
-                    new AuthService()::handle);
+                    new ApplicationService()::handle);
             runningServer.set(server);
             server.start();
             diagnostics.event("server.startup.completed", Map.of("port", server.port(), "startup_ms", elapsedMillis(startupAt)));
@@ -316,6 +317,7 @@ public final class AuthServer implements AutoCloseable {
             case "REGISTER" -> "REGISTER";
             case "LOGIN" -> "LOGIN";
             case "LOGOUT" -> "LOGOUT";
+            case "CREATE_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM" -> action.toUpperCase(Locale.ROOT);
             default -> "OTHER";
         };
     }
@@ -324,7 +326,8 @@ public final class AuthServer implements AutoCloseable {
         if (code == null) return "OTHER";
         return switch (code) {
             case "OK", "INVALID_REQUEST", "INVALID_CREDENTIALS", "VALIDATION_ERROR", "USERNAME_TAKEN",
-                    "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR" -> code;
+                    "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR", "SESSION_EXPIRED", "ROOM_NOT_FOUND",
+                    "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN", "ROOM_FULL", "ROOM_ACCESS_DENIED" -> code;
             default -> "OTHER";
         };
     }

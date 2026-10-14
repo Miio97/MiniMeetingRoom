@@ -12,9 +12,10 @@ import javafx.util.Duration;
 
 public final class PreJoinScreen extends BorderPane {
     private final Timeline meter;
+    private boolean disposed;
     public PreJoinScreen(SceneManager manager) {
         setPadding(new Insets(32));
-        setTop(Ui.column(8, Ui.label("TRƯỚC KHI VÀO PHÒNG", "eyebrow"), Ui.label("Bạn đã sẵn sàng?", "title"), Ui.label(manager.room().name() + "  ·  " + manager.room().code(), "muted")));
+        setTop(Ui.column(8, Ui.label("TRƯỚC KHI VÀO PHÒNG", "eyebrow"), Ui.label("Bạn đã sẵn sàng?", "title"), Ui.label(manager.room().name() + "  ·  ID " + manager.roomInfo().id() + "  ·  " + manager.room().code(), "muted")));
         StackPane preview = new StackPane(); preview.getStyleClass().add("preview"); preview.setMinHeight(300);
         Label state = Ui.label("Camera xem trước · mô phỏng", "preview-caption"); StackPane.setAlignment(state, Pos.BOTTOM_CENTER); StackPane.setMargin(state, new Insets(24));
         preview.getChildren().addAll(Ui.avatar(manager.user(), 128), state);
@@ -26,11 +27,19 @@ public final class PreJoinScreen extends BorderPane {
         HBox toggles = Ui.row(16, mic, camera); toggles.setAlignment(Pos.CENTER);
         VBox left = Ui.column(20, preview, toggles, Ui.label("Chỉ có bạn nhìn thấy bản xem trước này.", "caption")); left.setAlignment(Pos.CENTER); VBox.setVgrow(preview, Priority.ALWAYS); HBox.setHgrow(left, Priority.ALWAYS);
         ProgressBar level = new ProgressBar(.5); level.setMaxWidth(Double.MAX_VALUE);
-        VBox right = Ui.column(18, Ui.label("Kiểm tra thiết bị", "subtitle"), Ui.field("Camera", Ui.devices(MockData.cameras())), Ui.field("Microphone", Ui.devices(MockData.microphones())), Ui.field("Loa", Ui.devices(MockData.speakers())), Ui.row(12, Ui.label("Mức âm thanh", "field-label"), Ui.spacer(), Ui.label("Mô phỏng", "caption")), level, Ui.spacer(), Ui.button("Vào phòng họp  →", "primary", manager::meeting), Ui.button("←  Quay lại sảnh", "text-button", manager::lobby));
+        Label error = Ui.label("", "error-text"); error.setWrapText(true); error.setId("prejoin-error");
+        Button enter = Ui.button("Vào phòng họp  →", "primary", manager::meeting); enter.setId("enter-meeting");
+        Button back = Ui.button("←  Quay lại sảnh", "text-button", () -> {
+            if (disposed) return; setDisable(true); error.setText("Đang rời phòng…");
+            manager.leaveRoom(() -> { if (!disposed) manager.lobby(); }, message -> {
+                if (!disposed) { setDisable(false); error.setText(message); }
+            });
+        }); back.setId("cancel-prejoin");
+        VBox right = Ui.column(18, Ui.label("Kiểm tra thiết bị", "subtitle"), Ui.field("Camera", Ui.devices(MockData.cameras())), Ui.field("Microphone", Ui.devices(MockData.microphones())), Ui.field("Loa", Ui.devices(MockData.speakers())), Ui.row(12, Ui.label("Mức âm thanh", "field-label"), Ui.spacer(), Ui.label("Mô phỏng", "caption")), level, Ui.spacer(), error, enter, back);
         right.getStyleClass().add("card"); right.setPrefWidth(340); right.setMinWidth(320);
         HBox body = Ui.row(28, left, right); body.setPadding(new Insets(28, 0, 0, 0)); setCenter(body);
         // Animation biểu diễn level mic, không lấy tín hiệu từ thiết bị thật.
         meter = new Timeline(new KeyFrame(Duration.millis(150), e -> level.setProgress(manager.mic() ? .15 + Math.random() * .7 : 0))); meter.setCycleCount(Animation.INDEFINITE); meter.play();
     }
-    public void dispose() { meter.stop(); }
+    public void dispose() { disposed = true; meter.stop(); }
 }

@@ -4,6 +4,9 @@ import common.auth.AuthRequest;
 import common.auth.AuthResponse;
 import common.auth.AuthWire;
 import common.auth.TlsSupport;
+import common.room.RoomInfo;
+import common.room.RoomRequest;
+import common.room.RoomValidation;
 import common.diagnostics.Diagnostics;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -29,7 +32,11 @@ import javax.net.ssl.SSLSocket;
 /** Blocking network API. Call from a background task, never the JavaFX thread. */
 public final class AuthClient {
     private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
-            "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR");
+            "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
+            "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
+            "ROOM_FULL", "ROOM_ACCESS_DENIED");
+    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "JOIN_ROOM",
+            "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
 
@@ -51,6 +58,30 @@ public final class AuthClient {
 
     public AuthResponse logout(String token) throws IOException {
         return send(new AuthRequest("LOGOUT", null, null, null, null, token));
+    }
+
+    public AuthResponse createRoom(String token, String name, String pin, int capacity) throws IOException {
+        return roomCommand("CREATE_ROOM", token, new RoomRequest(name, pin, null, capacity));
+    }
+
+    public AuthResponse joinRoom(String token, String identifier, String pin) throws IOException {
+        return roomCommand("JOIN_ROOM", token, new RoomRequest(null, pin, identifier, 0));
+    }
+
+    public AuthResponse listRooms(String token) throws IOException {
+        return roomCommand("LIST_ROOMS", token, null);
+    }
+
+    public AuthResponse getRoom(String token, long roomId) throws IOException {
+        return roomCommand("GET_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
+    }
+
+    public AuthResponse leaveRoom(String token, long roomId) throws IOException {
+        return roomCommand("LEAVE_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
+    }
+
+    private AuthResponse roomCommand(String action, String token, RoomRequest parameters) throws IOException {
+        return send(new AuthRequest(action, null, null, null, null, token, parameters));
     }
 
     private AuthResponse send(AuthRequest request) throws IOException {
@@ -107,6 +138,19 @@ public final class AuthClient {
                         || response.token() == null || response.token().isBlank() || response.expiresAt() == null))) {
                     throw new IOException("Phản hồi từ máy chủ không hợp lệ.");
                 }
+                if (response.success()) {
+                    switch (request.action()) {
+                        case "CREATE_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
+                            if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
+                        }
+                        case "LIST_ROOMS" -> {
+                            if (response.rooms().size() > 20 || response.rooms().stream().anyMatch(room -> !validRoom(room))) {
+                                throw new IOException("Danh sách phòng từ máy chủ không hợp lệ.");
+                            }
+                        }
+                        default -> { }
+                    }
+                }
                 timing.responseMillis = timing.phaseMillis();
                 return response;
             }
@@ -119,6 +163,17 @@ public final class AuthClient {
         }
     }
 
+    private static boolean validRoom(RoomInfo room) {
+        return room != null && room.id() > 0 && room.hostId() > 0 && room.name() != null && !room.name().isBlank()
+                && room.code() != null && room.createdAt() != null && room.status() != null
+                && Set.of("CHO", "DANG_HOAT_DONG", "DA_DONG").contains(room.status())
+                && RoomValidation.capacityError(room.capacity()) == null
+                && room.people() >= 0 && room.people() <= room.capacity()
+                && room.participants().size() <= room.capacity()
+                && room.participants().stream().allMatch(person -> person.userId() > 0 && person.displayName() != null
+                && Set.of("CHU_PHONG", "THANH_VIEN").contains(person.role()));
+    }
+
     /** Only fixed categories and durations enter diagnostics, never authentication payloads. */
     private static final class RequestTiming {
         private final long started = System.nanoTime();
@@ -129,7 +184,7 @@ public final class AuthClient {
         private Double tlsContextMillis, tcpConnectMillis, tlsHandshakeMillis, responseMillis;
 
         RequestTiming(String action) {
-            this.action = Set.of("REGISTER", "LOGIN", "LOGOUT").contains(action) ? action : "OTHER";
+            this.action = ACTIONS.contains(action) ? action : "OTHER";
         }
 
         void next(String phase) { this.phase = phase; phaseStarted = System.nanoTime(); }

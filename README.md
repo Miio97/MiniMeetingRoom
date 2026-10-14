@@ -1,6 +1,6 @@
 # MiniMeetingRoom
 
-Ứng dụng desktop Java 21/JavaFX. Đăng ký, đăng nhập và đăng xuất đã kết nối MySQL qua server TCP/TLS riêng. Các chức năng phòng họp, chat, thiết bị và media hiện vẫn dùng dữ liệu demo.
+Ứng dụng desktop Java 21/JavaFX. Đăng ký, đăng nhập, đăng xuất, tạo phòng và tham gia phòng đã kết nối MySQL qua server TCP/TLS. Chat, gửi tệp, thiết bị và truyền media hiện vẫn dùng dữ liệu demo.
 
 ## Chạy trên máy phát triển
 
@@ -27,6 +27,18 @@ Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans) và MySQL có c�
 5. **Đăng xuất** thu hồi phiên trên server trước khi trở lại màn hình đăng nhập. Nếu mất kết nối, giao diện báo lỗi để thử lại. Khi đóng ứng dụng, client cố gắng thu hồi phiên trong thời gian giới hạn; phiên không thu hồi được sẽ hết hạn theo cấu hình server.
 
 Thông tin tài khoản hiện chỉ đọc; chỉnh sửa tên và đổi mật khẩu sẽ được triển khai ở bước riêng.
+
+## Tạo và tham gia phòng
+
+Sau khi đăng nhập, chọn **Tạo phòng**, nhập tên phòng 1–100 ký tự, PIN gồm 4–6 chữ số và sức chứa. Sức chứa mặc định là 10, có thể cấu hình 2–250 người bao gồm chủ phòng; đây là giới hạn quản lý thành viên, chưa phải năng lực truyền media. Server sinh `room_id`, mã `MMR-XXXXXXXX`, xác định `host_id` từ phiên đăng nhập và lưu `created_at` theo UTC. PIN chỉ lưu dưới dạng hash; client không nhận lại PIN hoặc hash. Chủ phòng được thêm vào phòng ngay khi tạo thành công.
+
+Chia sẻ **ID hoặc mã phòng cùng PIN** cho người khác. Tại sảnh, nhập ID/mã và PIN rồi chọn **Tham gia**. Server kiểm tra phiên đăng nhập, phòng có tồn tại, PIN, trạng thái phòng, khóa phòng và số chỗ còn lại. Chỉ khi thành công client mới chuyển sang màn hình trước khi vào phòng. Mã phòng không phân biệt hoa/thường; PIN được kiểm tra nguyên vẹn, kể cả chữ số 0 ở đầu.
+
+Danh sách **Phòng gần đây của bạn** lấy từ database, tối đa 20 phòng đã tạo hoặc tham gia. Nút **Nhập PIN** điền lại mã phòng, vẫn yêu cầu PIN và xác nhận từ server. Màn hình họp hiển thị các thành viên thực tế và cập nhật khoảng 3 giây một lần. Camera, microphone, chia sẻ màn hình, chat và gửi tệp vẫn là mô phỏng; các thao tác quản trị phòng chưa triển khai được ẩn.
+
+Quay về sảnh từ màn hình trước khi vào phòng hoặc chọn rời cuộc họp sẽ cập nhật `Thanh_Vien_Phong`. Khi người cuối cùng rời phòng, server đổi trạng thái thành `DA_DONG`; mã phòng đó không thể tham gia lại. Đăng xuất hoặc đóng ứng dụng cố gắng gửi thao tác rời phòng trước khi thu hồi phiên. Việc tắt đột ngột tiến trình hoặc mất mạng chưa có cơ chế heartbeat để tự dọn thành viên; đây là phần cần bổ sung khi triển khai kết nối họp liên tục.
+
+Các chức năng dùng cùng điểm khởi chạy **`server.AuthServer`** và cổng TLS hiện có; không cần thêm server hay tạo lại schema. Server đọc các bảng `Phong_Hop` và `Thanh_Vien_Phong` đã có trong `database/schema.sql`. Chạy một server và hai client bằng hai tài khoản khác nhau để thử tạo phòng trên máy A rồi tham gia bằng ID/mã và PIN trên máy B.
 
 Quy tắc đăng ký được dùng chung ở giao diện và server. Server kiểm tra tên đăng nhập khớp chính xác với tên lưu trong database, kể cả khi [collation MySQL không phân biệt hoa/thường](https://dev.mysql.com/doc/refman/8.4/en/case-sensitivity.html). Không cần thay đổi schema hoặc dữ liệu Railway. Ràng buộc unique hiện tại vẫn ngăn đăng ký một tên chỉ khác chữ hoa/thường với tài khoản đã có. Quy tắc độ phức tạp mật khẩu áp dụng cho đăng ký mới; tài khoản có sẵn vẫn đăng nhập bằng mật khẩu cũ.
 
@@ -63,10 +75,11 @@ Trên từng máy client, sao chép `config/auth-client.properties.example` thà
 ## Cấu trúc xác thực
 
 - `client/UI/screens/AuthScreen.java`: biểu mẫu sẵn có, kiểm tra dữ liệu và hiển thị kết quả. Tác vụ mạng chạy nền.
-- `client/auth/AuthClient.java`: gọi đăng ký, đăng nhập, đăng xuất qua TLS 1.2/1.3.
-- `common/auth`: DTO và protocol gồm độ dài 4 byte + JSON UTF-8, tối đa 16 KiB/thông điệp.
+- `client/auth/AuthClient.java`: gọi xác thực và các thao tác phòng qua TLS 1.2/1.3.
+- `common/auth`, `common/room`: DTO và protocol gồm độ dài 4 byte + JSON UTF-8, tối đa 256 KiB/thông điệp để chứa snapshot tối đa 250 thành viên.
 - `server/AuthServer.java`: nhận kết nối, giới hạn worker, timeout và gọi service.
 - `server/auth`: xác thực, băm mật khẩu và truy vấn bằng `PreparedStatement` trên `Nguoi_Dung`/`Phien_Dang_Nhap`.
+- `server/ApplicationService.java`, `server/rooms/RoomService.java`: điều phối yêu cầu, kiểm tra phiên, tạo/tham gia/rời phòng và đọc danh sách thành viên. Thao tác thay đổi phòng dùng transaction và khóa dòng phòng; mức READ COMMITTED tránh đếm số chỗ theo snapshot cũ khi nhiều người vào đồng thời. Xem [cơ chế khóa dòng](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html) và [mức cô lập của MySQL](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html).
 
 Mật khẩu được băm PBKDF2-HMAC-SHA256 với salt ngẫu nhiên và 600.000 vòng theo [hướng dẫn OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). Mật khẩu gốc không lưu trong database hoặc trạng thái phiên giao diện. Token ngẫu nhiên chỉ giữ trong bộ nhớ client; database lưu SHA-256 của token và hạn dùng. TLS kiểm tra danh tính máy chủ theo [hướng dẫn JSSE của Java](https://docs.oracle.com/en/java/javase/21/security/java-secure-socket-extension-jsse-reference-guide.html).
 
@@ -80,4 +93,4 @@ Server và client tự ghi nhật ký kiểm thử `.txt` trong `logs/diagnostic
 mvn test
 ```
 
-Các test dùng H2 in-memory và TLS server cục bộ để kiểm tra đăng ký, trùng tài khoản/email, đăng nhập, trạng thái tài khoản, phiên, thu hồi token, framing và xác minh chứng chỉ. Test không ghi dữ liệu lên MySQL đang dùng.
+Các test dùng H2 in-memory, TLS server cục bộ và cửa sổ JavaFX ẩn để kiểm tra xác thực, tạo phòng, ID/mã phòng, PIN, phòng đóng/khóa/đầy, quyền truy cập, phiên hết hạn, nhiều người tranh chỗ cuối, rời phòng, framing và xác minh chứng chỉ. Test không ghi dữ liệu lên MySQL đang dùng.
