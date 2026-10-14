@@ -8,6 +8,8 @@ import common.auth.AuthResponse;
 import common.auth.AuthUser;
 import common.auth.AuthWire;
 import common.auth.TlsSupport;
+import common.diagnostics.Diagnostics;
+import com.google.gson.JsonParser;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -177,6 +179,56 @@ class AuthServerTest {
             assertTrue(hasCause(failure, SSLHandshakeException.class));
             assertEquals(0, calls.get());
         }
+    }
+
+    @Test
+    void diagnosticsCaptureRealAuthTimingsAndSanitizeDatabaseFailures() throws Exception {
+        String oldDir = System.getProperty("mmr.diagnostics.dir");
+        String oldEnabled = System.getProperty("mmr.diagnostics.enabled");
+        String oldRunId = System.getProperty("mmr.diagnostics.runId");
+        System.setProperty("mmr.diagnostics.dir", temporary.resolve("diagnostic-integration").toString());
+        System.setProperty("mmr.diagnostics.enabled", "true");
+        System.setProperty("mmr.diagnostics.runId", "auth-integration-test");
+        Diagnostics diagnostics = Diagnostics.start("client");
+        Path log = diagnostics.logPath();
+        try {
+            assertNotNull(log);
+            try (AuthServer server = server(serverTls, request -> {
+                throw new SQLException("jdbc:mysql://private-db password-should-stay-private SELECT Mat_Khau_Bam", "08001");
+            })) {
+                AuthResponse response = client(server, trustedClientTls)
+                        .login("username-should-stay-private", "password-should-stay-private");
+                assertEquals("DATABASE_UNAVAILABLE", response.code());
+            }
+        } finally {
+            diagnostics.close();
+            restoreProperty("mmr.diagnostics.dir", oldDir);
+            restoreProperty("mmr.diagnostics.enabled", oldEnabled);
+            restoreProperty("mmr.diagnostics.runId", oldRunId);
+        }
+        String content = Files.readString(log);
+        assertFalse(content.contains("username-should-stay-private"));
+        assertFalse(content.contains("password-should-stay-private"));
+        assertFalse(content.contains("private-db"));
+        assertFalse(content.contains("Mat_Khau_Bam"));
+        var records = content.lines().map(line -> JsonParser.parseString(line).getAsJsonObject()).toList();
+        var clientEvent = records.stream().filter(record -> record.get("event").getAsString().equals("auth_client_request"))
+                .findFirst().orElseThrow().getAsJsonObject("fields");
+        assertEquals("LOGIN", clientEvent.get("action").getAsString());
+        assertEquals("DATABASE_UNAVAILABLE", clientEvent.get("response_code").getAsString());
+        assertTrue(clientEvent.get("total_ms").getAsDouble() >= 0);
+        assertTrue(clientEvent.has("tcp_connect_ms"));
+        assertTrue(clientEvent.has("tls_handshake_ms"));
+        assertTrue(clientEvent.has("response_ms"));
+        assertTrue(records.stream().anyMatch(record -> record.get("event").getAsString().equals("server.connection.completed")));
+        assertTrue(records.stream().anyMatch(record -> record.getAsJsonObject("fields").has("sql_state")
+                && record.getAsJsonObject("fields").get("sql_state").getAsString().equals("08001")));
+        assertEquals("run.end", records.getLast().get("event").getAsString());
+    }
+
+    private static void restoreProperty(String key, String value) {
+        if (value == null) System.clearProperty(key);
+        else System.setProperty(key, value);
     }
 
     private static AuthServer server(SSLContext tls, AuthServer.Handler handler) throws IOException {

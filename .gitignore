@@ -12,3 +12,4 @@
 /config/*.p12
 /config/*.jks
 /config/*.cer
+/logs/diagnostics/
