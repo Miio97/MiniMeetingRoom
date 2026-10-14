@@ -33,20 +33,31 @@ public final class AuthService {
     private final PasswordHasher passwords;
     private final Clock clock;
     private final Duration sessionLifetime;
+    private final SessionRevocationListener revocations;
     private final SecureRandom random = new SecureRandom();
     private final String dummyHash;
 
     public AuthService() {
+        this(SessionRevocationListener.NONE);
+    }
+
+    public AuthService(SessionRevocationListener revocations) {
         this(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC(),
-                Duration.ofHours(ServerConfig.getInt("auth.sessionHours", 24)));
+                Duration.ofHours(ServerConfig.getInt("auth.sessionHours", 24)), revocations);
     }
 
     public AuthService(ConnectionProvider connections, PasswordHasher passwords, Clock clock,
             Duration sessionLifetime) {
+        this(connections, passwords, clock, sessionLifetime, SessionRevocationListener.NONE);
+    }
+
+    public AuthService(ConnectionProvider connections, PasswordHasher passwords, Clock clock,
+            Duration sessionLifetime, SessionRevocationListener revocations) {
         this.connections = Objects.requireNonNull(connections);
         this.passwords = Objects.requireNonNull(passwords);
         this.clock = Objects.requireNonNull(clock);
         this.sessionLifetime = Objects.requireNonNull(sessionLifetime);
+        this.revocations = Objects.requireNonNull(revocations);
         if (sessionLifetime.isNegative() || sessionLifetime.isZero()
                 || sessionLifetime.compareTo(Duration.ofDays(365)) > 0) {
             throw new IllegalArgumentException("Session lifetime must be between 1 second and 365 days.");
@@ -155,13 +166,27 @@ public final class AuthService {
             return AuthResponse.error("INVALID_REQUEST", "Phiên đăng nhập không hợp lệ.");
         }
         Instant now = clock.instant();
-        try (Connection connection = connections.getConnection();
-                PreparedStatement statement = connection.prepareStatement(
+        String hash = tokenHash(token);
+        int updated;
+        try (Connection connection = connections.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement(
                         "UPDATE Phien_Dang_Nhap SET Thu_Hoi_Luc = ? WHERE Token_Bam = ? AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc > ?")) {
-            statement.setTimestamp(1, Timestamp.from(now), utc());
-            statement.setString(2, tokenHash(token));
-            statement.setTimestamp(3, Timestamp.from(now), utc());
-            statement.executeUpdate();
+                    statement.setTimestamp(1, Timestamp.from(now), utc());
+                    statement.setString(2, hash);
+                    statement.setTimestamp(3, Timestamp.from(now), utc());
+                    updated = statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                rollback(connection, failure);
+                throw failure;
+            }
+        }
+        if (updated > 0) {
+            try { revocations.revoked(hash); }
+            catch (RuntimeException ignored) { /* Logout is already committed; periodic validation is the fallback. */ }
         }
         return AuthResponse.ok("Đã đăng xuất.", null, null, null);
     }

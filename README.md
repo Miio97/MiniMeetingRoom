@@ -2,6 +2,8 @@
 
 Ứng dụng desktop Java 21/JavaFX. Đăng ký, đăng nhập và đăng xuất đã kết nối MySQL qua server TCP/TLS riêng. Các chức năng phòng họp, chat, thiết bị và media hiện vẫn dùng dữ liệu demo.
 
+Mốc 0 SFU có [kiến trúc và quyết định engine](docs/sfu-architecture.md), [kết quả/cách chạy kiểm chứng](docs/sfu-testing.md). Native WebRTC chỉ được thêm trong profile thử nghiệm `media-probe`; ứng dụng chưa có cuộc gọi qua SFU. Chuyển media sang runtime riêng cần được chốt trước khi triển khai tiếp.
+
 ## Chạy trên máy phát triển
 
 Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans) và MySQL có các bảng trong `database/schema.sql`. Nếu database đã có đủ bảng thì không chạy lại schema.

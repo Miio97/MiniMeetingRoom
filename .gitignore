@@ -13,3 +13,5 @@
 /config/*.jks
 /config/*.cer
 /logs/diagnostics/
+/.tools/
+/config/*.private.properties
