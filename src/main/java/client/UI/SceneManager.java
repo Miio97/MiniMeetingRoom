@@ -39,9 +39,36 @@ public final class SceneManager {
     private final ExecutorService authWorker = Executors.newSingleThreadExecutor(runnable -> {
         Thread worker = new Thread(runnable, "mini-meeting-auth"); worker.setDaemon(true); return worker;
     });
+    private final java.util.concurrent.ThreadPoolExecutor roomReadWorker = new java.util.concurrent.ThreadPoolExecutor(
+            1, 1, 0, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(2),
+            Thread.ofPlatform().daemon().name("mini-meeting-room-read").factory());
+    private java.util.List<RoomInfo> recentRooms;
+    private long recentRoomsAt;
+    public java.util.List<RoomInfo> recentRooms() {
+        return recentRooms != null && System.nanoTime() - recentRoomsAt < java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+                ? recentRooms : null;
+    }
+    public void cacheRecentRooms(java.util.List<RoomInfo> rooms) {
+        recentRooms = java.util.List.copyOf(rooms); recentRoomsAt = System.nanoTime();
+    }
     private final ReadOnlyBooleanWrapper logoutPending = new ReadOnlyBooleanWrapper();
     private AuthUser authenticatedUser;
     private String sessionToken;
+    private java.time.Instant sessionExpiresAt;
+    private client.meeting.MeetingSession sfuSession;
+    private final java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory;
+    private boolean usingSfuRoom, leavingSfuRoom;
+    private final javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> meetingListener = (observable, before, after) -> meetingChanged(after);
+    private void meetingChanged(common.meeting.RoomSnapshot after) {
+        if (!usingSfuRoom || closing) return;
+        if (after != null && after.collaborationRoom() != null) updateRoom(after.collaborationRoom());
+        else if (after == null && !leavingSfuRoom && roomJoined) {
+            int count = roomInfo == null ? 0 : roomInfo.people();
+            long seconds = sfuSession == null ? 0 : sfuSession.elapsedSeconds();
+            roomJoined = false; pendingRoomId = -1; usingSfuRoom = false;
+            ended(seconds, count);
+        }
+    }
     private volatile String pendingToken;
     private volatile long pendingRoomId = -1;
     private volatile boolean closing;
@@ -54,12 +81,18 @@ public final class SceneManager {
     private final java.util.Map<String, String> preferences = new java.util.HashMap<>();
     public String preference(String key, String fallback) { return preferences.getOrDefault(key, fallback); }
     public void preferenceSet(String key, String value) { preferences.put(key, value); }
-    public SceneManager(Stage stage) { this(stage, new AuthClient(), new FileTransferClient()); }
+    public SceneManager(Stage stage) { this(stage, new AuthClient(), new FileTransferClient(), client.meeting.MeetingSession::new); }
     SceneManager(Stage stage, AuthClient authClient) { this(stage, authClient, new FileTransferClient()); }
     SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient) {
+        // Explicitly injected legacy transport retained for compatibility tests and old rooms.
+        this(stage, authClient, fileTransferClient, null);
+    }
+    public SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient,
+            java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory) {
         this.stage = java.util.Objects.requireNonNull(stage);
         this.authClient = java.util.Objects.requireNonNull(authClient);
         this.fileTransferClient = java.util.Objects.requireNonNull(fileTransferClient);
+        this.meetingFactory = meetingFactory;
     }
     public Stage stage() { return stage; }
     public AuthClient authClient() { return authClient; }
@@ -79,12 +112,24 @@ public final class SceneManager {
     }
     /** Cập nhật phần trình bày từ snapshot của server; không giữ PIN trên client. */
     public void updateRoom(RoomInfo next) {
+        recentRooms = null;
         roomInfo = java.util.Objects.requireNonNull(next);
         room = new MockData.Room(next.name(), next.code(), Math.max(1, next.people()), next.createdAt(), "", next.capacity());
         locked = next.locked();
     }
     public void leaveRoom(Runnable success, Consumer<String> failure) {
         if (!roomJoined || roomInfo == null) { success.run(); return; }
+        if (usingSfuRoom && sfuSession != null) {
+            leavingSfuRoom = true;
+            Parent leavingView = stage.getScene().getRoot();
+            if (leavingView instanceof MeetingScreen meeting) meeting.pauseFileTransfers();
+            sfuSession.leave().whenComplete((value, error) -> Platform.runLater(() -> {
+                if (closing) return;
+                leavingSfuRoom = false; roomJoined = false; pendingRoomId = -1;
+                closeSfuSession(); success.run();
+            }));
+            return;
+        }
         String token = sessionToken; long id = roomInfo.id();
         Parent leavingView = stage.getScene().getRoot();
         if (leavingView instanceof MeetingScreen meeting) meeting.pauseFileTransfers();
@@ -111,7 +156,9 @@ public final class SceneManager {
         if (!response.success() || response.user() == null || response.token() == null || response.token().isBlank()) {
             throw new IllegalArgumentException("Phiên đăng nhập không hợp lệ.");
         }
+        recentRooms = null; recentRoomsAt = 0;
         authenticatedUser = response.user(); sessionToken = response.token(); pendingToken = null;
+        sessionExpiresAt = response.expiresAt() == null ? java.time.Instant.EPOCH : java.time.Instant.parse(response.expiresAt());
     }
     /** Gửi mạng ngoài luồng JavaFX; chỉ cập nhật màn hình khi ứng dụng còn hoạt động. */
     public void runAuthRequest(Callable<AuthResponse> request, Consumer<AuthResponse> success, Consumer<Throwable> failure) {
@@ -139,7 +186,34 @@ public final class SceneManager {
             }
         });
     }
+    /** Read-only polling does not queue ahead of login/join/leave/logout actions. */
+    public void runBackgroundRoomRequest(Callable<AuthResponse> request, Consumer<AuthResponse> success, Consumer<Throwable> failure) {
+        if (closing) return;
+        String ownerToken = sessionToken;
+        try {
+            roomReadWorker.execute(() -> {
+                if (closing) return;
+                try {
+                    AuthResponse response = request.call();
+                    Platform.runLater(() -> { if (!closing && java.util.Objects.equals(ownerToken, sessionToken)) success.accept(response); });
+                } catch (Exception error) {
+                    Platform.runLater(() -> { if (!closing && java.util.Objects.equals(ownerToken, sessionToken)) failure.accept(error); });
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException busy) { failure.accept(new IOException("Đang cập nhật phòng. Vui lòng thử lại.")); }
+    }
     public static String connectionError(Throwable error) {
+        error = unwrap(error);
+        if (error instanceof common.signaling.SignalException signal) return switch (signal.code()) {
+            case "WRONG_PIN" -> "PIN phòng không đúng.";
+            case "ROOM_FULL" -> "Phòng đã đủ số người tham gia.";
+            case "ROOM_LOCKED" -> "Phòng đang khóa.";
+            case "ROOM_NOT_FOUND", "ROOM_NOT_ACTIVE" -> "Không tìm thấy phòng đang hoạt động.";
+            case "SESSION_INVALID" -> "Phiên đăng nhập không còn hợp lệ. Hãy đăng nhập lại.";
+            case "ALREADY_JOINED", "ALREADY_IN_ROOM" -> "Tài khoản đã tham gia phòng trên kết nối khác.";
+            case "INVALID_ROOM" -> "Tên phòng hoặc số người tối đa không hợp lệ.";
+            default -> "Kết nối phòng chưa hoàn tất. Kiểm tra máy chủ và thử lại.";
+        };
         if (error instanceof SocketTimeoutException) return "Máy chủ phản hồi quá lâu. Vui lòng thử lại.";
         if (error instanceof UnknownHostException) return "Không tìm thấy máy chủ. Kiểm tra địa chỉ trong config/auth-client.properties.";
         if (error instanceof SocketException || error instanceof EOFException) return "Kết nối máy chủ bị gián đoạn. Vui lòng thử lại.";
@@ -149,10 +223,13 @@ public final class SceneManager {
     public void logout() {
         if (closing || logoutPending.get()) return;
         if (sessionToken == null) { clearSession(); auth(); return; }
+        boolean videoWasOpen = hasVideoRoom();
+        closeSfuSession();
         logoutPending.set(true); stage.getScene().getRoot().setDisable(true);
         String token = sessionToken;
         long joinedId = roomJoined && roomInfo != null ? roomInfo.id() : -1;
         java.util.concurrent.atomic.AtomicBoolean leftRoom = new java.util.concurrent.atomic.AtomicBoolean();
+        leftRoom.set(videoWasOpen);
         // Stop file sockets and polling before the membership/session is revoked.
         dispose();
         runAuthRequest(() -> {
@@ -189,6 +266,8 @@ public final class SceneManager {
         Ui.style(alert); alert.showAndWait();
     }
     private void clearSession() {
+        recentRooms = null; recentRoomsAt = 0;
+        closeSfuSession(); sessionExpiresAt = null;
         authenticatedUser = null; sessionToken = null; preferences.clear();
         roomInfo = null; roomJoined = false; pendingRoomId = -1;
         mic = true; camera = true; locked = false; room = MockData.rooms().getFirst();
@@ -196,7 +275,7 @@ public final class SceneManager {
     /** Giữ cửa sổ tối đa 6 giây để thử thu hồi phiên trước khi đóng. */
     public void closeApplication() {
         if (closing) return;
-        closing = true; dispose();
+        closing = true; closeSfuSession(); dispose();
         if (stage.getScene() != null) {
             stage.getScene().getRoot().setDisable(true);
             if (stage.getScene().getRoot() instanceof AuthScreen auth) auth.clearSecrets();
@@ -223,12 +302,12 @@ public final class SceneManager {
         if (closed) return;
         closed = true;
         if (closeDeadline != null) closeDeadline.stop();
-        clearSession(); pendingToken = null; authWorker.shutdownNow(); fileTransferClient.close(); stage.hide(); Platform.exit();
+        clearSession(); pendingToken = null; authWorker.shutdownNow(); roomReadWorker.shutdownNow(); fileTransferClient.close(); stage.hide(); Platform.exit();
     }
     public void shutdown() {
         closing = true; closed = true; dispose();
         if (closeDeadline != null) closeDeadline.stop();
-        clearSession(); pendingToken = null; authWorker.shutdownNow(); fileTransferClient.close();
+        clearSession(); pendingToken = null; authWorker.shutdownNow(); roomReadWorker.shutdownNow(); fileTransferClient.close();
     }
     public MockData.Room room() { return room; }
     public boolean mic() { return mic; }
@@ -261,10 +340,74 @@ public final class SceneManager {
     }
     private boolean hasSession() { if (closing) return false; if (authenticatedUser == null) { auth(); return false; } return true; }
     public void lobby() { lobby(""); }
+    public client.meeting.MeetingSession sfuSession() {
+        if (sessionToken == null || sessionExpiresAt == null) throw new IllegalStateException("SESSION_REQUIRED");
+        if (sfuSession == null) {
+            sfuSession = meetingFactory == null ? new client.meeting.MeetingSession(sessionToken, sessionExpiresAt)
+                    : meetingFactory.apply(sessionToken, sessionExpiresAt);
+            sfuSession.roomProperty().addListener(meetingListener);
+        }
+        return sfuSession;
+    }
+    public boolean hasVideoRoom() { return usingSfuRoom && sfuSession != null && sfuSession.snapshot() != null; }
+    public int maxRoomCapacity() { return meetingFactory == null ? common.room.RoomValidation.MAX_CAPACITY : 10; }
+    private void closeSfuSession() {
+        if (sfuSession != null) { sfuSession.roomProperty().removeListener(meetingListener); sfuSession.close(); sfuSession = null; }
+        if (usingSfuRoom) { roomJoined = false; pendingRoomId = -1; }
+        usingSfuRoom = false; leavingSfuRoom = false;
+    }
+    public void requestCreateRoom(String name, String pin, int capacity, boolean locked,
+            Consumer<RoomInfo> success, Consumer<Throwable> failure) {
+        String token = sessionToken;
+        if (meetingFactory == null) { legacyRoomRequest(() -> authClient.createRoom(token, name, pin, capacity), success, failure); return; }
+        var session = sfuSession();
+        deliverMeetingRoom(session.create(new common.meeting.CreateRoomParams(name, pin, capacity, locked))
+                .thenCompose(preview -> session.join(false, false)), success, failure);
+    }
+    public void requestJoinRoom(String identifier, String pin, Consumer<RoomInfo> success, Consumer<Throwable> failure) {
+        String token = sessionToken;
+        if (meetingFactory == null) { legacyRoomRequest(() -> authClient.joinRoom(token, identifier, pin), success, failure); return; }
+        var session = sfuSession();
+        deliverMeetingRoom(session.lookup(identifier, pin).thenCompose(preview -> session.join(false, false)), success, error -> {
+            Throwable cause = unwrap(error);
+            if (cause instanceof common.signaling.SignalException signal && "ROOM_NOT_FOUND".equals(signal.code())) {
+                closeSfuSession();
+                legacyRoomRequest(() -> authClient.joinRoom(token, identifier, pin), success, failure);
+            } else failure.accept(error);
+        });
+    }
+    private void legacyRoomRequest(Callable<AuthResponse> request, Consumer<RoomInfo> success, Consumer<Throwable> failure) {
+        runAuthRequest(request, response -> {
+            if (sessionExpired(response)) return;
+            if (response.success() && response.room() != null) success.accept(response.room());
+            else failure.accept(new IOException(response.message() == null ? "Yêu cầu phòng chưa hoàn tất." : response.message()));
+        }, failure);
+    }
+    private void deliverMeetingRoom(java.util.concurrent.CompletableFuture<common.meeting.RoomSnapshot> request,
+            Consumer<RoomInfo> success, Consumer<Throwable> failure) {
+        String ownerToken = sessionToken;
+        request.whenComplete((snapshot, error) -> Platform.runLater(() -> {
+            if (closing || !java.util.Objects.equals(ownerToken, sessionToken)) return;
+            if (error != null) { failure.accept(unwrap(error)); return; }
+            if (snapshot.collaborationRoom() == null) { failure.accept(new IOException("Máy chủ chưa hỗ trợ phòng video trên giao diện chính.")); return; }
+            usingSfuRoom = true; roomJoined = true; mic = false; camera = false;
+            updateRoom(snapshot.collaborationRoom()); success.accept(snapshot.collaborationRoom());
+        }));
+    }
+    private static Throwable unwrap(Throwable error) {
+        while ((error instanceof java.util.concurrent.CompletionException || error instanceof java.util.concurrent.ExecutionException) && error.getCause() != null) error = error.getCause();
+        return error;
+    }
+    public void sfuRooms() {
+        if (!hasSession()) return;
+        if (roomJoined) { roomError("Hãy rời phòng hiện tại trước khi mở phòng SFU."); return; }
+        SfuRoomScreen view = new SfuRoomScreen(this, sfuSession());
+        show(view, 1100, 700, true, view::dispose);
+    }
     public void lobby(String code) { if (!hasSession()) return; LobbyScreen view = new LobbyScreen(this, code); show(view, 1100, 700, true, view::dispose); }
     public void history() { if (hasSession()) show(new HistoryScreen(this), 1100, 700, true, () -> { }); }
-    public void settings() { if (hasSession()) show(new SettingsScreen(this, false), 1100, 700, true, () -> { }); }
-    public void settingsAccount() { if (hasSession()) show(new SettingsScreen(this, true), 1100, 700, true, () -> { }); }
+    public void settings() { if (hasSession()) { SettingsScreen view = new SettingsScreen(this, false); show(view, 1100, 700, true, view::dispose); } }
+    public void settingsAccount() { if (hasSession()) { SettingsScreen view = new SettingsScreen(this, true); show(view, 1100, 700, true, view::dispose); } }
     public void preJoin(MockData.Room next) {
         // Lối vào cũ từ màn hình kết thúc: luôn yêu cầu nhập lại PIN và được server xác nhận.
         lobby(next.code());
@@ -280,8 +423,13 @@ public final class SceneManager {
     public void meeting() {
         if (!hasSession()) return;
         if (!roomJoined || roomInfo == null) { lobby(); return; }
+        if (hasVideoRoom()) {
+            if (!(stage.getScene().getRoot() instanceof PreJoinScreen waiting)) return;
+            if (!waiting.cameraPermissionGranted()) { waiting.requireCameraPermission(); return; }
+        }
         MeetingScreen view = new MeetingScreen(this);
         show(view, 1280, 800, true, view::dispose);
+        if (hasVideoRoom()) sfuSession.video().publishPreparedCamera();
     }
     public void ended(long seconds, int count) {
         if (!hasSession()) return;
@@ -291,24 +439,18 @@ public final class SceneManager {
         }
         show(new MeetingEndedScreen(this, seconds, count), 1100, 700, true, () -> { });
     }
-    /** Compatibility entry points use the canonical room service on the auth channel. */
+    /** Existing entry points use the same room authority as the visible forms. */
     public void createRoom(String name, String pin, int capacity, boolean locked) {
         if (!hasSession()) return;
-        String token = sessionToken;
-        roomRequest(() -> authClient.createRoom(token, name, pin, capacity));
+        Parent original = stage.getScene().getRoot(); original.setDisable(true);
+        requestCreateRoom(name, pin, capacity, locked, room -> { original.setDisable(false); preJoin(room); },
+                error -> { original.setDisable(false); roomError(connectionError(error)); });
     }
     public void joinRoom(String code, String pin) {
         if (!hasSession()) return;
-        String token = sessionToken;
-        roomRequest(() -> authClient.joinRoom(token, code, pin));
-    }
-    private void roomRequest(Callable<AuthResponse> request) {
         Parent original = stage.getScene().getRoot(); original.setDisable(true);
-        runAuthRequest(request, response -> {
-            original.setDisable(false);
-            if (sessionExpired(response)) return;
-            if (response.success()) preJoin(response.room()); else roomError(response.message());
-        }, error -> { original.setDisable(false); roomError(connectionError(error)); });
+        requestJoinRoom(code, pin, room -> { original.setDisable(false); preJoin(room); },
+                error -> { original.setDisable(false); roomError(connectionError(error)); });
     }
     private void roomError(String message) {
         Alert alert = new Alert(Alert.AlertType.ERROR); alert.initOwner(stage);

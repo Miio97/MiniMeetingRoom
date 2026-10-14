@@ -96,10 +96,13 @@ public final class SignalingClient implements AutoCloseable {
             Thread.ofVirtual().name("signal-client-reader").start(() -> readLoop(input));
             JsonObject body = new JsonObject(); body.addProperty("token", token); body.addProperty("maxFrameBytes", settings.maxBytes());
             request("AUTHENTICATE", null, body).get(15, TimeUnit.SECONDS);
-            state = State.CONNECTED;
-            timer.scheduleAtFixedRate(() -> {
-                if (!closed.get()) request("HEARTBEAT", null, new JsonObject());
-            }, 5, 5, TimeUnit.SECONDS);
+            synchronized (admission) {
+                if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
+                state = State.CONNECTED;
+                timer.scheduleAtFixedRate(() -> {
+                    if (!closed.get()) request("HEARTBEAT", null, new JsonObject());
+                }, 5, 5, TimeUnit.SECONDS);
+            }
             Diagnostics.current().event("signaling.client.connected", Map.of("transport", "tcp_tls",
                     "total_ms", (System.nanoTime() - started) / 1_000_000.0));
         } catch (Exception failure) {

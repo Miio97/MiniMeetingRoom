@@ -66,6 +66,7 @@ public final class SignalWire {
                         || !object.get(field).getAsJsonPrimitive().isNumber()
                         || object.get(field).getAsBigDecimal().longValueExact() < 0) throw new IOException("FRAME_JSON");
             }
+            if (object.get("version").getAsBigDecimal().intValueExact() != 1) throw new IOException("FRAME_VERSION");
             if (object.has("revision") && !object.get("revision").isJsonNull()
                     && (!object.get("revision").isJsonPrimitive() || !object.get("revision").getAsJsonPrimitive().isNumber()
                     || object.get("revision").getAsBigDecimal().longValueExact() < 0)) throw new IOException("FRAME_JSON");

@@ -16,7 +16,7 @@ public final class CreateRoomDialog extends Dialog<RoomInfo> {
         setHeaderText("Một không gian cho những ý tưởng mới"); Ui.style(this);
         TextField name = new TextField(); name.setPromptText("Ví dụ: Họp nhóm sản phẩm"); name.setId("room-name");
         PasswordField pin = new PasswordField(); pin.setPromptText("PIN gồm 4–6 chữ số"); pin.setId("room-pin");
-        Spinner<Integer> capacity = new Spinner<>(RoomValidation.MIN_CAPACITY, RoomValidation.MAX_CAPACITY, RoomValidation.DEFAULT_CAPACITY);
+        Spinner<Integer> capacity = new Spinner<>(RoomValidation.MIN_CAPACITY, manager.maxRoomCapacity(), RoomValidation.DEFAULT_CAPACITY);
         capacity.setId("room-capacity"); capacity.setEditable(false); capacity.setMaxWidth(Double.MAX_VALUE);
         capacity.setAccessibleText("Số người tối đa trong phòng");
         Label error = Ui.label("", "error-text"); error.setWrapText(true); error.setId("create-room-error");
@@ -38,11 +38,9 @@ public final class CreateRoomDialog extends Dialog<RoomInfo> {
             if (validation != null) { error.setText(validation); return; }
             String roomName = name.getText(); String roomPin = pin.getText(); int limit = capacity.getValue();
             pending = true; content.setDisable(true); submit.setDisable(true); cancel.setDisable(true); submit.setText("Đang tạo…"); error.setText("");
-            manager.runAuthRequest(() -> manager.authClient().createRoom(manager.sessionToken(), roomName, roomPin, limit), response -> {
+            manager.requestCreateRoom(roomName, roomPin, limit, false, room -> {
                 pending = false; content.setDisable(false); submit.setDisable(false); cancel.setDisable(false); submit.setText("Tạo phòng");
-                if (manager.sessionExpired(response)) { close(); return; }
-                if (response.success() && response.room() != null) { pin.clear(); setResult(response.room()); close(); }
-                else error.setText(response.message() == null ? "Máy chủ chưa tạo được phòng. Vui lòng thử lại." : response.message());
+                pin.clear(); setResult(room); close();
             }, cause -> {
                 pending = false; content.setDisable(false); submit.setDisable(false); cancel.setDisable(false); submit.setText("Tạo phòng");
                 error.setText(SceneManager.connectionError(cause));

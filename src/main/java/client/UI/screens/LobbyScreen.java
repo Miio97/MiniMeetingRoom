@@ -63,13 +63,11 @@ public final class LobbyScreen extends BorderPane {
             String validation = RoomValidation.identifierError(code.getText());
             if (validation == null) validation = RoomValidation.pinError(pin.getText());
             if (validation != null) { error.setText(validation); return; }
-            String identifier = code.getText(), roomPin = pin.getText(), token = manager.sessionToken();
+            String identifier = code.getText(), roomPin = pin.getText();
             error.setText("Đang kiểm tra phòng…"); setDisable(true);
-            manager.runAuthRequest(() -> manager.authClient().joinRoom(token, identifier, roomPin), response -> {
+            manager.requestJoinRoom(identifier, roomPin, room -> {
                 if (disposed) return; setDisable(false);
-                if (manager.sessionExpired(response)) return;
-                if (response.success() && response.room() != null) { pin.clear(); manager.preJoin(response.room()); }
-                else error.setText(response.message() == null ? "Chưa thể tham gia phòng. Vui lòng thử lại." : response.message());
+                pin.clear(); manager.preJoin(room);
             }, cause -> { if (!disposed) { setDisable(false); error.setText(SceneManager.connectionError(cause)); } });
         }); enter.setId("join-room-submit"); enter.setMaxWidth(Double.MAX_VALUE);
         join.getChildren().addAll(Ui.label("Tham gia phòng", "subtitle"), Ui.label("Nhập ID / mã phòng và PIN được chia sẻ với bạn.", "muted"), inputs, error, enter);
@@ -78,19 +76,26 @@ public final class LobbyScreen extends BorderPane {
         HBox.setHgrow(create, Priority.ALWAYS); HBox.setHgrow(join, Priority.ALWAYS);
         refresh = Ui.button("Làm mới", "secondary", this::loadRooms); refresh.setId("refresh-rooms");
         roomStatus.setWrapText(true); roomStatus.setId("rooms-status"); rooms.setId("recent-rooms");
-        main.getChildren().addAll(actions, Ui.row(12, Ui.label("Phòng gần đây của bạn", "subtitle"), Ui.spacer(), refresh), roomStatus, rooms);
-        setCenter(Ui.scroll(main)); loadRooms();
+        main.getChildren().addAll(actions,
+                Ui.row(12, Ui.label("Phòng gần đây của bạn", "subtitle"), Ui.spacer(), refresh), roomStatus, rooms);
+        setCenter(Ui.scroll(main));
+        java.util.List<RoomInfo> cached = manager.recentRooms();
+        if (cached == null) loadRooms(); else renderRooms(cached);
     }
     private void loadRooms() {
         if (disposed || loading) return;
         loading = true; refresh.setDisable(true); roomStatus.setText("Đang tải danh sách phòng…");
         String token = manager.sessionToken();
-        manager.runAuthRequest(() -> manager.authClient().listRooms(token), response -> {
+        manager.runBackgroundRoomRequest(() -> manager.authClient().listRooms(token), response -> {
             if (disposed) return; loading = false; refresh.setDisable(false);
             if (manager.sessionExpired(response)) return;
             if (!response.success()) { roomStatus.setText(response.message()); return; }
-            rooms.getChildren().clear();
             java.util.List<RoomInfo> recent = response.rooms() == null ? java.util.List.of() : response.rooms();
+            manager.cacheRecentRooms(recent); renderRooms(recent);
+        }, cause -> { if (!disposed) { loading = false; refresh.setDisable(false); roomStatus.setText(SceneManager.connectionError(cause)); } });
+    }
+    private void renderRooms(java.util.List<RoomInfo> recent) {
+            rooms.getChildren().clear();
             roomStatus.setText(recent.isEmpty() ? "Bạn chưa tạo hoặc tham gia phòng nào." : recent.size() + " phòng • Chọn phòng và nhập lại PIN để tham gia.");
             for (RoomInfo room : recent) {
             boolean live = "DANG_HOAT_DONG".equals(room.status()) || "CHO".equals(room.status());
@@ -103,7 +108,6 @@ public final class LobbyScreen extends BorderPane {
             }); action.setDisable(!live); action.setMinWidth(90);
             HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); rooms.getChildren().add(item);
             }
-        }, cause -> { if (!disposed) { loading = false; refresh.setDisable(false); roomStatus.setText(SceneManager.connectionError(cause)); } });
     }
     public void dispose() { disposed = true; pin.clear(); pulse.stop(); }
 }

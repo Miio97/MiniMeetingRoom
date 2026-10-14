@@ -227,7 +227,7 @@ public final class AuthServer implements AutoCloseable {
                 FileTransferServer files = runningFiles.get();
                 if (files != null) try { files.close(); }
                 catch (IOException error) { diagnostics.failure("server.file_shutdown.failed", error, Map.of()); }
-                diagnostics.close();
+                DatabaseConnection.close(); diagnostics.close();
             }
         };
         Thread shutdownHook = new Thread(cleanup, "auth-shutdown");
@@ -357,7 +357,7 @@ public final class AuthServer implements AutoCloseable {
         return server.listener.getInetAddress().getHostAddress() + ":" + server.port();
     }
 
-    private static FileTransferServer fileServer(SSLContext tls, TransferConfig config) throws IOException {
+    static FileTransferServer fileServer(SSLContext tls, TransferConfig config) throws IOException {
         if (!config.enabled()) return null;
         FileStorageService storage = new FileStorageService(config.storagePath(), config.quotaBytes(),
                 config.maxFileBytes(), config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());

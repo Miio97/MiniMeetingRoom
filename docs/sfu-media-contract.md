@@ -1,6 +1,6 @@
 # Hợp đồng Java backend ↔ media service Go/Pion
 
-Trạng thái: thiết kế cho Mốc 2, chưa phải API production đã triển khai. Mốc 0 đã
+Trạng thái: đây là thiết kế mở rộng ban đầu. MVP video đã triển khai theo [video-call.md](video-call.md), dùng control `/v1/control` và PC riêng cho từng publication; không coi toàn bộ endpoint/lease 30 giây trong tài liệu này đã triển khai. Mốc 0 đã
 chứng minh Java publisher → Pion ingress → Pion egress → Java subscriber với
 Opus/VP8 và RTP codec payload không đổi. `/publish`, `/subscribe`, `/stats`,
 `/session` của `media/probe` là API của bài thử; không đưa trực tiếp vào luồng họp.

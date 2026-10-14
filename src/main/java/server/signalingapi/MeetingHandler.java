@@ -11,7 +11,9 @@ import server.meeting.RoomService;
 public final class MeetingHandler implements SignalingServer.Handler {
     private static final Gson JSON = new Gson();
     private final RoomService rooms;
-    public MeetingHandler(RoomService rooms) { this.rooms = rooms; }
+    private final server.media.VideoCoordinator video;
+    public MeetingHandler(RoomService rooms) { this(rooms, null); }
+    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video) { this.rooms = rooms; this.video = video; }
 
     @Override public SignalMessage handle(SignalingServer.Connection connection, SignalMessage request) throws Exception {
         JsonObject body = request.body();
@@ -19,6 +21,11 @@ public final class MeetingHandler implements SignalingServer.Handler {
         String type;
         try {
             switch (request.type()) {
+                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE" -> {
+                    rooms.assertMember(connection.id(), request.roomId());
+                    if (video == null) throw new SignalException("MEDIA_NOT_READY");
+                    response = video.handle(connection, request); type = "VIDEO_REPLY";
+                }
                 case "CREATE_ROOM" -> {
                     var params = new CreateRoomParams(text(body, "name", 100), text(body, "pin", 6),
                             integer(body, "capacity"), bool(body, "locked", false));
@@ -39,6 +46,7 @@ public final class MeetingHandler implements SignalingServer.Handler {
                 }
                 case "LEAVE_ROOM" -> {
                     rooms.assertMember(connection.id(), request.roomId()); rooms.leave(connection.id(), "TU_ROI");
+                    if (video != null) video.revoke(connection.id());
                     response.addProperty("ok", true); type = "ROOM_LEFT";
                 }
                 case "SET_MEDIA_STATE" -> {
@@ -55,10 +63,12 @@ public final class MeetingHandler implements SignalingServer.Handler {
                 case "STOP_PUBLISH" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     response.add("room", JSON.toJsonTree(rooms.stopPublish(connection.id(), text(body, "targetParticipantId", 96), text(body, "kind", 12))));
+                    if (video != null && "VIDEO".equals(text(body, "kind", 12))) video.stopParticipant(request.roomId(), text(body, "targetParticipantId", 96));
                     type = "ROOM_SNAPSHOT";
                 }
                 case "KICK" -> {
                     rooms.assertMember(connection.id(), request.roomId()); rooms.kick(connection.id(), text(body, "targetParticipantId", 96));
+                    response.add("room", JSON.toJsonTree(rooms.getRoom(connection.id(), request.roomId())));
                     response.addProperty("ok", true); type = "PARTICIPANT_KICKED";
                 }
                 case "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE" -> {
@@ -67,12 +77,18 @@ public final class MeetingHandler implements SignalingServer.Handler {
                 default -> throw new SignalException("UNKNOWN_OPERATION");
             }
         } catch (IllegalArgumentException | IllegalStateException invalid) { throw new SignalException("INVALID_REQUEST"); }
+        common.diagnostics.Diagnostics.current().event("meeting.state", java.util.Map.of(
+                "room_count", rooms.roomCount(), "participant_count", rooms.participantCount()));
         return connection.message(type, request.requestId(), request.roomId(), null, response);
     }
 
     @Override public void disconnected(SignalingServer.Connection connection, String reason) {
+        if (video != null) video.revoke(connection.id());
         rooms.leave(connection.id(), "SERVER_SHUTDOWN".equals(reason) ? "PHONG_DONG" : "MAT_KET_NOI");
+        common.diagnostics.Diagnostics.current().event("meeting.state", java.util.Map.of(
+                "room_count", rooms.roomCount(), "participant_count", rooms.participantCount()));
     }
+    @Override public void validated(SignalingServer.Connection connection) { if (video != null) video.validated(connection); }
 
     private static String text(JsonObject body, String field, int maximum) throws SignalException {
         var value = body.get(field);

@@ -40,15 +40,26 @@ public final class RoomService {
     private final PasswordHasher passwords;
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
+    private final boolean excludeSignalingRooms;
 
     public RoomService() {
         this(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC());
     }
 
+    /** Combined server keeps signaling membership under its connection owner. */
+    public RoomService(boolean excludeSignalingRooms) {
+        this(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC(), excludeSignalingRooms);
+    }
+
     public RoomService(ConnectionProvider connections, PasswordHasher passwords, Clock clock) {
+        this(connections, passwords, clock, false);
+    }
+
+    public RoomService(ConnectionProvider connections, PasswordHasher passwords, Clock clock, boolean excludeSignalingRooms) {
         this.connections = Objects.requireNonNull(connections);
         this.passwords = Objects.requireNonNull(passwords);
         this.clock = Objects.requireNonNull(clock);
+        this.excludeSignalingRooms = excludeSignalingRooms;
     }
 
     public AuthResponse handle(AuthRequest request) throws SQLException {
@@ -67,14 +78,17 @@ public final class RoomService {
             return invalidSession();
         }
         try (Connection connection = connections.getConnection()) {
+            boolean readOnly = "LIST_ROOMS".equals(action) || "GET_ROOM".equals(action);
             // Session validation must not establish a stale MySQL REPEATABLE READ snapshot before
             // the room lock is acquired. READ COMMITTED makes the capacity check see the last join.
-            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            connection.setAutoCommit(false);
+            if (!readOnly) {
+                connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                connection.setAutoCommit(false);
+            }
             try {
                 Long userId = authenticatedUser(connection, request.token());
                 if (userId == null) {
-                    connection.rollback();
+                    if (!readOnly) connection.rollback();
                     return invalidSession();
                 }
                 AuthResponse response = switch (action) {
@@ -85,6 +99,7 @@ public final class RoomService {
                     case "LEAVE_ROOM" -> leave(connection, userId, request.room());
                     default -> throw new IllegalStateException("Unsupported room action");
                 };
+                if (readOnly) return response;
                 if (response.success()) {
                     connection.commit();
                 } else {
@@ -92,7 +107,7 @@ public final class RoomService {
                 }
                 return response;
             } catch (SQLException | RuntimeException exception) {
-                rollback(connection, exception);
+                if (!readOnly) rollback(connection, exception);
                 throw exception;
             }
         }
@@ -181,8 +196,8 @@ public final class RoomService {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + ROOM_COLUMNS + ", (SELECT COUNT(DISTINCT t.Ma_Nguoi_Dung) FROM Thanh_Vien_Phong t "
                         + "WHERE t.Ma_Phong = p.Ma_Phong AND t.Roi_Phong_Luc IS NULL) AS So_Thanh_Vien "
-                        + "FROM Phong_Hop p WHERE p.Ma_Chu_Phong = ? OR EXISTS "
-                        + "(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong = p.Ma_Phong AND h.Ma_Nguoi_Dung = ?) "
+                        + "FROM Phong_Hop p WHERE (p.Ma_Chu_Phong = ? OR EXISTS "
+                        + "(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong = p.Ma_Phong AND h.Ma_Nguoi_Dung = ?)) "
                         + "ORDER BY p.Ngay_Tao DESC, p.Ma_Phong DESC LIMIT 20")) {
             statement.setLong(1, userId);
             statement.setLong(2, userId);
@@ -196,7 +211,7 @@ public final class RoomService {
     }
 
     private AuthResponse get(Connection connection, long userId, RoomRequest request) throws SQLException {
-        RoomRow room = findRoom(connection, request.identifier());
+        RoomRow room = findRoom(connection, request.identifier(), false);
         AuthResponse unavailable = unavailable(room);
         if (unavailable != null) {
             return unavailable;
@@ -283,25 +298,33 @@ public final class RoomService {
         return null;
     }
 
-    private static RoomRow findRoom(Connection connection, String identifier) throws SQLException {
+    private RoomRow findRoom(Connection connection, String identifier) throws SQLException {
+        return findRoom(connection, identifier, true);
+    }
+    private RoomRow findRoom(Connection connection, String identifier, boolean forUpdate) throws SQLException {
         String normalized = identifier.strip().toUpperCase(Locale.ROOT);
         if (normalized.matches("[0-9]+")) {
             try {
-                return findRoom(connection, Long.parseLong(normalized));
+                return findRoom(connection, "p.Ma_Phong", Long.parseLong(normalized), forUpdate);
             } catch (NumberFormatException exception) {
                 return null;
             }
         }
-        return findRoom(connection, "p.Ma_Phong_Tham_Gia", normalized);
+        return findRoom(connection, "p.Ma_Phong_Tham_Gia", normalized, forUpdate);
     }
 
-    private static RoomRow findRoom(Connection connection, long roomId) throws SQLException {
+    private RoomRow findRoom(Connection connection, long roomId) throws SQLException {
         return findRoom(connection, "p.Ma_Phong", roomId);
     }
 
-    private static RoomRow findRoom(Connection connection, String column, Object value) throws SQLException {
+    private RoomRow findRoom(Connection connection, String column, Object value) throws SQLException {
+        return findRoom(connection, column, value, true);
+    }
+    private RoomRow findRoom(Connection connection, String column, Object value, boolean forUpdate) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT " + ROOM_COLUMNS + " FROM Phong_Hop p WHERE " + column + " = ? FOR UPDATE")) {
+                "SELECT " + ROOM_COLUMNS + " FROM Phong_Hop p WHERE " + column + " = ?"
+                        + (excludeSignalingRooms ? " AND NOT EXISTS (SELECT 1 FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong)" : "")
+                        + (forUpdate ? " FOR UPDATE" : ""))) {
             statement.setObject(1, value);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? readRoom(result) : null;

@@ -13,7 +13,8 @@ public final class DeviceSettingsDialog extends Dialog<Void> {
         Slider volume = new Slider(0, 100, 75); Label level = Ui.label("75%", "accent-text"); level.textProperty().bind(volume.valueProperty().asString("%.0f%%"));
         CheckBox noise = new CheckBox("Khử tiếng ồn (mô phỏng)"); noise.setSelected(true);
         VBox appearance = Ui.column(8, Ui.label("Giao diện", "subtitle"), Ui.row(12, Ui.label("Chế độ hiển thị", "field-label"), Ui.spacer(), ThemeManager.selector()));
-        VBox content = Ui.column(16, appearance, new Separator(), Ui.label("Âm thanh & hình ảnh", "subtitle"), Ui.field("Camera", Ui.devices(MockData.cameras())), Ui.field("Microphone", Ui.devices(MockData.microphones())), Ui.field("Loa", Ui.devices(MockData.speakers())), Ui.row(12, Ui.label("Âm lượng", "field-label"), Ui.spacer(), level), volume, noise, Ui.label("Thiết bị giả lập, chưa truy cập camera hay microphone.", "caption"));
+        VBox content = Ui.column(16, appearance, new Separator(), Ui.label("Âm thanh & hình ảnh", "subtitle"),
+                Ui.label("Phòng cũ chưa có video WebRTC. Tạo phòng mới để dùng camera thật.", "caption"), Ui.field("Microphone (demo)", Ui.devices(MockData.microphones())), Ui.field("Loa (demo)", Ui.devices(MockData.speakers())), Ui.row(12, Ui.label("Âm lượng", "field-label"), Ui.spacer(), level), volume, noise);
         content.setPrefWidth(420); getDialogPane().setContent(content); getDialogPane().getButtonTypes().add(ButtonType.CLOSE); ((Button) getDialogPane().lookupButton(ButtonType.CLOSE)).setText("Xong");
     }
 }

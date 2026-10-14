@@ -23,6 +23,16 @@ public final class MeetingSession implements AutoCloseable {
     private static final Gson JSON = new Gson();
     private final String token;
     private final Instant expiresAt;
+    @FunctionalInterface public interface TransportFactory {
+        SignalingClient create(java.util.function.Consumer<SignalMessage> listener) throws java.io.IOException;
+    }
+    private final TransportFactory transports;
+    private final java.util.function.Function<MeetingSession, client.media.VideoCallController> mediaFactory;
+    private final Object transportLock = new Object();
+    private final java.util.Set<CompletableFuture<?>> jobs = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean refreshAgain = new AtomicBoolean();
+    private final AtomicReference<RoomSnapshot> incomingRoom = new AtomicReference<>();
+    private final AtomicBoolean applyingRoom = new AtomicBoolean();
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(32), Thread.ofPlatform().daemon().name("meeting-client-owner").factory());
     private final AtomicBoolean closed = new AtomicBoolean(), refreshing = new AtomicBoolean(), fxScheduled = new AtomicBoolean();
@@ -34,6 +44,17 @@ public final class MeetingSession implements AutoCloseable {
     private volatile SignalingClient client;
     private volatile RoomSnapshot snapshot;
     private volatile String self;
+    private volatile client.media.VideoCallController video;
+    public CompletableFuture<JsonObject> videoRequest(String type, JsonObject body, String requestId) {
+        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP").contains(type))
+            return CompletableFuture.failedFuture(new SignalException("INVALID_REQUEST"));
+        return submit(() -> command(type, requireRoom().roomId(), body, requestId).body());
+    }
+    public synchronized client.media.VideoCallController video() {
+        if (video == null) video = mediaFactory.apply(this);
+        return video;
+    }
+    private synchronized void closeVideo() { if (video != null) { video.close(); video = null; } }
     private volatile RoomPreview preview;
     private volatile String pin = "";
     private volatile long joinedAt;
@@ -41,7 +62,16 @@ public final class MeetingSession implements AutoCloseable {
     private Intent createIntent, joinIntent;
 
     public MeetingSession(String token, Instant expiresAt) {
+        this(token, expiresAt, SignalingClient::new);
+    }
+    public MeetingSession(String token, Instant expiresAt, TransportFactory transports) {
+        this(token, expiresAt, transports, session -> new client.media.VideoCallController(session::videoRequest, session::snapshot, session::selfParticipantId));
+    }
+    public MeetingSession(String token, Instant expiresAt, TransportFactory transports,
+                          java.util.function.Function<MeetingSession, client.media.VideoCallController> mediaFactory) {
         this.token = Objects.requireNonNull(token); this.expiresAt = Objects.requireNonNull(expiresAt);
+        this.transports = Objects.requireNonNull(transports);
+        this.mediaFactory = Objects.requireNonNull(mediaFactory);
     }
     public ReadOnlyObjectProperty<State> stateProperty() { return state.getReadOnlyProperty(); }
     public ReadOnlyObjectProperty<RoomSnapshot> roomProperty() { return room.getReadOnlyProperty(); }
@@ -86,6 +116,7 @@ public final class MeetingSession implements AutoCloseable {
                 throw failure;
             }
             self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null;
+            pin = "";
             publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
         });
     }
@@ -109,16 +140,20 @@ public final class MeetingSession implements AutoCloseable {
     }
     public CompletableFuture<Void> kick(String participant) {
         return submit(() -> { JsonObject body = new JsonObject(); body.addProperty("targetParticipantId", participant);
-            command("KICK", requireRoom().roomId(), body, UUID.randomUUID().toString()); refreshNow(); return null; });
+            SignalMessage reply = command("KICK", requireRoom().roomId(), body, UUID.randomUUID().toString());
+            if (reply.body().has("room")) { snapshot = decode(reply, "room", RoomSnapshot.class); publish(State.CONNECTED, "Thành viên đã đồng bộ."); }
+            else refreshNow();
+            return null; });
     }
     private CompletableFuture<RoomSnapshot> mutate(String type, JsonObject body) {
         return submit(() -> { RoomSnapshot value = decode(command(type, requireRoom().roomId(), body, UUID.randomUUID().toString()), "room", RoomSnapshot.class);
             snapshot = value; publish(State.CONNECTED, "Trạng thái được máy chủ xác nhận; chưa phát media."); return value; });
     }
     public CompletableFuture<Void> leave() {
+        closeVideo();
         return submit(() -> {
             try { if (snapshot != null) command("LEAVE_ROOM", snapshot.roomId(), new JsonObject(), UUID.randomUUID().toString()); }
-            finally { snapshot = null; self = null; joinIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); }
+            finally { snapshot = null; self = null; pin = ""; joinIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); }
             return null;
         });
     }
@@ -128,14 +163,21 @@ public final class MeetingSession implements AutoCloseable {
         if (!expiresAt.isAfter(Instant.now())) throw new SignalException("SESSION_INVALID");
         if (client != null && client.state() == SignalingClient.State.CONNECTED) return;
         publish(State.CONNECTING, "Đang kết nối phòng họp…");
-        SignalingClient connection = new SignalingClient(this::event); client = connection;
+        SignalingClient connection = transports.create(this::event);
+        synchronized (transportLock) {
+            if (closed.get()) { connection.close(); throw new SignalException("CONNECTION_CLOSED"); }
+            client = connection;
+        }
         try { connection.connect(token); publish(State.CONNECTED, "Đã kết nối máy chủ phòng họp."); }
         catch (Exception failure) { connection.close(); publish(State.DISCONNECTED, "Không thể kết nối máy chủ phòng họp. Có thể thử lại."); throw failure; }
     }
     private SignalMessage command(String type, String roomId, JsonObject body, String requestId) throws Exception {
         connect();
+        long started = System.nanoTime();
         try { return client.request(type, roomId, body, requestId).get(16, TimeUnit.SECONDS); }
         catch (ExecutionException failure) { if (failure.getCause() instanceof Exception cause) throw cause; throw failure; }
+        finally { common.diagnostics.Diagnostics.current().event("signaling.client.request", java.util.Map.of(
+                "action", type, "signaling_round_trip_ms", (System.nanoTime() - started) / 1_000_000.0)); }
     }
     private static <T> T decode(SignalMessage response, String field, Class<T> type) throws SignalException {
         if (!response.body().has(field)) throw new SignalException("INVALID_RESPONSE");
@@ -147,21 +189,72 @@ public final class MeetingSession implements AutoCloseable {
         if (closed.get() || connection == null || !Objects.equals(message.connectionId(), connection.connectionId())
                 || message.generation() != connection.generation()) return;
         if ("CONNECTION_CLOSED".equals(message.type()) || "SESSION_ENDED".equals(message.type())) {
-            snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); return;
+            submit(() -> { if (currentConnection(message)) { closeVideo(); snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); } return null; }); return;
         }
         RoomSnapshot active = snapshot;
-        if (active == null || !Objects.equals(active.roomId(), message.roomId())) return;
+        String expectedRoom = active != null ? active.roomId() : preview == null ? null : preview.roomId();
+        if (!Objects.equals(expectedRoom, message.roomId())) return;
         if ("ROOM_CLOSED".equals(message.type()) || "ROOM_LEFT".equals(message.type())) {
-            snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); return;
+            submit(() -> { if (currentConnection(message)) { closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); } return null; }); return;
         }
-        if (message.revision() != null && message.revision() <= active.revision()) return;
-        if (refreshing.compareAndSet(false, true)) refresh().whenComplete((value, failure) -> refreshing.set(false));
+        if (active != null && message.revision() != null && message.revision() <= active.revision()) return;
+        if (message.body().has("room")) {
+            try {
+                RoomSnapshot update = decode(message, "room", RoomSnapshot.class);
+                if (!Objects.equals(update.roomId(), message.roomId()) || message.revision() == null
+                        || update.revision() != message.revision()) return;
+                incomingRoom.accumulateAndGet(update, (before, after) -> before != null
+                        && before.roomId().equals(after.roomId()) && before.revision() > after.revision() ? before : after);
+                applyIncomingRoom();
+            } catch (SignalException invalid) { refreshAgain.set(true); refreshEvents(); }
+            return;
+        }
+        refreshAgain.set(true); refreshEvents();
+    }
+    private boolean currentConnection(SignalMessage message) {
+        SignalingClient current = client;
+        return current != null && Objects.equals(current.connectionId(), message.connectionId()) && current.generation() == message.generation();
+    }
+    private void applyIncomingRoom() {
+        if (!applyingRoom.compareAndSet(false, true)) return;
+        submit(() -> {
+            RoomSnapshot update = incomingRoom.getAndSet(null), active = snapshot;
+            if (update != null && active != null && update.roomId().equals(active.roomId()) && update.revision() > active.revision()) {
+                snapshot = update; publish(State.CONNECTED, "Thành viên và trạng thái đã đồng bộ.");
+            }
+            return null;
+        }).whenComplete((value, failure) -> {
+            applyingRoom.set(false);
+            if (failure == null && incomingRoom.get() != null && !closed.get()) applyIncomingRoom();
+        });
+    }
+    private void refreshEvents() {
+        if (!refreshing.compareAndSet(false, true)) return;
+        submit(() -> {
+            for (int attempt = 0; attempt < 4; attempt++) {
+                refreshAgain.set(false); refreshNow();
+                if (!refreshAgain.get()) break;
+            }
+            return null;
+        }).whenComplete((value, failure) -> {
+            refreshing.set(false);
+            if (failure == null && refreshAgain.get() && !closed.get()) refreshEvents();
+        });
     }
     private <T> CompletableFuture<T> submit(Callable<T> task) {
         CompletableFuture<T> future = new CompletableFuture<>();
         if (closed.get()) { future.completeExceptionally(new SignalException("CONNECTION_CLOSED")); return future; }
-        try { worker.execute(() -> { try { future.complete(task.call()); } catch (Exception failure) { future.completeExceptionally(failure); } }); }
-        catch (RejectedExecutionException failure) { future.completeExceptionally(new SignalException("CLIENT_BUSY")); }
+        jobs.add(future);
+        try { worker.execute(() -> {
+            try {
+                if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
+                T value = task.call();
+                if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
+                future.complete(value);
+            } catch (Exception failure) { future.completeExceptionally(failure); }
+            finally { jobs.remove(future); }
+        }); }
+        catch (RejectedExecutionException failure) { jobs.remove(future); future.completeExceptionally(new SignalException("CLIENT_BUSY")); }
         return future;
     }
     private synchronized void publish(State value, String text) {
@@ -178,10 +271,14 @@ public final class MeetingSession implements AutoCloseable {
             if (latest.get() != null) scheduleFx();
         });
     }
-    private void closeTransport() { SignalingClient current = client; client = null; if (current != null) current.close(); }
+    private void closeTransport() {
+        incomingRoom.set(null);
+        synchronized (transportLock) { SignalingClient current = client; client = null; if (current != null) current.close(); }
+    }
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        closeTransport(); worker.shutdownNow(); snapshot = null; self = null; pin = ""; createIntent = null; joinIntent = null;
+        closeVideo(); closeTransport(); worker.shutdownNow(); snapshot = null; self = null; pin = ""; createIntent = null; joinIntent = null;
+        jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
         publish(State.CLOSED, "Session đã đóng.");
     }
     private record Intent(String id, JsonObject body) { @Override public String toString() { return "Intent[redacted]"; } }

@@ -11,18 +11,20 @@ import javafx.scene.shape.Circle;
 import java.util.List;
 
 public final class SettingsScreen extends BorderPane {
+    private final client.media.VideoCallController cameraOwner = new client.media.VideoCallController(
+            (type, body, id) -> java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NO_ROOM")), () -> null, () -> null);
+    private final CameraControls cameras = new CameraControls(cameraOwner, true, null, true);
     public SettingsScreen(SceneManager manager, boolean account) {
         setLeft(new Sidebar(manager, "settings"));
         VBox main = new VBox(22); main.setPadding(new Insets(32));
         TabPane tabs = new TabPane(); tabs.getStyleClass().add("settings-tabs"); tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         VBox devices = card();
-        ComboBox<String> camera = device(manager, "cameraDevice", MockData.cameras());
         ComboBox<String> mic = device(manager, "micDevice", MockData.microphones());
         ComboBox<String> speaker = device(manager, "speakerDevice", MockData.speakers());
         ProgressBar level = new ProgressBar(.58); level.setMaxWidth(Double.MAX_VALUE);
         Slider volume = new Slider(0, 100, Double.parseDouble(manager.preference("volume", "75"))); volume.setShowTickLabels(true); volume.setMajorTickUnit(25); volume.setBlockIncrement(5);
         volume.valueProperty().addListener((o, old, value) -> manager.preferenceSet("volume", value.toString()));
-        devices.getChildren().addAll(Ui.field("Camera", camera), Ui.field("Microphone", mic), Ui.field("Loa", speaker), Ui.field("Mức microphone (demo)", level), Ui.field("Âm lượng", volume));
+        devices.getChildren().addAll(Ui.field("Camera trên máy của bạn", cameras), Ui.field("Microphone (demo)", mic), Ui.field("Loa (demo)", speaker), Ui.field("Mức microphone (demo)", level), Ui.field("Âm lượng", volume));
         VBox notifications = card();
         notifications.getChildren().addAll(toggle(manager, "notification", "Âm thanh thông báo", true), toggle(manager, "muteMic", "Tự tắt mic khi vào phòng", false),
             toggle(manager, "muteCamera", "Tự tắt camera khi vào phòng", false), Ui.field("Chất lượng video tối đa", device(manager, "quality", List.of("360p", "720p", "Tự động"))));
@@ -38,6 +40,7 @@ public final class SettingsScreen extends BorderPane {
         VBox.setVgrow(tabs, Priority.ALWAYS); main.getChildren().addAll(Ui.label("Cài đặt", "title"), Ui.label("Thiết lập trải nghiệm họp theo cách của bạn.", "muted"), tabs); setCenter(main);
     }
     private VBox card() { VBox box = new VBox(20); box.getStyleClass().add("card"); VBox.setMargin(box, new Insets(18, 0, 0, 0)); box.setMaxWidth(Double.MAX_VALUE); return box; }
+    public void dispose() { cameras.dispose(); cameraOwner.close(); }
     private ComboBox<String> device(SceneManager manager, String key, List<String> choices) {
         ComboBox<String> combo = Ui.devices(choices); combo.setValue(manager.preference(key, choices.getFirst()));
         combo.valueProperty().addListener((o, old, value) -> manager.preferenceSet(key, value)); return combo;

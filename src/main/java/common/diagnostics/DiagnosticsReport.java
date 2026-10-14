@@ -41,7 +41,8 @@ public final class DiagnosticsReport {
             "input_duration_ms", "late_media_callbacks", "active_peer_connections",
             "ingress_packets", "ingress_payload_bytes", "forwarded_packets", "forwarded_payload_bytes",
             "queue_packets", "queue_bytes", "expired_drops", "write_errors", "read_errors", "pli_requests",
-            "ingress_codec_bytes", "forwarded_codec_bytes");
+            "ingress_codec_bytes", "forwarded_codec_bytes", "room_count", "participant_count",
+            "render_frames_cumulative", "render_dropped_frames_cumulative", "go_heap_bytes", "goroutine_count");
     private static final Set<String> EVENTS = Set.of("run.start", "run.end", "log.truncated",
             "runtime.sample", "runtime.sample_error", "media.sample", "client_ready",
             "auth_client_request", "server.started", "server.stopped", "server.connection.accepted",
@@ -52,12 +53,17 @@ public final class DiagnosticsReport {
             "media.probe.sample", "media.probe.completed", "media.probe.failed",
             "media.probe.cleanup", "media.probe.closed", "media.probe.native", "media.probe.start",
             "media.probe.received", "media.probe.stats", "sfu.probe.stats", "sfu.probe.connected",
-            "sfu.probe.closed", "sfu.probe.failed");
+            "sfu.probe.closed", "sfu.probe.failed", "meeting.state", "signaling.request.completed",
+            "signaling.server.started", "signaling.server.failed", "signaling.session.revoked",
+            "signaling.client.connected", "signaling.client.request", "signaling.client.failed", "signaling.connection.failed", "signaling.connection.closed",
+            "signaling.request.failed", "signaling.cleanup.failed", "meeting.startup.failed", "video.engine.sample",
+            "video.integration.received", "video.integration.completed", "video.client.closed", "video.client.close_failed",
+            "video.revoked", "video.stop.failed", "video.revoke.failed", "video.client.operation.failed");
     private static final Set<String> PHASES = Set.of("send", "receive", "load_settings", "tls_context",
             "tcp_connect", "tls_handshake", "response", "request_read", "request_handler",
             "response_write", "connection_close", "configuration", "database_preflight",
             "listener_bind", "listener_run", "create", "connect", "generated_media",
-            "receive_threshold", "stats", "close");
+            "receive_threshold", "stats", "close", "control", "dispatch", "accept", "startup", "capture", "preview", "publish", "subscribe", "camera_formats");
     private static final Set<String> ROLES = Set.of("server", "client", "app", "sfu", "signaling",
             "media-smoke", "media-probe", "client-media-probe");
     static final Limits DEFAULT_LIMITS = new Limits(128, 256L * 1024 * 1024, 64 * 1024, 200_000);
@@ -269,7 +275,10 @@ public final class DiagnosticsReport {
             long track = trackId == null ? -1 : trackId;
             String kind = tagged(fields, "kind", Set.of("AUDIO", "VIDEO", "SCREEN"))
                     ? tag(fields, "kind") : "unavailable";
-            String action = tagged(fields, "action", Set.of("LOGIN", "REGISTER", "LOGOUT"))
+            String action = tagged(fields, "action", Set.of("LOGIN", "REGISTER", "LOGOUT", "AUTHENTICATE",
+                    "CREATE_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM", "SET_MEDIA_STATE",
+                    "SET_LOCKED", "STOP_PUBLISH", "KICK", "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE",
+                    "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE", "OTHER"))
                     ? tag(fields, "action") : "unavailable";
             String phase = tagged(fields, "phase", PHASES) ? tag(fields, "phase") : "unavailable";
             Long cycleId = event.startsWith("media.probe.") || event.startsWith("sfu.probe.")

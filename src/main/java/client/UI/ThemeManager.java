@@ -22,9 +22,8 @@ public final class ThemeManager {
     public static void setLight(boolean value) { LIGHT.set(value); }
     public static void attach(Parent root) { ROOTS.put(root, Boolean.TRUE); apply(root); }
     private static void apply(Parent root) {
-        root.getStyleClass().remove("light-mode");
-        boolean auth = root.getStyleClass().contains("auth-screen");
-        if (!root.getStyleClass().contains("theme-dark") && (!auth || isLight())) root.getStyleClass().add("light-mode");
+        root.getStyleClass().removeAll("light-mode", "theme-dark");
+        if (isLight()) root.getStyleClass().add("light-mode");
     }
     public static Button toggleButton() {
         Button button = new Button(); button.getStyleClass().add("theme-toggle");
@@ -38,6 +37,7 @@ public final class ThemeManager {
     /** Lựa chọn có trạng thái rõ ràng trong Cài đặt, thay vì nút đổi theme rải rác. */
     public static HBox selector() {
         Button light = new Button("☀  Sáng"), dark = new Button("☾  Tối");
+        light.setId("theme-light"); dark.setId("theme-dark");
         light.getStyleClass().add("theme-choice"); dark.getStyleClass().add("theme-choice");
         light.setOnAction(e -> setLight(true)); dark.setOnAction(e -> setLight(false));
         HBox choices = new HBox(6, light, dark); choices.getStyleClass().add("theme-selector");

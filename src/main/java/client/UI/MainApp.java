@@ -20,7 +20,7 @@ public class MainApp extends Application {
         stage.setOnCloseRequest(event -> { event.consume(); manager.closeApplication(); });
         manager.auth();
         stage.show();
-        diagnostics.event("client_ready", Map.of("media_status", "not_implemented"));
+        diagnostics.event("client_ready", Map.of("media_status", "video_available"));
     }
     @Override public void stop() {
         try { if (manager != null) manager.shutdown(); }

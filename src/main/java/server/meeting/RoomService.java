@@ -128,8 +128,10 @@ public final class RoomService implements AutoCloseable {
                         result.participantId(), stored.hostId() == principal.userId() ? RoomRole.HOST : RoomRole.MEMBER,
                         new MediaState(mic, camera, false, false, false, false));
                 List<RoomEvent> events = new ArrayList<>(); room.stored = result.room(); room.revision++;
-                for (Member other : room.members.values()) events.add(event(other, "PARTICIPANT_JOINED", room, Map.of("participant", member.view())));
-                room.members.put(member.participantId, member); connections.put(connectionId, member); enqueue(events);
+                room.members.put(member.participantId, member); connections.put(connectionId, member);
+                for (Member other : room.members.values()) if (other != member)
+                    events.add(event(other, "PARTICIPANT_JOINED", room, Map.of("participant", member.view())));
+                enqueue(events);
                 reply = new RoomJoinReply(member.participantId, snapshot(room));
             }
         }
@@ -154,6 +156,18 @@ public final class RoomService implements AutoCloseable {
             reply = snapshot(room);
         }
         drainEvents(); return reply;
+    }
+    /** Only the trusted media adapter confirms RTP publication, never a client body. */
+    public void confirmVideo(String connectionId, boolean publishing) {
+        synchronized (lock) {
+            Member member = member(connectionId); LiveRoom room = requireRoom(member.roomId);
+            MediaState old = member.media;
+            boolean active = publishing && old.cameraRequested();
+            if (old.videoPublishing() == active) return;
+            member.media = new MediaState(old.micRequested(), old.cameraRequested(), old.shareRequested(), old.audioPublishing(), active, old.sharePublishing());
+            room.revision++; broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", member.media));
+        }
+        drainEvents();
     }
     public RoomSnapshot setLocked(String connectionId, boolean locked) throws SQLException {
         RoomSnapshot reply;
@@ -266,10 +280,19 @@ public final class RoomService implements AutoCloseable {
     }
 
     private RoomRepository.StoredRoom find(String joinCode) throws SQLException {
-        if (joinCode == null || !joinCode.matches("MMR-[A-Z2-9]{16}")) throw new RoomException("ROOM_NOT_FOUND");
-        RoomRepository.StoredRoom stored = repository.findByCode(instanceId, joinCode);
-        if (stored == null || stored.status() == RoomStatus.CLOSED || !epoch.equals(stored.epoch())) throw new RoomException("ROOM_NOT_FOUND");
-        return stored;
+        if (joinCode == null) throw new RoomException("ROOM_NOT_FOUND");
+        String identifier = joinCode.strip().toUpperCase(java.util.Locale.ROOT);
+        if (!identifier.matches("MMR-[A-Z2-9]{16}|[0-9]{1,19}")) throw new RoomException("ROOM_NOT_FOUND");
+        // This process owns live rooms; historical rows never authorize a live join.
+        // The committing repository still checks membership/capacity/current DB state.
+        synchronized (lock) {
+            for (LiveRoom room : rooms.values()) {
+                RoomRepository.StoredRoom stored = room.stored;
+                if ((identifier.equals(stored.joinCode()) || identifier.equals(Long.toString(stored.id())))
+                        && stored.status() != RoomStatus.CLOSED && epoch.equals(stored.epoch())) return stored;
+            }
+        }
+        throw new RoomException("ROOM_NOT_FOUND");
     }
     private void verifyPin(SessionPrincipal principal, RoomRepository.StoredRoom room, String pin) {
         if (room.hostId() != principal.userId() && room.pinHash() != null && !pins.verify(pin, room.pinHash())) throw new RoomException("WRONG_PIN");
@@ -296,14 +319,24 @@ public final class RoomService implements AutoCloseable {
     private RoomSnapshot snapshot(LiveRoom room) {
         String host = room.members.values().stream().filter(member -> member.role == RoomRole.HOST).map(member -> member.participantId).findFirst().orElse(null);
         RoomRepository.StoredRoom stored = room.stored;
+        var collaboration = new common.room.RoomInfo(stored.id(), stored.name(), stored.joinCode(), stored.hostId(), stored.createdAt(),
+                switch (stored.status()) { case READY -> "CHO"; case ACTIVE -> "DANG_HOAT_DONG"; case CLOSED -> "DA_DONG"; },
+                stored.locked(), stored.capacity(), room.members.size(), room.members.values().stream()
+                        .map(member -> new common.room.RoomParticipant(member.principal.userId(), member.principal.displayName(),
+                                member.role == RoomRole.HOST ? "CHU_PHONG" : "THANH_VIEN")).toList());
         return new RoomSnapshot(stored.roomId(), stored.joinCode(), stored.name(), stored.status(), stored.locked(),
-                stored.capacity(), host, room.revision, room.members.values().stream().map(Member::view).toList());
+                stored.capacity(), host, room.revision, room.members.values().stream().map(Member::view).toList(), collaboration);
     }
     private void broadcast(LiveRoom room, String type, Object body) {
         enqueue(room.members.values().stream().map(member -> event(member, type, room, body)).toList());
     }
-    private static RoomEvent event(Member recipient, String type, LiveRoom room, Object body) {
-        return new RoomEvent(recipient.connectionId, type, recipient.roomId, room.revision, body);
+    private RoomEvent event(Member recipient, String type, LiveRoom room, Object body) {
+        Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        if (body instanceof Map<?, ?> values) values.forEach((key, value) -> {
+            if (key instanceof String name) fields.put(name, value);
+        });
+        fields.put("room", snapshot(room));
+        return new RoomEvent(recipient.connectionId, type, recipient.roomId, room.revision, Map.copyOf(fields));
     }
     private void enqueue(List<RoomEvent> events) {
         if (!events.isEmpty()) {

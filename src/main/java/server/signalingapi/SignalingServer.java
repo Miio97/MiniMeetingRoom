@@ -34,6 +34,7 @@ public final class SignalingServer implements AutoCloseable {
     public interface Handler {
         SignalMessage handle(Connection connection, SignalMessage request) throws Exception;
         void disconnected(Connection connection, String reason) throws Exception;
+        default void validated(Connection connection) { }
     }
 
     public record Options(int maxConnections, int maxFrameBytes, int requestsPerSecond) {
@@ -55,6 +56,7 @@ public final class SignalingServer implements AutoCloseable {
     private final AtomicLong sequence = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Object lifecycle = new Object();
+    private final Object cleanupLifecycle = new Object();
     private final ConcurrentHashMap<Runnable, Runnable> cancellations = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PinWindow> pinWindows = new ConcurrentHashMap<>();
     private final ThreadPoolExecutor work = new ThreadPoolExecutor(8, 8, 0, TimeUnit.SECONDS,
@@ -138,21 +140,28 @@ public final class SignalingServer implements AutoCloseable {
         long now = System.nanoTime();
         pinWindows.entrySet().removeIf(entry -> now - entry.getValue().start > TimeUnit.MINUTES.toNanos(2));
         for (Connection connection : clients.values()) {
+            if (connection.closed.get()) continue;
             SessionPrincipal principal = connection.principal;
             if (principal == null) {
                 if (now - connection.created > TimeUnit.SECONDS.toNanos(10)) connection.terminate("AUTH_TIMEOUT");
                 continue;
             }
-            if (now - connection.validatedAt > TimeUnit.SECONDS.toNanos(5)) {
-                connection.terminate("SESSION_CHECK_TIMEOUT"); continue;
+            if (!principal.expiresAt().isAfter(java.time.Instant.now())) {
+                connection.terminate("SESSION_EXPIRED"); continue;
+            }
+            if (connection.validating.get()) {
+                if (now - connection.validationStartedAt > TimeUnit.SECONDS.toNanos(10))
+                    connection.terminate("SESSION_CHECK_TIMEOUT");
+                continue;
             }
             if (now - connection.validatedAt < TimeUnit.SECONDS.toNanos(3) || !connection.validating.compareAndSet(false, true)) continue;
+            connection.validationStartedAt = now;
             try {
                 work.execute(() -> {
                     try {
                         Optional<SessionPrincipal> result = validator.validateHash(principal.tokenHash());
                         if (result.isEmpty()) connection.terminate("SESSION_INVALID");
-                        else if (!connection.closed.get()) { connection.principal = result.get(); connection.validatedAt = System.nanoTime(); }
+                        else if (!connection.closed.get()) { connection.principal = result.get(); connection.validatedAt = System.nanoTime(); handler.validated(connection); }
                     } catch (Exception failure) { connection.terminate("SESSION_CHECK_FAILED"); }
                     finally { connection.validating.set(false); }
                 });
@@ -167,12 +176,13 @@ public final class SignalingServer implements AutoCloseable {
         private final long created = System.nanoTime();
         private final AtomicBoolean closed = new AtomicBoolean();
         private final AtomicBoolean validating = new AtomicBoolean();
-        private final AtomicBoolean inFlight = new AtomicBoolean();
+        private final AtomicInteger inFlight = new AtomicInteger();
         private final AtomicBoolean cleanupStarted = new AtomicBoolean();
         private final Object outputAdmission = new Object();
         private final ArrayBlockingQueue<byte[]> outbound = new ArrayBlockingQueue<>(64);
         private int queuedBytes;
         private volatile long validatedAt = created;
+        private volatile long validationStartedAt = created;
         private long rateWindow = created;
         private int windowRequests;
         private volatile SessionPrincipal principal;
@@ -210,27 +220,42 @@ public final class SignalingServer implements AutoCloseable {
                     if (++windowRequests > options.requestsPerSecond()) { error(request.requestId(), "RATE_LIMIT"); continue; }
                     if ("HEARTBEAT".equals(request.type())) { send(message("HEARTBEAT_ACK", request.requestId(), null, null, new JsonObject())); continue; }
                     if (principal == null && !"AUTHENTICATE".equals(request.type())) { error(request.requestId(), "AUTH_REQUIRED"); continue; }
-                    inFlight.set(true);
+                    inFlight.incrementAndGet();
+                    AtomicBoolean operationFinished = new AtomicBoolean();
+                    Runnable finish = () -> {
+                        if (operationFinished.compareAndSet(false, true) && inFlight.decrementAndGet() == 0 && closed.get()) disconnect();
+                    };
+                    long queuedAt = System.nanoTime();
                     var completion = new java.util.concurrent.CompletableFuture<SignalMessage>();
                     try {
                         Runnable operation = new Runnable() {
                           @Override public void run() {
                             cancellations.remove(this);
+                            long handlerAt = System.nanoTime();
                             try {
                                 if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
                                 SignalMessage response;
                                 if ("AUTHENTICATE".equals(request.type())) {
                                     if (principal != null) throw new SignalException("ALREADY_AUTHENTICATED");
-                                    String token = request.body().has("token") ? request.body().get("token").getAsString() : "";
+                                    var tokenValue = request.body().get("token");
+                                    if (tokenValue == null || !tokenValue.isJsonPrimitive() || !tokenValue.getAsJsonPrimitive().isString())
+                                        throw new SignalException("INVALID_REQUEST");
+                                    String token = tokenValue.getAsString();
+                                    int negotiated = options.maxFrameBytes();
+                                    if (request.body().has("maxFrameBytes")) {
+                                        var value = request.body().get("maxFrameBytes");
+                                        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) throw new SignalException("FRAME_LIMIT");
+                                        int limit;
+                                        try { limit = value.getAsBigDecimal().intValueExact(); }
+                                        catch (ArithmeticException invalid) { throw new SignalException("FRAME_LIMIT"); }
+                                        if (limit < 16384 || limit > 1048576) throw new SignalException("FRAME_LIMIT");
+                                        negotiated = Math.min(limit, options.maxFrameBytes());
+                                    }
                                     Optional<SessionPrincipal> found = validator.validate(token);
                                     if (found.isEmpty()) throw new SignalException("SESSION_INVALID");
                                     if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
                                     principal = found.get(); validatedAt = System.nanoTime();
-                                    if (request.body().has("maxFrameBytes")) {
-                                        int limit = request.body().get("maxFrameBytes").getAsBigDecimal().intValueExact();
-                                        if (limit < 16384 || limit > 1048576) throw new SignalException("FRAME_LIMIT");
-                                        outputMaximum = Math.min(limit, options.maxFrameBytes());
-                                    }
+                                    outputMaximum = negotiated;
                                     JsonObject authenticated = new JsonObject();
                                     authenticated.addProperty("expiresAt", principal.expiresAt().toString());
                                     authenticated.addProperty("selfDisplayName", principal.displayName());
@@ -247,18 +272,26 @@ public final class SignalingServer implements AutoCloseable {
                                 }
                                 completion.complete(response);
                             } catch (Exception failure) { completion.completeExceptionally(failure); }
-                            finally { inFlight.set(false); if (closed.get()) disconnect(); }
+                            finally {
+                                Diagnostics.current().event("signaling.request.completed", Map.of("action", safeAction(request.type()),
+                                        "queue_ms", (handlerAt - queuedAt) / 1_000_000.0,
+                                        "handler_ms", (System.nanoTime() - handlerAt) / 1_000_000.0));
+                                finish.run();
+                            }
                           }
                         };
                         cancellations.put(operation, () -> {
-                            inFlight.set(false); completion.completeExceptionally(new SignalException("CONNECTION_CLOSED")); disconnect();
+                            completion.completeExceptionally(new SignalException("CONNECTION_CLOSED")); finish.run();
                         });
                         try { work.execute(operation); }
                         catch (RejectedExecutionException rejected) {
                             cancellations.remove(operation); throw rejected;
                         }
                         send(completion.get(15, TimeUnit.SECONDS));
-                    } catch (RejectedExecutionException failure) { inFlight.set(false); error(request.requestId(), "SERVER_BUSY"); }
+                    } catch (RejectedExecutionException failure) {
+                        finish.run();
+                        if (!closed.get()) error(request.requestId(), "SERVER_BUSY");
+                    }
                     catch (java.util.concurrent.TimeoutException failure) { terminate("REQUEST_TIMEOUT"); }
                     catch (java.util.concurrent.ExecutionException failure) {
                         Throwable cause = failure.getCause();
@@ -304,10 +337,10 @@ public final class SignalingServer implements AutoCloseable {
         public void terminate(String reason) {
             if (!closed.compareAndSet(false, true)) return;
             disconnectReason = reason;
-            clients.remove(id, this);
+            Diagnostics.current().event("signaling.connection.closed", Map.of("reason", safeCloseReason(reason)));
             synchronized (outputAdmission) { outbound.clear(); queuedBytes = 0; }
             try { socket.close(); } catch (IOException ignored) { }
-            if (!inFlight.get()) disconnect();
+            if (inFlight.get() == 0) disconnect();
         }
 
         private void disconnect() {
@@ -315,13 +348,15 @@ public final class SignalingServer implements AutoCloseable {
             Runnable task = () -> {
                 try { handler.disconnected(this, disconnectReason); }
                 catch (Exception failure) { Diagnostics.current().failure("signaling.cleanup.failed", failure, Map.of("phase", "close")); }
-                finally { admission.release(); }
+                finally { clients.remove(id, this); admission.release(); }
             };
-            try {
-                cleanup.execute(task);
-            } catch (RejectedExecutionException failure) {
-                // A retained connection permit bounds these final cleanup tasks by maxConnections.
-                Thread.ofVirtual().name("meeting-final-cleanup").start(task);
+            synchronized (cleanupLifecycle) {
+                try {
+                    cleanup.execute(task);
+                } catch (RejectedExecutionException failure) {
+                    // A retained connection permit bounds these final cleanup tasks by maxConnections.
+                    Thread.ofVirtual().name("meeting-final-cleanup").start(task);
+                }
             }
         }
     }
@@ -330,12 +365,12 @@ public final class SignalingServer implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) return;
         synchronized (lifecycle) {
             try { listener.close(); } catch (IOException ignored) { }
-            clients.values().forEach(connection -> connection.terminate("SERVER_SHUTDOWN"));
+            java.util.List.copyOf(clients.values()).forEach(connection -> connection.terminate("SERVER_SHUTDOWN"));
         }
         timer.shutdownNow(); work.shutdown();
         try { if (!work.awaitTermination(3, TimeUnit.SECONDS)) cancelQueued(work.shutdownNow()); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); cancelQueued(work.shutdownNow()); }
-        cleanup.shutdown();
+        synchronized (cleanupLifecycle) { cleanup.shutdown(); }
         try { cleanup.awaitTermination(3, TimeUnit.SECONDS); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
     }
@@ -345,5 +380,28 @@ public final class SignalingServer implements AutoCloseable {
             Runnable cancellation = cancellations.remove(task);
             if (cancellation != null) cancellation.run();
         }
+    }
+    String lifecycleState() {
+        return "registered=" + clients.size() + " work=" + work.getActiveCount() + " queued=" + work.getQueue().size()
+                + " cleanup=" + cleanup.getActiveCount() + "/" + cleanup.getQueue().size() + "/" + cleanup.isTerminated()
+                + " cancellations=" + cancellations.size() + " remaining="
+                + clients.values().stream().map(connection -> connection.inFlight.get() + ":" + connection.cleanupStarted.get()).toList();
+    }
+
+    private static String safeAction(String type) {
+        return switch (type) {
+            case "AUTHENTICATE", "CREATE_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM",
+                    "SET_MEDIA_STATE", "SET_LOCKED", "STOP_PUBLISH", "KICK", "PUBLISH", "UNPUBLISH",
+                    "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE" -> type;
+            default -> "OTHER";
+        };
+    }
+    private static String safeCloseReason(String reason) {
+        return switch (reason) {
+            case "SESSION_EXPIRED", "SESSION_INVALID", "SESSION_REVOKED", "SESSION_CHECK_TIMEOUT", "SESSION_CHECK_FAILED",
+                    "AUTH_TIMEOUT", "SERVER_BUSY", "REQUEST_TIMEOUT", "OUTPUT_BACKPRESSURE", "FRAME_LIMIT",
+                    "SERVER_SHUTDOWN", "MAT_KET_NOI" -> reason;
+            default -> "OTHER";
+        };
     }
 }

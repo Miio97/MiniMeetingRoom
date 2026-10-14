@@ -18,6 +18,10 @@ public final class FxTestRuntime {
     public static synchronized void start() throws Exception {
         if (!requested) {
             requested = true;
+            // Automatic camera controls must never ask for or enumerate real devices in tests.
+            var cameraPreferences = java.nio.file.Path.of("target", "test-camera-preferences.properties").toAbsolutePath();
+            System.setProperty("mmr.camera.preferences", cameraPreferences.toString());
+            new client.media.CameraConsentStore(cameraPreferences).access(false);
             // Missing graphics support is a test failure, never a silently skipped integration test.
             Platform.startup(() -> { Platform.setImplicitExit(false); STARTED.countDown(); });
         }

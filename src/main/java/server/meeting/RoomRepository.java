@@ -21,7 +21,7 @@ import server.database.DatabaseConnection;
 public final class RoomRepository {
     private static final String ROOM_SELECT = "SELECT r.Ma_Phong, x.Room_Opaque_ID, r.Ma_Phong_Tham_Gia, "
             + "r.Ten_Phong, r.Ma_PIN_Bam, r.Ma_Chu_Phong, r.Trang_Thai, r.Da_Khoa, r.So_Nguoi_Toi_Da, "
-            + "x.Instance_ID, x.Server_Epoch FROM Phong_Hop r JOIN MMR_Phong_Van_Hanh x ON x.Ma_Phong=r.Ma_Phong ";
+            + "x.Instance_ID, x.Server_Epoch, r.Ngay_Tao FROM Phong_Hop r JOIN MMR_Phong_Van_Hanh x ON x.Ma_Phong=r.Ma_Phong ";
     private final ConnectionProvider connections;
     public RoomRepository() { this(DatabaseConnection::getConnection); }
     public RoomRepository(ConnectionProvider connections) { this.connections = java.util.Objects.requireNonNull(connections); }
@@ -79,7 +79,7 @@ public final class RoomRepository {
             }
             completeReceipt(connection, principal, requestId, "CREATE_ROOM", bodyHash, id, null, null, now);
             return new CreateResult(new StoredRoom(id, roomId, code, name, pinHash, principal.userId(),
-                    RoomStatus.READY, locked, capacity, instance, epoch), false);
+                    RoomStatus.READY, locked, capacity, instance, epoch, now.toString()), false);
         });
     }
 
@@ -239,7 +239,8 @@ public final class RoomRepository {
             default -> RoomStatus.CLOSED;
         };
         return new StoredRoom(rows.getLong(1), rows.getString(2), rows.getString(3), rows.getString(4),
-                rows.getString(5), rows.getLong(6), status, rows.getBoolean(8), rows.getInt(9), rows.getString(10), rows.getString(11));
+                rows.getString(5), rows.getLong(6), status, rows.getBoolean(8), rows.getInt(9), rows.getString(10), rows.getString(11),
+                rows.getTimestamp(12, utc()).toInstant().toString());
     }
     private static long generated(PreparedStatement statement) throws SQLException {
         try (ResultSet keys = statement.getGeneratedKeys()) {
@@ -264,9 +265,9 @@ public final class RoomRepository {
     private static Calendar utc() { return Calendar.getInstance(TimeZone.getTimeZone("UTC")); }
     private interface SqlTask<T> { T execute(Connection connection) throws SQLException; }
     record StoredRoom(long id, String roomId, String joinCode, String name, String pinHash, long hostId,
-            RoomStatus status, boolean locked, int capacity, String instanceId, String epoch) {
-        StoredRoom withStatus(RoomStatus value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, hostId, value, locked, capacity, instanceId, epoch); }
-        StoredRoom withLock(boolean value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, hostId, status, value, capacity, instanceId, epoch); }
+            RoomStatus status, boolean locked, int capacity, String instanceId, String epoch, String createdAt) {
+        StoredRoom withStatus(RoomStatus value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, hostId, value, locked, capacity, instanceId, epoch, createdAt); }
+        StoredRoom withLock(boolean value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, hostId, status, value, capacity, instanceId, epoch, createdAt); }
         @Override public String toString() { return "StoredRoom[status=" + status + ", capacity=" + capacity + "]"; }
     }
     record CreateResult(StoredRoom room, boolean replay) { }

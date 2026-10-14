@@ -16,6 +16,21 @@ public final class VideoTile extends StackPane {
     private final StackPane mic = new StackPane();
     private final Timeline pulse;
     private final Region border = new Region();
+    private boolean live;
+    private javafx.scene.image.ImageView realVideo;
+    public VideoTile(common.meeting.ParticipantView participant, boolean self, javafx.beans.property.ReadOnlyObjectProperty<javafx.scene.image.Image> image) {
+        live = true; getStyleClass().add("video-tile"); setMinSize(90, 100); setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        setStyle("-fx-background-color: #181b29;");
+        realVideo = new javafx.scene.image.ImageView(); realVideo.setPreserveRatio(true);
+        realVideo.fitWidthProperty().bind(widthProperty().subtract(16)); realVideo.fitHeightProperty().bind(heightProperty().subtract(44));
+        realVideo.imageProperty().bind(image);
+        cameraState = Ui.label("Camera đang tắt hoặc đang chờ video", "caption");
+        cameraState.visibleProperty().bind(image.isNull()); cameraState.managedProperty().bind(cameraState.visibleProperty());
+        name = Ui.label(participant.displayName() + (self ? " (Bạn)" : ""), "tile-name");
+        HBox footer = Ui.row(8, name, Ui.spacer(), Ui.label(participant.role() == common.meeting.RoomRole.HOST ? "HOST" : "", "tile-tag"));
+        footer.setMaxHeight(USE_PREF_SIZE); footer.getStyleClass().add("tile-footer"); StackPane.setAlignment(footer, Pos.BOTTOM_CENTER);
+        getChildren().addAll(realVideo, cameraState, footer); pulse = new Timeline();
+    }
     public VideoTile(MockData.Participant participant, boolean self) {
         getStyleClass().add("video-tile"); setMinSize(90, 100); setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
         setStyle("-fx-background-color: linear-gradient(to bottom right, " + participant.color() + ", #181b29);");
@@ -39,12 +54,18 @@ public final class VideoTile extends StackPane {
         pulse.setAutoReverse(true); pulse.setCycleCount(Animation.INDEFINITE);
     }
     public void setMuted(boolean muted) { mic.getChildren().setAll(IconButton.icon(muted ? "mic-off" : "mic")); mic.getStyleClass().setAll(muted ? "muted-mic" : "tile-mic"); }
-    public void setCamera(boolean on) { cameraState.setText(on ? "Video mô phỏng" : "Camera đang tắt"); }
+    public void setCamera(boolean on) { cameraState.setText(on ? live ? "Đang nhận video" : "Video mô phỏng" : "Camera đang tắt"); }
     public void setSpeaking(boolean speaking) { border.setVisible(speaking); if (speaking) pulse.play(); else pulse.stop(); }
     public void pinAction(String participantName, boolean pinned, Runnable action) {
         IconButton pin = new IconButton("pin", (pinned ? "Bỏ ghim " : "Ghim ") + participantName);
         pin.getStyleClass().add("pin-action"); pin.active(pinned); pin.setOnAction(e -> action.run());
         StackPane.setAlignment(pin, Pos.TOP_RIGHT); StackPane.setMargin(pin, new Insets(8)); getChildren().add(pin);
     }
-    public void dispose() { pulse.stop(); }
+    public void dispose() {
+        pulse.stop();
+        if (realVideo != null) {
+            realVideo.imageProperty().unbind(); realVideo.setImage(null);
+            cameraState.visibleProperty().unbind(); cameraState.managedProperty().unbind();
+        }
+    }
 }
