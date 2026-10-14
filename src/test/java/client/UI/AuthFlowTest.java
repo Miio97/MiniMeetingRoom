@@ -37,7 +37,6 @@ import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
 import javafx.scene.image.WritableImage;
 import javafx.stage.Stage;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,6 +46,7 @@ import org.junit.jupiter.api.io.TempDir;
 import server.AuthServer;
 import server.auth.AuthService;
 import server.auth.PasswordHasher;
+import support.FxTestRuntime;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Real JavaFX form actions through TLS sockets and the production service, using only an isolated database. */
@@ -77,10 +77,7 @@ class AuthFlowTest {
                 "-rfc", "-file", certificate.toString());
         serverTls = TlsSupport.server(keys, KEY_PASSWORD.toCharArray());
         clientTls = TlsSupport.client(certificate);
-        CountDownLatch started = new CountDownLatch(1);
-        // A missing graphics runtime must fail this integration check, never skip it silently.
-        Platform.startup(() -> { Platform.setImplicitExit(false); started.countDown(); });
-        assertTrue(started.await(10, TimeUnit.SECONDS), "JavaFX did not initialize");
+        FxTestRuntime.start();
     }
 
     @BeforeEach
@@ -101,6 +98,9 @@ class AuthFlowTest {
         AuthService service = new AuthService(() -> DriverManager.getConnection(database), new PasswordHasher(),
                 Clock.systemUTC(), Duration.ofHours(24));
         server = new AuthServer(serverTls, new InetSocketAddress("127.0.0.1", 0), request -> {
+            if ("LIST_ROOMS".equals(request.action())) {
+                return AuthResponse.roomsOk("Đã tải danh sách phòng.", List.of());
+            }
             actions.add(request.action());
             if ("REGISTER".equals(request.action())) {
                 registrationReceived.countDown();
@@ -135,11 +135,6 @@ class AuthFlowTest {
             if (server != null) server.close();
             if (database != null) execute("DROP ALL OBJECTS");
         }
-    }
-
-    @AfterAll
-    static void stopJavaFx() throws Exception {
-        fx(() -> { Platform.exit(); return null; });
     }
 
     @Test

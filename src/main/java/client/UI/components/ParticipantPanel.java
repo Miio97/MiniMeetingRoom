@@ -18,7 +18,12 @@ public final class ParticipantPanel extends BorderPane {
     private final Consumer<MockData.Participant> remove;
     private final Consumer<MockData.Participant> mute, stopCamera;
     private final Runnable lock, close;
+    private final boolean managementEnabled;
     public ParticipantPanel(ObservableList<MockData.Participant> people, Consumer<MockData.Participant> mute, Consumer<MockData.Participant> stopCamera, Consumer<MockData.Participant> remove, Runnable lock, Runnable close) {
+        this(people, mute, stopCamera, remove, lock, close, true);
+    }
+    public ParticipantPanel(ObservableList<MockData.Participant> people, Consumer<MockData.Participant> mute, Consumer<MockData.Participant> stopCamera, Consumer<MockData.Participant> remove, Runnable lock, Runnable close, boolean managementEnabled) {
+        this.managementEnabled = managementEnabled;
         this.mute = mute; this.stopCamera = stopCamera;
         this.people = people; this.remove = remove; this.lock = lock; this.close = close;
         list.setItems(people); list.getStyleClass().add("participant-list");
@@ -27,7 +32,7 @@ public final class ParticipantPanel extends BorderPane {
                 super.updateItem(p, empty); setText(null); setGraphic(empty || p == null ? null : row(p));
             }
         }); setCenter(list);
-        setBottom(Ui.label("Host • Chỉ được tắt mic/camera của thành viên", "panel-note"));
+        setBottom(Ui.label(managementEnabled ? "Host • Chỉ được tắt mic/camera của thành viên" : "Thành viên được cập nhật từ máy chủ.", "panel-note"));
     }
     private HBox row(MockData.Participant p) {
             VBox details = Ui.column(4, Ui.label(p.name(), "strong"), Ui.row(5, IconButton.icon(p.muted() ? "mic-off" : "mic"), IconButton.icon(p.camera() ? "camera" : "camera-off")));
@@ -37,7 +42,7 @@ public final class ParticipantPanel extends BorderPane {
             menu.setTooltip(new javafx.scene.control.Tooltip(p.host() ? "Quản lý phòng (Host)" : "Quản lý thành viên"));
             menu.setOnAction(e -> new HostMenuPopup(p.host(), p.muted(), p.camera(), () -> mute.accept(p), () -> stopCamera.accept(p), () -> remove.accept(p), lock, close).show(menu, javafx.geometry.Side.BOTTOM, 0, 0));
             HBox row = Ui.row(8, Ui.avatar(p.name(), 34), details);
-            if (p.host()) row.getChildren().add(Ui.label("Host", "host-badge")); row.getChildren().add(menu); row.getStyleClass().add("participant-row");
+            if (p.host()) row.getChildren().add(Ui.label("Host", "host-badge")); if (managementEnabled) row.getChildren().add(menu); row.getStyleClass().add("participant-row");
             return row;
     }
 }
