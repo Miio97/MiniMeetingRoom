@@ -1,12 +1,34 @@
 package client.UI.components;
 
 import javafx.scene.control.Button;
+import javafx.scene.control.Tooltip;
+import client.network.NetworkMonitor;
 
 public final class NetworkBadge extends Button {
-    public NetworkBadge(Runnable action) { getStyleClass().add("network-badge"); quality(45); setOnAction(e -> action.run()); }
-    public void quality(double latency) {
-        String status = latency < 80 ? "good" : latency < 160 ? "fair" : "poor";
-        getStyleClass().removeAll("good", "fair", "poor"); getStyleClass().add(status);
-        setText("▥  " + (latency < 80 ? "Tốt" : latency < 160 ? "Khá" : "Yếu")); setAccessibleText("Chất lượng mạng " + getText() + ", mở thống kê");
+    public NetworkBadge(Runnable action) {
+        getStyleClass().add("network-badge"); setId("network-badge");
+        setMinWidth(142); setPrefWidth(142); setMaxWidth(142);
+        setTooltip(new Tooltip("Thống kê kết nối máy chủ"));
+        quality(NetworkMonitor.Quality.WAITING); setOnAction(e -> action.run());
+    }
+    public static String label(NetworkMonitor.Quality quality) {
+        return switch (quality) {
+            case WAITING -> "Đang đo";
+            case GOOD -> "Tốt";
+            case FAIR -> "Khá";
+            case POOR -> "Yếu";
+            case DISCONNECTED -> "Mất kết nối";
+            case STOPPED -> "Đã dừng";
+        };
+    }
+    public void quality(NetworkMonitor.Quality quality) {
+        String status = switch (quality) {
+            case GOOD -> "good";
+            case FAIR -> "fair";
+            case POOR, DISCONNECTED -> "poor";
+            case WAITING, STOPPED -> "waiting";
+        };
+        getStyleClass().removeAll("good", "fair", "poor", "waiting"); getStyleClass().add(status);
+        setText("▥  " + label(quality)); setAccessibleText("Chất lượng kết nối " + label(quality) + ", mở thống kê");
     }
 }

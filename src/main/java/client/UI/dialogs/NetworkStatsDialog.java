@@ -1,43 +1,110 @@
 package client.UI.dialogs;
 
+import client.UI.components.NetworkBadge;
 import client.UI.components.Ui;
-import client.UI.mock.MockData;
-import javafx.animation.*;
+import client.network.NetworkMonitor;
+import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.scene.chart.*;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Window;
 import javafx.util.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 public final class NetworkStatsDialog extends Dialog<Void> {
+    private final NetworkMonitor monitor;
     private final Timeline ticker;
-    private int seconds;
-    public NetworkStatsDialog(Window owner) {
-        initOwner(owner); setTitle("Thống kê mạng"); setHeaderText("Chất lượng kết nối · Mô phỏng"); Ui.style(this);
-        MockData.Network initial = MockData.network();
-        Label latency = Ui.label("45 ms", "stat-value"), jitter = Ui.label("8 ms", "stat-value"), loss = Ui.label("0.8%", "stat-value"), bitrate = Ui.label("1.8 Mbps", "stat-value"), fps = Ui.label("30", "stat-value"), resolution = Ui.label(initial.resolution(), "stat-value");
-        GridPane metrics = new GridPane(); metrics.setHgap(24); metrics.setVgap(20);
-        Label[] values = {latency, jitter, loss, bitrate, fps, resolution}; String[] names = {"LATENCY", "JITTER", "PACKET LOSS", "BITRATE", "FPS", "RESOLUTION"};
-        for (int i = 0; i < values.length; i++) { VBox cell = Ui.column(6, Ui.label(names[i], "eyebrow"), values[i]); cell.setPrefWidth(140); metrics.add(cell, i % 3, i / 3); }
-        NumberAxis x = new NumberAxis(-29, 0, 5); x.setLabel("Thời gian (giây)"); x.setAutoRanging(false); x.setForceZeroInRange(false);
-        NumberAxis y = new NumberAxis(0, 100, 25); y.setLabel("ms");
-        LineChart<Number, Number> chart = new LineChart<>(x, y); chart.setLegendVisible(false); chart.setCreateSymbols(false); chart.setAnimated(false); chart.setPrefSize(490, 230);
-        XYChart.Series<Number, Number> series = new XYChart.Series<>(); for (int i = -29; i <= 0; i++) series.getData().add(new XYChart.Data<>(i, 45)); chart.getData().add(series);
-        VBox content = Ui.column(20, metrics, Ui.label("Latency • 30 giây gần nhất", "strong"), chart, Ui.label("Số liệu giả lập, không đo lưu lượng mạng thực tế.", "caption")); getDialogPane().setContent(content);
-        getDialogPane().getButtonTypes().add(ButtonType.CLOSE); ((Button) getDialogPane().lookupButton(ButtonType.CLOSE)).setText("Đóng");
-        color(latency, initial.latency(), 80, 160); color(jitter, 8, 20, 40); color(loss, .8, 1, 3);
-        // Giữ đúng 30 mẫu và hủy timer khi dialog đóng.
-        ticker = new Timeline(new KeyFrame(Duration.seconds(1), e -> {
-            double l = 45 + Math.random() * 14 - 7, j = 8 + Math.random() * 4 - 2, p = .8 + Math.random() * .6 - .3;
-            latency.setText(String.format(Locale.ROOT, "%.0f ms", l)); jitter.setText(String.format(Locale.ROOT, "%.1f ms", j)); loss.setText(String.format(Locale.ROOT, "%.1f%%", p)); bitrate.setText(String.format(Locale.ROOT, "%.1f Mbps", 1.8 + Math.random() * .2 - .1)); fps.setText(String.valueOf(29 + (int) (Math.random() * 2)));
-            color(latency, l, 80, 160); color(jitter, j, 20, 40); color(loss, p, 1, 3);
-            series.getData().removeFirst(); series.getData().add(new XYChart.Data<>(++seconds, l)); x.setLowerBound(seconds - 29); x.setUpperBound(seconds);
-        })); ticker.setCycleCount(Animation.INDEFINITE);
-        setOnShown(e -> ticker.play()); setOnHidden(e -> ticker.stop());
+    private final Label latency = value("latency"), jitter = value("jitter"), bitrate = value("bitrate");
+    private final Label status = Ui.label("", "strong"), traffic = Ui.label("", "caption"), errors = Ui.label("", "caption");
+    private final NumberAxis x = new NumberAxis(0, 30, 5);
+    private final LineChart<Number, Number> chart;
+
+    public NetworkStatsDialog(Window owner, NetworkMonitor monitor) {
+        this.monitor = Objects.requireNonNull(monitor);
+        initOwner(owner); setTitle("Thống kê mạng"); setHeaderText("Chất lượng kết nối"); Ui.style(this);
+        Label loss = value("loss"), fps = value("fps"), resolution = value("resolution");
+        for (Label missing : List.of(loss, fps, resolution)) missing.setStyle("-fx-font-size: 22px; -fx-text-fill: -text-muted;");
+        tip(latency, "Thời gian gửi yêu cầu phòng đến khi nhận đủ phản hồi, sau bắt tay TLS; gồm thời gian xử lý máy chủ.");
+        tip(jitter, "Trung bình độ chênh lệch giữa hai thời gian phản hồi liên tiếp trong 30 giây. Không phải jitter RTP.");
+        tip(loss, "Không khả dụng: socket TCP/TLS hiện tại không cung cấp bộ đếm mất gói RTP hoặc TCP truyền lại.");
+        tip(bitrate, "Lưu lượng JSON gửi + nhận của phòng và chat, gồm 4 byte độ dài mỗi thông điệp; trung bình 5–6 giây. Không gồm header TCP/IP, TLS hay truyền lại; không phải tốc độ đường truyền tối đa.");
+        tip(fps, "Chưa có luồng video thực tế để đo FPS.");
+        tip(resolution, "Chưa có luồng video thực tế để đo độ phân giải.");
+        GridPane metrics = new GridPane(); metrics.setHgap(16); metrics.setVgap(20);
+        for (int i = 0; i < 3; i++) { ColumnConstraints column = new ColumnConstraints(); column.setPercentWidth(100.0 / 3); metrics.getColumnConstraints().add(column); }
+        Label[] values = {latency, jitter, loss, bitrate, fps, resolution};
+        String[] names = {"PHẢN HỒI (RTT)", "DAO ĐỘNG RTT", "PACKET LOSS", "BITRATE ỨNG DỤNG", "FPS", "ĐỘ PHÂN GIẢI"};
+        for (int i = 0; i < values.length; i++) {
+            Label name = Ui.label(names[i], "eyebrow"); name.setWrapText(true);
+            VBox cell = Ui.column(6, name, values[i]); cell.setMinWidth(0); metrics.add(cell, i % 3, i / 3);
+        }
+        NumberAxis y = new NumberAxis(); y.setLabel("ms"); y.setForceZeroInRange(true);
+        x.setLabel("Thời gian (giây)"); x.setAutoRanging(false); x.setForceZeroInRange(false);
+        chart = new LineChart<>(x, y); chart.setId("network-chart"); chart.setLegendVisible(false);
+        chart.setCreateSymbols(false); chart.setAnimated(false); chart.setMinWidth(0); chart.setPrefSize(490, 200);
+        status.setId("network-status"); traffic.setId("network-traffic"); errors.setId("network-errors");
+        traffic.setWrapText(true); errors.setWrapText(true);
+        Label unavailable = Ui.label("Packet loss: không khả dụng qua TCP. Chưa có luồng video để đo FPS và độ phân giải.", "caption");
+        unavailable.setWrapText(true);
+        VBox content = Ui.column(16, metrics, Ui.row(12, Ui.label("Phản hồi máy chủ · 30 giây gần nhất", "strong"), Ui.spacer(), status), chart,
+                Ui.column(6, traffic, errors, unavailable));
+        content.setPrefWidth(490); getDialogPane().setContent(content);
+        getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        ((Button) getDialogPane().lookupButton(ButtonType.CLOSE)).setText("Đóng");
+        ticker = new Timeline(new KeyFrame(Duration.seconds(1), e -> refresh())); ticker.setCycleCount(Animation.INDEFINITE);
+        setOnShown(e -> { refresh(); ticker.play(); }); setOnHidden(e -> dispose()); refresh();
     }
-    private static void color(Label l, double value, double good, double fair) {
-        l.getStyleClass().removeAll("stat-good", "stat-fair", "stat-poor");
-        l.getStyleClass().add(value < good ? "stat-good" : value < fair ? "stat-fair" : "stat-poor");
+    private static Label value(String id) {
+        Label value = Ui.label("--", "stat-value"); value.setId("network-" + id);
+        value.setStyle("-fx-font-size: 22px;"); value.setMinWidth(0); value.setMaxWidth(Double.MAX_VALUE);
+        return value;
     }
+    private static void tip(Label value, String text) { value.setTooltip(new Tooltip(text)); }
+    public void refresh() {
+        NetworkMonitor.Snapshot sample = monitor.snapshot();
+        latency.setText(sample.rttMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", sample.rttMillis()));
+        jitter.setText(sample.jitterMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", sample.jitterMillis()));
+        bitrate.setText(rate(sample.sendBitsPerSecond() + sample.receiveBitsPerSecond()));
+        color(latency, sample.rttMillis(), 80, 160); color(jitter, sample.jitterMillis(), 20, 40);
+        status.setText(NetworkBadge.label(sample.quality()));
+        status.getStyleClass().removeAll("stat-good", "stat-fair", "stat-poor");
+        switch (sample.quality()) {
+            case GOOD -> status.getStyleClass().add("stat-good");
+            case FAIR -> status.getStyleClass().add("stat-fair");
+            case POOR, DISCONNECTED -> status.getStyleClass().add("stat-poor");
+            default -> { }
+        }
+        traffic.setText("Gửi: " + rate(sample.sendBitsPerSecond()) + " · Nhận: " + rate(sample.receiveBitsPerSecond())
+                + " · Tổng: " + bytes(sample.bytesSent() + sample.bytesReceived()));
+        errors.setText(sample.requests() == 0 ? "Chưa có yêu cầu hoàn tất."
+                : String.format(Locale.ROOT, "Yêu cầu lỗi: %d/%d (%.1f%%) · 30 giây gần nhất", sample.failures(), sample.requests(), sample.failurePercent()));
+        List<XYChart.Series<Number, Number>> segments = new ArrayList<>();
+        XYChart.Series<Number, Number> segment = null;
+        double previous = -1;
+        for (NetworkMonitor.Sample point : sample.history()) {
+            if (point.rttMillis() == null) { segment = null; continue; }
+            if (segment == null || point.second() - previous > 3) { segment = new XYChart.Series<>(); segments.add(segment); }
+            segment.getData().add(new XYChart.Data<>(point.second(), point.rttMillis())); previous = point.second();
+        }
+        chart.getData().setAll(segments);
+        x.setLowerBound(Math.max(0, sample.elapsedSeconds() - 30)); x.setUpperBound(Math.max(30, sample.elapsedSeconds()));
+    }
+    private static String rate(double bits) {
+        if (bits >= 1_000_000) return String.format(Locale.ROOT, "%.1f Mbps", bits / 1_000_000);
+        if (bits >= 1000) return String.format(Locale.ROOT, "%.1f kbps", bits / 1000);
+        return String.format(Locale.ROOT, "%.0f bps", bits);
+    }
+    private static String bytes(long bytes) {
+        return bytes < 1024 ? bytes + " B" : String.format(Locale.ROOT, "%.1f KiB", bytes / 1024.0);
+    }
+    private static void color(Label label, Double value, double good, double fair) {
+        label.getStyleClass().removeAll("stat-good", "stat-fair", "stat-poor");
+        if (value != null) label.getStyleClass().add(value < good ? "stat-good" : value < fair ? "stat-fair" : "stat-poor");
+    }
+    public void dispose() { ticker.stop(); }
 }

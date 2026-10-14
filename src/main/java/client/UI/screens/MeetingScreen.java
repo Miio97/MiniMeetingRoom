@@ -4,6 +4,8 @@ import client.UI.SceneManager;
 import client.UI.components.*;
 import client.UI.dialogs.*;
 import client.UI.mock.MockData;
+import client.auth.RoomException;
+import client.network.NetworkMonitor;
 import javafx.animation.*;
 import javafx.collections.*;
 import javafx.geometry.Insets;
@@ -16,6 +18,7 @@ import javafx.scene.shape.Rectangle;
 import javafx.util.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import common.meeting.*;
 
 /** Không gian họp responsive, phân trang phòng đông và quyền host chỉ tắt thiết bị. */
 public final class MeetingScreen extends BorderPane {
@@ -26,8 +29,13 @@ public final class MeetingScreen extends BorderPane {
     private final StackPane videoContent = new StackPane();
     private static final int PAGE_SIZE = 12;
     private int page;
-    private Spinner<Integer> count;
-    private boolean syncingCount;
+    private final ObservableList<Participant> actualPeople = FXCollections.observableArrayList();
+    private ParticipantPanel participantPanel;
+    private final ChatPanel chatPanel;
+    private final NetworkMonitor network;
+    private final NetworkBadge networkBadge;
+    private NetworkStatsDialog networkDialog;
+    private boolean polling;
     private final VBox panel = new VBox();
     private final TabPane tabs = new TabPane();
     private final Timeline clock;
@@ -41,15 +49,18 @@ public final class MeetingScreen extends BorderPane {
     private int pinnedIndex = -1;
     public MeetingScreen(SceneManager manager) {
         getStyleClass().add("theme-dark");
-        this.manager = manager; people = FXCollections.observableArrayList(MockData.participants(manager.user()).subList(0, Math.min(6, manager.room().capacity()))); peakPeople = people.size();
+        this.manager = manager; people = FXCollections.observableArrayList(); peakPeople = 0;
         Label duration = Ui.label("00:00:00", "meeting-time");
         IconButton copy = new IconButton("copy", "Sao chép mã phòng");
         copy.setOnAction(e -> { ClipboardContent content = new ClipboardContent(); content.putString(manager.room().code()); Clipboard.getSystemClipboard().setContent(content); copy.setIcon("check"); PauseTransition reset = new PauseTransition(Duration.seconds(1.5)); reset.setOnFinished(done -> copy.setIcon("copy")); reset.play(); });
-        NetworkBadge badge = new NetworkBadge(() -> new NetworkStatsDialog(manager.stage()).showAndWait());
+        network = manager.authClient().startNetworkMonitoring();
+        networkBadge = new NetworkBadge(this::networkStats);
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
-        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, badge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
-        Tab participants = new Tab("Thành viên", new ParticipantPanel(people, p -> disableMedia(p, true), p -> disableMedia(p, false), this::removeParticipant, () -> { manager.locked(!manager.locked()); updateLock(); }, this::leave));
-        Tab chat = new Tab("Chat", new ChatPanel(manager.user())); Tab files = new Tab("Tệp", new FilePanel(manager.stage(), manager.user()));
+        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, networkBadge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
+        participantPanel = new ParticipantPanel(actualPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand);
+        Tab participants = new Tab("Thành viên", participantPanel);
+        chatPanel = new ChatPanel(manager);
+        Tab chat = new Tab("Chat", chatPanel); Tab files = new Tab("Tệp", new FilePanel(manager.stage(), manager.user()));
         tabs.getTabs().addAll(participants, chat, files); tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); VBox.setVgrow(tabs, Priority.ALWAYS);
         IconButton close = new IconButton("close", "Đóng panel"); close.setOnAction(e -> togglePanel(-1));
         HBox panelHeader = Ui.row(8, Ui.label("Trong cuộc họp", "strong"), Ui.spacer(), close); panelHeader.setPadding(new Insets(12, 14, 8, 16)); panel.getChildren().addAll(panelHeader, tabs); panel.getStyleClass().add("meeting-panel");
@@ -57,51 +68,69 @@ public final class MeetingScreen extends BorderPane {
         Rectangle clip = new Rectangle(); clip.widthProperty().bind(panel.widthProperty()); clip.heightProperty().bind(panel.heightProperty()); panel.setClip(clip);
         canvas.setMinWidth(0); HBox.setHgrow(canvas, Priority.ALWAYS); canvas.setPadding(new Insets(20));
         HBox body = new HBox(canvas, panel); setCenter(body);
-        controls = new ControlBar(manager.mic(), manager.camera(), this::toggleMic, this::toggleCamera, this::toggleShare, () -> togglePanel(1), () -> togglePanel(0), () -> new DeviceSettingsDialog(manager.stage()).showAndWait(), this::leave);
+        controls = new ControlBar(manager.mic(), manager.camera(), this::toggleMic, this::toggleCamera, this::toggleShare, () -> togglePanel(1), () -> togglePanel(0), this::settings, this::leave);
         controls.users.active(true);
-        count = new Spinner<>(1, manager.room().capacity(), people.size()); count.setEditable(false); count.setPrefWidth(84); count.setAccessibleText("Số thành viên mô phỏng");
-        count.valueProperty().addListener((obs, old, value) -> { if (!syncingCount) setCount(value); });
-        HBox demo = Ui.row(10, Ui.label("UI DEMO", "eyebrow"), Ui.label("Số người", "caption"), count, Ui.label("Tối đa " + manager.room().capacity(), "caption")); demo.setAlignment(Pos.CENTER);
-        VBox bottom = Ui.column(10, controls, demo); bottom.setAlignment(Pos.CENTER); bottom.setPadding(new Insets(8, 16, 16, 16)); setBottom(bottom);
+        VBox bottom = Ui.column(10, controls); bottom.setAlignment(Pos.CENTER); bottom.setPadding(new Insets(8, 16, 16, 16)); setBottom(bottom);
         people.addListener((ListChangeListener<MockData.Participant>) change -> {
             peakPeople = Math.max(peakPeople, people.size());
-            syncingCount = true; try { count.getValueFactory().setValue(people.size()); } finally { syncingCount = false; }
             renderVideos();
         });
         tabs.getSelectionModel().selectedIndexProperty().addListener((obs, old, value) -> updatePanelButtons()); renderVideos();
-        clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> duration.setText(MockData.duration(elapsed())))); clock.setCycleCount(Animation.INDEFINITE); clock.play();
+        apply(manager.meetingState());
+        clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> { duration.setText(MockData.duration(elapsed())); refreshNetwork(); poll(); })); clock.setCycleCount(Animation.INDEFINITE); clock.play();
+    }
+    private boolean disposed;
+    public void refreshNetwork() { if (!disposed) networkBadge.quality(network.snapshot().quality()); }
+    public NetworkMonitor networkMonitor() { return network; }
+    private void networkStats() {
+        if (disposed || networkDialog != null) return;
+        networkDialog = new NetworkStatsDialog(manager.stage(), network);
+        try { networkDialog.showAndWait(); } finally { networkDialog.dispose(); networkDialog = null; }
+    }
+    private void poll() {
+        if (disposed || polling || manager.meetingState() == null) return;
+        polling = true;
+        manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> { polling = false; if (!disposed) apply(response); },
+                error -> {
+                    polling = false;
+                    if (disposed) return;
+                    if (error instanceof RoomException rejection && rejection.admissionEnded()) manager.ended(elapsed(), peakPeople, SceneManager.connectionError(error));
+                    else participantPanel.status(SceneManager.connectionError(error));
+                });
+    }
+    private void apply(RoomResponse response) {
+        if (response.room().closed()) { manager.ended(elapsed(), peakPeople, "Chủ phòng đã đóng phòng."); return; }
+        manager.updateMeeting(response); participantPanel.status(""); updateLock(); controls.mic(manager.mic()); controls.camera(manager.camera());
+        List<Participant> next = response.members().stream().sorted(java.util.Comparator.comparing((Participant person) -> person.userId() != manager.authenticatedUser().id())).toList();
+        if (!actualPeople.equals(next)) {
+            actualPeople.setAll(next); pinnedIndex = -1;
+            people.setAll(next.stream().map(person -> new MockData.Participant(person.name(), person.host(), !person.microphone(), person.camera(), MockData.avatarColor(person.name()))).toList());
+        }
+        participantPanel.waiting(response.waiting(), this::hostCommand);
+    }
+    private void send(RoomRequest request) {
+        if (disposed) return;
+        manager.runMeetingRequest(request, response -> { if (!disposed) apply(response); },
+                error -> { if (!disposed) participantPanel.status(SceneManager.connectionError(error)); });
+    }
+    private void hostCommand(String action, Long target) { send(manager.roomCommand(action, target)); }
+    private void invite() {
+        if (actualPeople.stream().noneMatch(person -> person.userId() == manager.authenticatedUser().id() && person.host())) return;
+        new InviteDialog(manager.stage(), manager.room().name(), manager.room().code(), manager.room().pin()).showAndWait();
+    }
+    private void settings() {
+        if (actualPeople.stream().noneMatch(person -> person.userId() == manager.authenticatedUser().id() && person.host())) { new DeviceSettingsDialog(manager.stage()).showAndWait(); return; }
+        RoomResponse state = manager.meetingState();
+        new DeviceSettingsDialog(manager.stage(), state.room(),
+                locked -> send(RoomRequest.settings(manager.sessionToken(), state.room().id(), state.ticket(), locked, null)),
+                approval -> send(RoomRequest.settings(manager.sessionToken(), state.room().id(), state.ticket(), null, approval)),
+                () -> send(manager.roomCommand("ROOM_CLOSE", 0))).showAndWait();
     }
     private void updateLock() { lockLabel.setText(manager.locked() ? "● Phòng đã khóa" : "● Phòng đang mở"); }
     private long elapsed() { return (System.nanoTime() - startNanos) / 1_000_000_000; }
-    private void toggleMic() { manager.mic(!manager.mic()); controls.mic(manager.mic()); updateSelf(); }
-    private void toggleCamera() { manager.camera(!manager.camera()); controls.camera(manager.camera()); updateSelf(); }
-    private void updateSelf() {
-        if (!people.isEmpty()) { MockData.Participant p = people.getFirst(); people.set(0, new MockData.Participant(p.name(), true, !manager.mic(), manager.camera(), p.color())); }
-    }
-    private void setCount(int count) {
-        count = Math.max(1, Math.min(count, manager.room().capacity()));
-        List<MockData.Participant> next = new ArrayList<>(people.subList(0, Math.min(count, people.size())));
-        List<MockData.Participant> base = MockData.participants(manager.user());
-        while (next.size() < count) { int i = next.size(); next.add(i < base.size() ? base.get(i) : new MockData.Participant("Khách " + (i + 1), false, i % 2 == 0, true, "#394868")); }
-        people.setAll(next);
-    }
-    /** Quyền host chỉ chuyển sang trạng thái tắt, không bao giờ bật thiết bị người khác. */
-    private void disableMedia(MockData.Participant participant, boolean microphone) {
-        int index = people.indexOf(participant); if (index < 0) return;
-        if (index == 0) {
-            if (microphone) { manager.mic(false); controls.mic(false); }
-            else { manager.camera(false); controls.camera(false); }
-            updateSelf(); return;
-        }
-        people.set(index, new MockData.Participant(participant.name(), participant.host(), microphone || participant.muted(), microphone && participant.camera(), participant.color()));
-    }
+    private void toggleMic() { RoomResponse state = manager.meetingState(); send(RoomRequest.media(manager.sessionToken(), state.room().id(), state.ticket(), !manager.mic(), null)); }
+    private void toggleCamera() { RoomResponse state = manager.meetingState(); send(RoomRequest.media(manager.sessionToken(), state.room().id(), state.ticket(), null, !manager.camera())); }
     private void toggleShare() { sharing = !sharing; controls.share.active(sharing); renderVideos(); }
-    private void removeParticipant(MockData.Participant participant) {
-        int index = people.indexOf(participant);
-        if (index == pinnedIndex) pinnedIndex = -1;
-        else if (index >= 0 && index < pinnedIndex) pinnedIndex--;
-        people.remove(participant);
-    }
     private void pin(int index) { pinnedIndex = pinnedIndex == index ? -1 : index; renderVideos(); }
     private void renderVideos() {
         tiles.forEach(VideoTile::dispose); tiles.clear(); videoContent.getChildren().clear(); participantCount.setText(people.size() + "/" + manager.room().capacity() + " người");
@@ -146,8 +175,8 @@ public final class MeetingScreen extends BorderPane {
     }
     private VBox shareCard(String title, String text) { VBox card = Ui.column(8, Ui.label(title, "subtitle"), Ui.label(text, "muted")); card.getStyleClass().add("share-card"); HBox.setHgrow(card, Priority.ALWAYS); return card; }
     private VideoTile tile(int i) {
-        MockData.Participant p = people.get(i); if (i == 0) p = new MockData.Participant(p.name(), true, !manager.mic(), manager.camera(), p.color());
-        VideoTile tile = new VideoTile(p, i == 0); tile.setSpeaking(i == 1 && !p.muted());
+        MockData.Participant p = people.get(i);
+        VideoTile tile = new VideoTile(p, i == 0);
         tile.pinAction(p.name(), pinnedIndex == i, () -> pin(i)); tiles.add(tile); return tile;
     }
     private void togglePanel(int tab) {
@@ -159,5 +188,9 @@ public final class MeetingScreen extends BorderPane {
     }
     private void updatePanelButtons() { controls.chat.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 1); controls.users.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 0); }
     private void leave() { manager.ended(elapsed(), peakPeople); }
-    public void dispose() { clock.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose); }
+    public void dispose() {
+        disposed = true; clock.stop(); chatPanel.dispose(); manager.authClient().stopNetworkMonitoring(network);
+        if (networkDialog != null) { networkDialog.dispose(); networkDialog.close(); }
+        manager.leaveRoomQuietly(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose);
+    }
 }

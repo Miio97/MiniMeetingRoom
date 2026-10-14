@@ -23,8 +23,7 @@ public final class ThemeManager {
     public static void attach(Parent root) { ROOTS.put(root, Boolean.TRUE); apply(root); }
     private static void apply(Parent root) {
         root.getStyleClass().remove("light-mode");
-        boolean auth = root.getStyleClass().contains("auth-screen");
-        if (!root.getStyleClass().contains("theme-dark") && (!auth || isLight())) root.getStyleClass().add("light-mode");
+        if (!root.getStyleClass().contains("theme-dark") && isLight()) root.getStyleClass().add("light-mode");
     }
     public static Button toggleButton() {
         Button button = new Button(); button.getStyleClass().add("theme-toggle");

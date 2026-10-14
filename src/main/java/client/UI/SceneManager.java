@@ -6,6 +6,8 @@ import client.UI.components.Ui;
 import client.auth.AuthClient;
 import common.auth.AuthResponse;
 import common.auth.AuthUser;
+import common.meeting.*;
+import common.chat.*;
 import javafx.animation.FadeTransition;
 import javafx.animation.ParallelTransition;
 import javafx.animation.PauseTransition;
@@ -43,7 +45,56 @@ public final class SceneManager {
     private volatile boolean closing;
     private volatile boolean closed;
     private PauseTransition closeDeadline;
-    private MockData.Room room = MockData.rooms().getFirst();
+    private MockData.Room room;
+    private volatile RoomResponse meetingState;
+    private String endReason = "";
+    public String endReason() { return endReason; }
+    public String sessionToken() { return sessionToken; }
+    public RoomResponse meetingState() { return meetingState; }
+    public void enterRoom(RoomResponse response, String pin) {
+        if (!hasSession() || response.pending() || response.room() == null) return;
+        updateMeeting(response);
+        room = new MockData.Room(response.room().name(), response.room().code(), Math.max(1, response.members().size()), "", pin, response.room().capacity());
+        meeting();
+    }
+    public void updateMeeting(RoomResponse response) {
+        meetingState = response; locked = response.room().locked();
+        response.members().stream().filter(person -> person.userId() == authenticatedUser.id()).findFirst().ifPresent(person -> { mic = person.microphone(); camera = person.camera(); });
+    }
+    public RoomRequest roomCommand(String action, long target) {
+        RoomResponse state = meetingState;
+        return RoomRequest.command(action, sessionToken, state.room().id(), state.ticket(), target);
+    }
+    public void runMeetingRequest(RoomRequest request, Consumer<RoomResponse> success, Consumer<Throwable> failure) {
+        if (closing) return;
+        authWorker.execute(() -> {
+            try {
+                RoomResponse response = authClient.meeting(request);
+                Platform.runLater(() -> {
+                    if (!closing) success.accept(response);
+                    else releaseRoom(response, request.token());
+                });
+            }
+            catch (Exception error) { Platform.runLater(() -> { if (!closing) failure.accept(error); }); }
+        });
+    }
+    public void leaveRoomQuietly() {
+        RoomResponse state = meetingState; String token = sessionToken; meetingState = null;
+        releaseRoom(state, token);
+    }
+    public void runChatRequest(ChatRequest request, Consumer<ChatResponse> success, Consumer<Throwable> failure) {
+        if (closing) return;
+        authWorker.execute(() -> {
+            try { ChatResponse response = authClient.chat(request); Platform.runLater(() -> { if (!closing) success.accept(response); }); }
+            catch (Exception error) { Platform.runLater(() -> { if (!closing) failure.accept(error); }); }
+        });
+    }
+    public void releaseRoom(RoomResponse state, String token) {
+        if (state != null && state.room() != null && !state.room().closed()
+                && state.ticket() != null && !authWorker.isShutdown()) authWorker.execute(() -> {
+            try { authClient.meeting(RoomRequest.command("ROOM_LEAVE", token, state.room().id(), state.ticket(), 0)); } catch (IOException ignored) { }
+        });
+    }
     private boolean mic = true, camera = true, locked;
     private final java.util.Map<String, String> preferences = new java.util.HashMap<>();
     public String preference(String key, String fallback) { return preferences.getOrDefault(key, fallback); }
@@ -96,7 +147,11 @@ public final class SceneManager {
         if (sessionToken == null) { clearSession(); auth(); return; }
         logoutPending.set(true); stage.getScene().getRoot().setDisable(true);
         String token = sessionToken;
-        runAuthRequest(() -> authClient.logout(token), response -> {
+        RoomResponse state = meetingState;
+        runAuthRequest(() -> {
+            if (state != null) try { authClient.meeting(RoomRequest.command("ROOM_LEAVE", token, state.room().id(), state.ticket(), 0)); } catch (IOException ignored) { }
+            return authClient.logout(token);
+        }, response -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
             if (response.success()) { clearSession(); auth(); }
             else logoutError(response.message());
@@ -112,7 +167,7 @@ public final class SceneManager {
     }
     private void clearSession() {
         authenticatedUser = null; sessionToken = null; preferences.clear();
-        mic = true; camera = true; locked = false; room = MockData.rooms().getFirst();
+        mic = true; camera = true; locked = false; room = null; meetingState = null;
     }
     /** Giữ cửa sổ tối đa 6 giây để thử thu hồi phiên trước khi đóng. */
     public void closeApplication() {
@@ -132,6 +187,8 @@ public final class SceneManager {
     }
     private void revokeQuietly(String token) {
         if (token == null || token.isBlank()) return;
+        RoomResponse state = meetingState;
+        if (state != null) try { authClient.meeting(RoomRequest.command("ROOM_LEAVE", token, state.room().id(), state.ticket(), 0)); } catch (IOException ignored) { }
         try { authClient.logout(token); } catch (IOException ignored) { /* Kết nối có timeout; phiên cũng có hạn dùng phía server. */ }
     }
     private void finishClose() {
@@ -189,10 +246,12 @@ public final class SceneManager {
     }
     public void meeting() {
         if (!hasSession()) return;
+        if (meetingState == null) { lobby(); return; }
         MeetingScreen view = new MeetingScreen(this);
         show(view, 1280, 800, true, view::dispose);
     }
-    public void ended(long seconds, int count) { if (hasSession()) show(new MeetingEndedScreen(this, seconds, count), 1100, 700, true, () -> { }); }
+    public void ended(long seconds, int count) { ended(seconds, count, "Bạn đã rời phòng."); }
+    public void ended(long seconds, int count, String reason) { endReason = reason; if (hasSession()) show(new MeetingEndedScreen(this, seconds, count), 1100, 700, true, () -> { }); }
     private void show(Parent root, int width, int height, boolean resize, Runnable onDispose) {
         dispose(); cleanup = onDispose;
         boolean expanded = stage.isMaximized() || stage.isFullScreen();

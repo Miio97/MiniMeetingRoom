@@ -12,8 +12,8 @@ public final class MeetingEndedScreen extends StackPane {
         VBox duration = Ui.column(8, Ui.label(MockData.duration(seconds), "title"), Ui.label("Thời lượng", "muted")); duration.setAlignment(Pos.CENTER);
         VBox participants = Ui.column(8, Ui.label(String.valueOf(count), "title"), Ui.label("Người tham gia", "muted")); participants.setAlignment(Pos.CENTER);
         HBox stats = Ui.row(64, duration, participants); stats.setAlignment(Pos.CENTER); stats.getStyleClass().add("ended-stats");
-        HBox actions = Ui.row(12, Ui.button("Quay lại sảnh", "primary", manager::lobby), Ui.button("Vào lại phòng", "secondary", () -> manager.preJoin(manager.room()))); actions.setAlignment(Pos.CENTER);
-        VBox card = Ui.column(24, check, Ui.label("Cuộc họp đã kết thúc", "title"), Ui.label("Cảm ơn bạn đã dành thời gian kết nối.", "muted"), Ui.label(manager.room().name(), "strong"), stats, actions, Ui.label("MINI MEETING ROOM  ·  HẸN GẶP LẠI BẠN", "eyebrow"));
+        HBox actions = Ui.row(12, Ui.button("Quay lại sảnh", "primary", manager::lobby)); actions.setAlignment(Pos.CENTER);
+        VBox card = Ui.column(24, check, Ui.label("Đã rời phòng", "title"), Ui.label(manager.endReason(), "muted"), Ui.label(manager.room().name(), "strong"), stats, actions, Ui.label("MINI MEETING ROOM  ·  HẸN GẶP LẠI BẠN", "eyebrow"));
         card.setAlignment(Pos.CENTER); card.setMaxWidth(580); card.setMaxHeight(USE_PREF_SIZE); card.getStyleClass().add("ended-card"); getChildren().add(card);
     }
 }
