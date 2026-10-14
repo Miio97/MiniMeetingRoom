@@ -1,6 +1,5 @@
 package client.filetransfer;
 
-import com.google.gson.JsonObject;
 import common.auth.TlsSupport;
 import common.filetransfer.FileMetadata;
 import common.filetransfer.TransferException;

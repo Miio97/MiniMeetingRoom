@@ -45,6 +45,7 @@ class RoomFileTransferCompatibilityTest {
     private AuthClient control;
     private AuthResponse host;
     private AuthResponse guest;
+    private FileStorageService storage;
     private FileTransferServer fileServer;
     private FileTransferClient files;
 
@@ -71,7 +72,7 @@ class RoomFileTransferCompatibilityTest {
         TransferConfig config = new TransferConfig(true, "127.0.0.1", 0, 65536, 4, 2, 10000,
                 temporary.resolve("storage"), 2L * 1024 * 1024, 8L * 1024 * 1024,
                 4, Duration.ofHours(1), true);
-        FileStorageService storage = new FileStorageService(config.storagePath(), config.quotaBytes(),
+        storage = new FileStorageService(config.storagePath(), config.quotaBytes(),
                 config.maxFileBytes(), config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());
         fileServer = new FileTransferServer(tls.server(), config, new FileMetadataRepository(fixture::connection), storage);
         fileServer.start();
@@ -84,7 +85,11 @@ class RoomFileTransferCompatibilityTest {
             if (files != null) files.close();
             if (fileServer != null) fileServer.close();
         } finally {
-            if (fixture != null) fixture.close();
+            try {
+                if (storage != null) storage.close();
+            } finally {
+                if (fixture != null) fixture.close();
+            }
         }
     }
 
