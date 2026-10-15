@@ -146,7 +146,7 @@ class RoomServiceTest {
     }
 
     @Test
-    void hostStopOnlyDisablesRequestedMediaAndHostLeaveRevokesEveryone() throws Exception {
+    void hostStopOnlyDisablesRequestedMediaAndHostLeaveTransfersOwnership() throws Exception {
         RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);
         RoomJoinReply member = join(2, "member-b", "join-member-00002", room);
         service.stopPublish("host-a", member.selfParticipantId(), "AUDIO");
@@ -154,11 +154,12 @@ class RoomServiceTest {
         assertFalse(stopped.micRequested()); assertTrue(stopped.cameraRequested());
         assertFalse(stopped.audioPublishing()); assertFalse(stopped.videoPublishing());
         service.leave("host-a", "TU_ROI");
-        assertEquals(0, service.participantCount()); assertEquals(0, service.roomCount());
-        error("NOT_A_MEMBER", () -> service.assertMember("member-b", room.roomId()));
-        assertEquals(2, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NOT NULL AND Ly_Do_Roi='PHONG_DONG'"));
-        assertEquals("DA_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
-        assertTrue(events.stream().anyMatch(event -> event.recipientConnectionId().equals("member-b") && event.type().equals("ROOM_CLOSED")));
+        assertEquals(1, service.participantCount()); assertEquals(1, service.roomCount());
+        assertEquals(RoomRole.HOST, service.assertMember("member-b", room.roomId()).role());
+        assertEquals(1, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NOT NULL AND Ly_Do_Roi='TU_ROI'"));
+        assertEquals("DANG_HOAT_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        assertEquals("2", scalar("SELECT CAST(Ma_Chu_Phong AS VARCHAR) FROM Phong_Hop"));
+        assertFalse(events.stream().anyMatch(event -> event.recipientConnectionId().equals("member-b") && event.type().equals("ROOM_CLOSED")));
     }
 
     @Test

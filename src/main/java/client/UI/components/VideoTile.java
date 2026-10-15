@@ -54,7 +54,7 @@ public final class VideoTile extends StackPane {
         pulse.setAutoReverse(true); pulse.setCycleCount(Animation.INDEFINITE);
     }
     public void setMuted(boolean muted) { mic.getChildren().setAll(IconButton.icon(muted ? "mic-off" : "mic")); mic.getStyleClass().setAll(muted ? "muted-mic" : "tile-mic"); }
-    public void setCamera(boolean on) { cameraState.setText(on ? live ? "Đang nhận video" : "Video mô phỏng" : "Camera đang tắt"); }
+    public void setCamera(boolean on) { cameraState.setText(on ? live ? "Đang nhận video" : "Chưa có luồng video" : "Camera đang tắt"); }
     public void setSpeaking(boolean speaking) { border.setVisible(speaking); if (speaking) pulse.play(); else pulse.stop(); }
     public void pinAction(String participantName, boolean pinned, Runnable action) {
         IconButton pin = new IconButton("pin", (pinned ? "Bỏ ghim " : "Ghim ") + participantName);

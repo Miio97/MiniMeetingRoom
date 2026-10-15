@@ -26,6 +26,26 @@ public final class RoomRepository {
     public RoomRepository() { this(DatabaseConnection::getConnection); }
     public RoomRepository(ConnectionProvider connections) { this.connections = java.util.Objects.requireNonNull(connections); }
 
+    server.auth.ConnectionProvider connections() { return connections; }
+
+    void transferHost(long roomId, long nextHost) throws SQLException {
+        transaction(connection -> {
+            StoredRoom room = loadRoomForUpdate(connection, roomId);
+            if (room == null || room.status() == RoomStatus.CLOSED) throw new RoomException("ROOM_CLOSED");
+            try (PreparedStatement query = connection.prepareStatement("SELECT Ma_Thanh_Vien_Phong FROM Thanh_Vien_Phong WHERE Ma_Phong=? AND Ma_Nguoi_Dung=? AND Roi_Phong_Luc IS NULL FOR UPDATE")) {
+                query.setLong(1, roomId); query.setLong(2, nextHost);
+                try (ResultSet rows = query.executeQuery()) { if (!rows.next()) throw new RoomException("PARTICIPANT_NOT_FOUND"); }
+            }
+            try (PreparedStatement query = connection.prepareStatement("UPDATE Phong_Hop SET Ma_Chu_Phong=? WHERE Ma_Phong=?")) {
+                query.setLong(1, nextHost); query.setLong(2, roomId); query.executeUpdate();
+            }
+            try (PreparedStatement query = connection.prepareStatement("UPDATE Thanh_Vien_Phong SET Vai_Tro=CASE WHEN Ma_Nguoi_Dung=? THEN 'CHU_PHONG' ELSE 'THANH_VIEN' END WHERE Ma_Phong=? AND Roi_Phong_Luc IS NULL")) {
+                query.setLong(1, nextHost); query.setLong(2, roomId); query.executeUpdate();
+            }
+            return null;
+        });
+    }
+
     public void checkSchema() throws SQLException {
         try (Connection connection = connections.getConnection(); Statement statement = connection.createStatement()) {
             statement.executeQuery("SELECT Ma_Phong, Room_Opaque_ID, Instance_ID, Server_Epoch, Ngay_Tao FROM MMR_Phong_Van_Hanh WHERE 1=0").close();
@@ -266,6 +286,7 @@ public final class RoomRepository {
     private interface SqlTask<T> { T execute(Connection connection) throws SQLException; }
     record StoredRoom(long id, String roomId, String joinCode, String name, String pinHash, long hostId,
             RoomStatus status, boolean locked, int capacity, String instanceId, String epoch, String createdAt) {
+        StoredRoom withHost(long value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, value, status, locked, capacity, instanceId, epoch, createdAt); }
         StoredRoom withStatus(RoomStatus value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, hostId, value, locked, capacity, instanceId, epoch, createdAt); }
         StoredRoom withLock(boolean value) { return new StoredRoom(id, roomId, joinCode, name, pinHash, hostId, status, value, capacity, instanceId, epoch, createdAt); }
         @Override public String toString() { return "StoredRoom[status=" + status + ", capacity=" + capacity + "]"; }

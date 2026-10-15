@@ -14,7 +14,6 @@ public final class MockData {
     public record Participant(String name, boolean host, boolean muted, boolean camera, String color) { }
     public record Message(String name, String text, String time, boolean mine) { }
     public record SharedFile(String name, String size, String sender) { }
-    public record Network(double latency, double jitter, double loss, double bitrate, int fps, String resolution) { }
     private MockData() { }
     public static List<Room> rooms() { return List.of(
         new Room("Design sync · Nhóm sản phẩm", "MMR-2048", 6, "Hôm nay, 09:30", "1234", 10),
@@ -39,7 +38,6 @@ public final class MockData {
     public static List<String> cameras() { return List.of("Camera tích hợp (demo)", "USB Webcam (demo)"); }
     public static List<String> microphones() { return List.of("Microphone mặc định (demo)", "Headset Microphone (demo)"); }
     public static List<String> speakers() { return List.of("Loa máy tính (demo)", "Tai nghe (demo)"); }
-    public static Network network() { return new Network(45, 8, 0.8, 1.8, 30, "720p"); }
     public static String initials(String name) {
         if (name.equals("Nguyễn Minh Hiếu")) return "NH";
         if (name.isBlank()) return "?";

@@ -79,6 +79,7 @@
 .network-badge.good { -fx-background-color: #173b2c; -fx-text-fill: -success; -fx-border-color: #24573f; }
 .network-badge.fair { -fx-background-color: #3c3019; -fx-text-fill: -warning; }
 .network-badge.poor { -fx-background-color: #3d242a; -fx-text-fill: -danger; }
+.network-badge.waiting { -fx-background-color: -bg-elevated; -fx-text-fill: -text-muted; }
 .video-tile { -fx-background-radius: 12; }
 .tile-footer { -fx-padding: 12; -fx-background-color: rgba(10,12,20,.35); -fx-background-radius: 0 0 12 12; }
 .tile-name { -fx-font-size: 12px; -fx-font-weight: bold; }

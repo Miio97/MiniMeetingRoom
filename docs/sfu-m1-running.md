@@ -2,7 +2,7 @@
 
 Luồng SFU dùng `server.meeting.RoomService`, `server.signalingapi` và `client.meeting.MeetingSession`. Server xác thực token opaque, kiểm tra membership/quyền và phát sự kiện qua TCP/TLS lâu dài. Giao diện dùng `RoomSnapshot`/`ParticipantView` thật. **Video đã được tích hợp sau Mốc 1; xem [video-call.md](video-call.md) để chạy và chọn camera.** Các kết quả/giới hạn Mốc 1 dưới đây là lịch sử của bước phòng/signaling.
 
-Tại Mốc 1, luồng auth và signaling có lối vào riêng. Bản hiện tại đã nối các form tạo/join chính với signaling, PreJoinScreen và MeetingScreen; RoomSnapshot mang RoomInfo thật để tab Tệp dùng cùng phòng/membership. Kênh auth vẫn không được join/get/leave phòng signaling; danh sách phòng gần đây đọc cả hai loại. Chat vẫn là bản xem trước. Xem `video-call.md` cho hướng dẫn hiện tại.
+Tại Mốc 1, luồng auth và signaling có lối vào riêng. Bản hiện tại đã nối các form tạo/join chính với signaling, PreJoinScreen và MeetingScreen; RoomSnapshot mang RoomInfo thật để tab Tệp dùng cùng phòng/membership. Kênh auth vẫn không được join/get/leave phòng signaling; danh sách phòng gần đây đọc cả hai loại. Chat và lệnh quản trị dùng cầu nối `RoomRequest`/`ChatRequest` trên auth TLS, xác minh cùng token và participant ID của phiên signaling; không tạo thêm membership. Xem `video-call.md` cho hướng dẫn hiện tại.
 
 ## Chạy trên cùng máy
 
@@ -25,7 +25,7 @@ Giữ cấu hình Railway hiện tại trong file server được Git bỏ qua. 
    powershell -ExecutionPolicy Bypass -File .\scripts\start-client.ps1
    ```
 
-4. Đăng nhập bằng hai tài khoản khác nhau. Từ sảnh dùng **Tạo phòng / Tham gia phòng** có sẵn. Client đầu tạo phòng với PIN; client thứ hai nhập ID hoặc mã và PIN. Hai màn hình thấy cùng thành viên. Chủ phòng có khóa/mở khóa và mời thành viên ra; rời phòng cập nhật màn hình còn lại. Chủ phòng rời thì phòng đóng. Một tài khoản chỉ có một membership đang sống trong cùng phòng. Chọn camera trên màn hình trước khi vào phòng hoặc trong màn hình họp theo `video-call.md`.
+4. Đăng nhập bằng hai tài khoản khác nhau. Từ sảnh dùng **Tạo phòng / Tham gia phòng** có sẵn. Client đầu tạo phòng với PIN; client thứ hai nhập ID hoặc mã và PIN. Hai màn hình thấy cùng thành viên. Chủ phòng có khóa/mở khóa và mời thành viên ra; rời phòng cập nhật màn hình còn lại. Chủ phòng rời thì quyền chủ tự chuyển cho thành viên còn lại; chọn Đóng phòng mới kết thúc cho mọi người. Một tài khoản chỉ có một membership đang sống trong cùng phòng. Chọn camera trên màn hình trước khi vào phòng hoặc trong màn hình họp theo `video-call.md`.
 
 Chuyển view chỉ gỡ listener của view; `SceneManager` sở hữu `MeetingSession`. Rời phòng đóng signaling; logout/đóng ứng dụng hủy session và các yêu cầu chờ. Mất kết nối không tự bật lại thiết bị. Certificate được kiểm tra trust và hostname, không dùng trust-all.
 

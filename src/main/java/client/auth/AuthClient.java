@@ -8,6 +8,11 @@ import common.room.RoomInfo;
 import common.room.RoomRequest;
 import common.room.RoomValidation;
 import common.diagnostics.Diagnostics;
+import common.meeting.RoomResponse;
+import common.chat.*;
+import client.network.NetworkMonitor;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -39,6 +44,17 @@ public final class AuthClient {
             "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
+    private final AtomicReference<NetworkMonitor> networkMonitor = new AtomicReference<>();
+
+    public NetworkMonitor startNetworkMonitoring() {
+        NetworkMonitor next = new NetworkMonitor();
+        NetworkMonitor previous = networkMonitor.getAndSet(next);
+        if (previous != null) previous.close();
+        return next;
+    }
+    public void stopNetworkMonitoring(NetworkMonitor monitor) {
+        networkMonitor.compareAndSet(monitor, null); monitor.close();
+    }
 
     public AuthClient() { fixedSettings = null; fixedTls = null; }
 
@@ -87,7 +103,27 @@ public final class AuthClient {
     private AuthResponse send(AuthRequest request) throws IOException {
         RequestTiming timing = new RequestTiming(request.action());
         try {
-            AuthResponse response = sendMeasured(request, timing);
+            AuthResponse response = sendMeasured(request, timing, AuthResponse.class);
+            if (response.code() == null || response.message() == null
+                    || (request.action().equals("LOGIN") && response.success()
+                    && (response.user() == null || response.user().id() <= 0
+                    || response.user().username() == null || response.user().displayName() == null
+                    || response.token() == null || response.token().isBlank() || response.expiresAt() == null))) {
+                throw new IOException("Phản hồi từ máy chủ không hợp lệ.");
+            }
+            if (response.success()) {
+                switch (request.action()) {
+                    case "CREATE_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
+                        if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
+                    }
+                    case "LIST_ROOMS" -> {
+                        if (response.rooms().size() > 20 || response.rooms().stream().anyMatch(room -> !validRoom(room))) {
+                            throw new IOException("Danh sách phòng từ máy chủ không hợp lệ.");
+                        }
+                    }
+                    default -> { }
+                }
+            }
             Map<String, Object> fields = timing.fields(response.success() ? "success" : "rejected");
             fields.put("response_code", RESPONSE_CODES.contains(response.code()) ? response.code() : "OTHER");
             Diagnostics.current().event("auth_client_request", fields);
@@ -98,7 +134,60 @@ public final class AuthClient {
         }
     }
 
-    private AuthResponse sendMeasured(AuthRequest request, RequestTiming timing) throws IOException {
+    public RoomResponse meeting(common.meeting.RoomRequest request) throws IOException {
+        RoomResponse response = sendMeasured(request, new RequestTiming("OTHER"), RoomResponse.class);
+        if (response.code() == null || response.message() == null) throw new IOException("Phản hồi phòng không hợp lệ.");
+        if (!response.success()) throw new RoomException(response.code(), response.message());
+        if (!"ROOM_LEAVE".equals(request.action()) && (response.room() == null
+                || (!response.room().closed() && (response.ticket() == null || response.ticket().isBlank())))) {
+            throw new IOException("Phản hồi phòng thiếu thông tin kết nối.");
+        }
+        return response;
+    }
+
+    private <T> T sendMeasured(Object request, RequestTiming timing, Class<T> responseType) throws IOException {
+        NetworkMonitor monitor = networkMonitor.get();
+        boolean poll = request instanceof common.meeting.RoomRequest room && "ROOM_POLL".equals(room.action());
+        T response;
+        try (SSLSocket socket = connect(timing)) {
+            timing.next("response");
+            var output = socket.getOutputStream(); var input = socket.getInputStream();
+            if (monitor != null) { output = monitor.output(output); input = monitor.input(input); }
+            AuthWire.write(new DataOutputStream(output), request);
+            response = AuthWire.read(new DataInputStream(input), responseType);
+            timing.responseMillis = timing.phaseMillis();
+        } catch (SocketTimeoutException error) {
+            if (monitor != null) monitor.exchange(poll, null);
+            throw new IOException("Máy chủ phản hồi quá lâu. Vui lòng thử lại.", error);
+        } catch (IOException error) {
+            if (monitor != null) monitor.exchange(poll, null);
+            throw error;
+        }
+        if (monitor != null) monitor.exchange(poll, timing.responseMillis);
+        return response;
+    }
+
+    public ChatResponse chat(ChatRequest request) throws IOException {
+        ChatResponse response = sendMeasured(request, new RequestTiming("OTHER"), ChatResponse.class);
+        verifyChat(response, request.roomId()); return response;
+    }
+    public ChatConnection listenChat(ChatRequest request, Consumer<ChatResponse> response, Consumer<Throwable> failure) {
+        return new ChatConnection(() -> connect(new RequestTiming("OTHER")), request, response, failure, networkMonitor.get());
+    }
+    static void verifyChat(ChatResponse response, long roomId) throws IOException {
+        if (response.code() == null || response.message() == null) throw new IOException("Phản hồi chat không hợp lệ.");
+        if (!response.success()) throw new ChatException(response.code(), response.message());
+        for (ChatMessage message : response.messages()) {
+            if (message.id() <= 0 || message.roomId() != roomId || message.userId() <= 0
+                    || message.name() == null || message.text() == null || message.sentAt() == null) {
+                throw new IOException("Tin nhắn từ máy chủ không hợp lệ.");
+            }
+            try { java.time.Instant.parse(message.sentAt()); }
+            catch (java.time.format.DateTimeParseException error) { throw new IOException("Thời gian tin nhắn không hợp lệ.", error); }
+        }
+    }
+
+    private SSLSocket connect(RequestTiming timing) throws IOException {
         Settings settings = fixedSettings != null ? fixedSettings : Settings.load();
         timing.port = settings.port();
         timing.next("tls_context");
@@ -113,53 +202,36 @@ public final class AuthClient {
             }
         }
         timing.tlsContextMillis = timing.phaseMillis();
-        try (Socket connection = new Socket()) {
+        Socket connection = new Socket();
+        SSLSocket socket = null;
+        boolean ready = false;
+        try {
+            connection.setTcpNoDelay(true);
             timing.next("tcp_connect");
             connection.connect(new InetSocketAddress(settings.host(), settings.port()),
                     Math.min(5000, settings.timeoutMillis()));
             timing.tcpConnectMillis = timing.phaseMillis();
             timing.next("tls_handshake");
-            try (SSLSocket socket = (SSLSocket) tls.getSocketFactory()
-                    .createSocket(connection, settings.host(), settings.port(), true)) {
-                socket.setSoTimeout(settings.timeoutMillis());
-                socket.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
-                SSLParameters parameters = socket.getSSLParameters();
-                parameters.setEndpointIdentificationAlgorithm("HTTPS");
-                socket.setSSLParameters(parameters);
-                socket.startHandshake();
-                timing.tlsHandshakeMillis = timing.phaseMillis();
-                timing.next("response");
-                AuthWire.write(new DataOutputStream(socket.getOutputStream()), request);
-                AuthResponse response = AuthWire.read(new DataInputStream(socket.getInputStream()), AuthResponse.class);
-                if (response.code() == null || response.message() == null
-                        || (request.action().equals("LOGIN") && response.success()
-                        && (response.user() == null || response.user().id() <= 0
-                        || response.user().username() == null || response.user().displayName() == null
-                        || response.token() == null || response.token().isBlank() || response.expiresAt() == null))) {
-                    throw new IOException("Phản hồi từ máy chủ không hợp lệ.");
-                }
-                if (response.success()) {
-                    switch (request.action()) {
-                        case "CREATE_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
-                            if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
-                        }
-                        case "LIST_ROOMS" -> {
-                            if (response.rooms().size() > 20 || response.rooms().stream().anyMatch(room -> !validRoom(room))) {
-                                throw new IOException("Danh sách phòng từ máy chủ không hợp lệ.");
-                            }
-                        }
-                        default -> { }
-                    }
-                }
-                timing.responseMillis = timing.phaseMillis();
-                return response;
-            }
+            socket = (SSLSocket) tls.getSocketFactory().createSocket(connection, settings.host(), settings.port(), true);
+            socket.setSoTimeout(settings.timeoutMillis());
+            socket.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
+            SSLParameters parameters = socket.getSSLParameters();
+            parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            socket.setSSLParameters(parameters);
+            socket.startHandshake();
+            timing.tlsHandshakeMillis = timing.phaseMillis();
+            ready = true; return socket;
         } catch (SSLHandshakeException e) {
             throw new IOException("Không xác minh được máy chủ. Kiểm tra tên máy chủ và chứng chỉ TLS.", e);
         } catch (ConnectException e) {
             throw new IOException("Không kết nối được máy chủ. Hãy khởi động server và kiểm tra địa chỉ/cổng.", e);
         } catch (SocketTimeoutException e) {
             throw new IOException("Máy chủ phản hồi quá lâu. Vui lòng thử lại.", e);
+        } finally {
+            if (!ready) {
+                if (socket != null) try { socket.close(); } catch (IOException ignored) { }
+                try { connection.close(); } catch (IOException ignored) { }
+            }
         }
     }
 

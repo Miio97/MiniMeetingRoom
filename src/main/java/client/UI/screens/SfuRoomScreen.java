@@ -44,7 +44,7 @@ public final class SfuRoomScreen extends BorderPane {
                 Ui.label("Video qua WebRTC/SFU. Camera chỉ bật khi bạn chọn thiết bị và nhấn Bật camera.", "caption"));
         TextField name = new TextField(); name.setPromptText("Tên phòng"); name.setId("sfu-room-name");
         PasswordField createPin = new PasswordField(); createPin.setPromptText("PIN 4–6 số"); createPin.setId("sfu-create-pin");
-        Spinner<Integer> capacity = new Spinner<>(2, 10, 3); capacity.setId("sfu-capacity");
+        Spinner<Integer> capacity = new Spinner<>(2, manager.maxRoomCapacity(), 3); capacity.setId("sfu-capacity");
         Button create = Ui.button("Tạo và tham gia", "primary", () -> {
             String validation = RoomValidation.nameError(name.getText());
             if (validation == null) validation = RoomValidation.pinError(createPin.getText());

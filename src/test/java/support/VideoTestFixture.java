@@ -20,6 +20,8 @@ import server.signalingapi.*;
 public final class VideoTestFixture implements AutoCloseable {
     public final RoomTestFixture database;
     public final RoomService rooms;
+    public final server.AuthServer collaboration;
+    private final javax.net.ssl.SSLContext clientTls;
     public final SignalingServer signaling;
     public final VideoEngineClient engine;
     public final VideoCoordinator coordinator;
@@ -28,7 +30,7 @@ public final class VideoTestFixture implements AutoCloseable {
     private final Path diagnosticDirectory;
     public VideoTestFixture(RoomTestFixture.Tls tls, Path temporary) throws Exception {
         Files.createDirectories(temporary);
-        this.tls = tls; database = new RoomTestFixture(tls);
+        this.tls = tls; clientTls = tls.client(); database = new RoomTestFixture(tls);
         String migration = Files.readString(Path.of("database/migrations/001-meeting-runtime.sql"))
                 .replaceAll("(?m)^--[^\\r\\n]*", "").replace("CHARACTER SET ascii COLLATE ascii_bin", "").replace("ENGINE=InnoDB", "");
         for (String sql : migration.split(";")) if (!sql.isBlank()) database.execute(sql);
@@ -61,7 +63,12 @@ public final class VideoTestFixture implements AutoCloseable {
         signaling = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
                 new SessionValidator(database::connection, Clock.systemUTC()), new MeetingHandler(rooms, coordinator),
                 rooms.serverEpoch(), SignalingServer.Options.defaults()); signalReference.set(signaling); signaling.start();
+        var auth = new server.auth.AuthService(database::connection, new server.auth.PasswordHasher(), Clock.systemUTC(), Duration.ofHours(24), hash -> { signaling.revokeSession(hash); rooms.revokeSession(hash); });
+        collaboration = new server.AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
+                new server.ApplicationService(auth, new server.rooms.RoomService(database::connection, new server.auth.PasswordHasher(), Clock.systemUTC(), true))::handle, rooms);
+        collaboration.start();
     }
+    public client.auth.AuthClient client() { return new client.auth.AuthClient("localhost", collaboration.port(), clientTls, 5000); }
     public MeetingSession session(AuthResponse account) {
         return new MeetingSession(account.token(), Instant.parse(account.expiresAt()), listener -> new SignalingClient(
                 new SignalingClient.Settings("localhost", signaling.port(), null, SignalWire.DEFAULT_MAX_BYTES), tls.client(), listener),
@@ -69,7 +76,7 @@ public final class VideoTestFixture implements AutoCloseable {
                         new client.media.CameraConsentStore(diagnosticDirectory.getParent().resolve("camera-" + UUID.randomUUID() + ".properties")), List::of));
     }
     @Override public void close() throws Exception {
-        signaling.close(); rooms.close(); coordinator.close(); engine.shutdown(); engine.close();
+        signaling.close(); collaboration.close(); rooms.close(); coordinator.close(); engine.shutdown(); engine.close();
         if (!process.waitFor(8, TimeUnit.SECONDS)) { process.destroyForcibly(); throw new IllegalStateException("VIDEO_TEST_PROCESS_LEAK"); }
         database.close();
         // Retain bounded, sanitized numeric evidence after JUnit removes its temporary directory.

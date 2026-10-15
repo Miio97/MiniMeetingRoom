@@ -25,7 +25,8 @@ public final class LobbyScreen extends BorderPane {
     private final VBox rooms = new VBox(12);
     private final Label roomStatus = Ui.label("", "caption");
     private final Button refresh;
-    private boolean disposed, loading;
+    private boolean disposed, loading, joining;
+    private Runnable stopWaiting = () -> { };
     public LobbyScreen(SceneManager manager) { this(manager, ""); }
     public LobbyScreen(SceneManager manager, String initialCode) {
         this.manager = manager;
@@ -39,7 +40,7 @@ public final class LobbyScreen extends BorderPane {
         pulse = new FadeTransition(Duration.seconds(1.2), dot); pulse.setFromValue(1); pulse.setToValue(.35); pulse.setAutoReverse(true); pulse.setCycleCount(Animation.INDEFINITE); pulse.play();
         main.getChildren().add(Ui.row(12, Ui.column(8, Ui.label(days[today.getDayOfWeek().getValue() - 1] + ", " + today.format(DateTimeFormatter.ofPattern("dd/MM")), "date-label"),
             Ui.label("Xin chào, " + parts[parts.length - 1], "title"), Ui.label("Hôm nay bạn muốn kết nối với ai?", "muted")), Ui.spacer(), status));
-        Runnable createRoom = () -> new CreateRoomDialog(manager).showAndWait().ifPresent(result -> { if (!disposed) manager.preJoin(result); });
+        Runnable createRoom = () -> { if (joining) return; new CreateRoomDialog(manager).showAndWait().ifPresent(result -> { if (!disposed) manager.preJoin(result); }); };
         VBox createText = Ui.column(14, Icons.icon("video", 28), Ui.label("Tạo phòng mới", "subtitle"),
             Ui.label("Một không gian riêng cho nhóm của bạn.\nMời mọi người và bắt đầu trò chuyện.", "muted"), Ui.button("Tạo phòng", "primary", createRoom));
         createText.setMaxWidth(Double.MAX_VALUE);
@@ -58,19 +59,27 @@ public final class LobbyScreen extends BorderPane {
         HBox.setHgrow(codeField, Priority.ALWAYS); HBox.setHgrow(pinField, Priority.ALWAYS);
         HBox inputs = Ui.row(12, codeField, pinField); inputs.setAlignment(Pos.TOP_LEFT);
         Label error = Ui.label("", "error-text"); error.setWrapText(true); error.setId("join-room-error"); error.setManaged(false); error.setVisible(false);
+        Button cancelAdmission = Ui.button("Hủy yêu cầu", "secondary", () -> stopWaiting.run());
+        cancelAdmission.setId("cancel-room-admission"); cancelAdmission.setVisible(false); cancelAdmission.setManaged(false);
         Button enter = Ui.button("Tham gia", "primary", () -> {
             error.setManaged(true); error.setVisible(true);
             String validation = RoomValidation.identifierError(code.getText());
             if (validation == null) validation = RoomValidation.pinError(pin.getText());
             if (validation != null) { error.setText(validation); return; }
             String identifier = code.getText(), roomPin = pin.getText();
-            error.setText("Đang kiểm tra phòng…"); setDisable(true);
+            error.setText("Đang kiểm tra phòng…"); joining = true; if (!manager.usesSignalingRooms()) setDisable(true);
+            code.setDisable(true); pin.setDisable(true); actionsPending(true);
+            cancelAdmission.setVisible(true); cancelAdmission.setManaged(true);
+            var session = manager.sfuSession();
+            javafx.beans.value.ChangeListener<String> notice = (observable, before, after) -> { if (joining && !disposed) error.setText(after); };
+            session.noticeProperty().addListener(notice);
+            stopWaiting = () -> { joining = false; setDisable(false); manager.cancelAdmission(); session.noticeProperty().removeListener(notice); code.setDisable(false); pin.setDisable(false); actionsPending(false); cancelAdmission.setVisible(false); cancelAdmission.setManaged(false); error.setText(""); };
             manager.requestJoinRoom(identifier, roomPin, room -> {
-                if (disposed) return; setDisable(false);
+                if (disposed || !joining) return; joining = false; setDisable(false); session.noticeProperty().removeListener(notice);
                 pin.clear(); manager.preJoin(room);
-            }, cause -> { if (!disposed) { setDisable(false); error.setText(SceneManager.connectionError(cause)); } });
+            }, cause -> { if (!disposed && joining) { stopWaiting.run(); error.setText(SceneManager.connectionError(cause)); } });
         }); enter.setId("join-room-submit"); enter.setMaxWidth(Double.MAX_VALUE);
-        join.getChildren().addAll(Ui.label("Tham gia phòng", "subtitle"), Ui.label("Nhập ID / mã phòng và PIN được chia sẻ với bạn.", "muted"), inputs, error, enter);
+        join.getChildren().addAll(Ui.label("Tham gia phòng", "subtitle"), Ui.label("Nhập ID / mã phòng và PIN được chia sẻ với bạn.", "muted"), inputs, error, enter, cancelAdmission);
         HBox actions = Ui.row(20, create, join); actions.setAlignment(Pos.TOP_LEFT);
         create.setMinWidth(0); join.setMinWidth(0); create.setPrefWidth(350); join.setPrefWidth(420);
         HBox.setHgrow(create, Priority.ALWAYS); HBox.setHgrow(join, Priority.ALWAYS);
@@ -81,6 +90,9 @@ public final class LobbyScreen extends BorderPane {
         setCenter(Ui.scroll(main));
         java.util.List<RoomInfo> cached = manager.recentRooms();
         if (cached == null) loadRooms(); else renderRooms(cached);
+    }
+    private void actionsPending(boolean value) {
+        javafx.scene.Node submit = lookup("#join-room-submit"); if (submit != null) submit.setDisable(value);
     }
     private void loadRooms() {
         if (disposed || loading) return;
@@ -109,5 +121,5 @@ public final class LobbyScreen extends BorderPane {
             HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); rooms.getChildren().add(item);
             }
     }
-    public void dispose() { disposed = true; pin.clear(); pulse.stop(); }
+    public void dispose() { if (joining) stopWaiting.run(); disposed = true; pin.clear(); pulse.stop(); }
 }

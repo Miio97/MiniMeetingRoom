@@ -16,14 +16,21 @@ import java.util.WeakHashMap;
 public final class ThemeManager {
     private static final BooleanProperty LIGHT = new SimpleBooleanProperty(true);
     private static final WeakHashMap<Parent, Boolean> ROOTS = new WeakHashMap<>();
-    static { LIGHT.addListener((obs, old, value) -> ROOTS.keySet().forEach(ThemeManager::apply)); }
     private ThemeManager() { }
     public static boolean isLight() { return LIGHT.get(); }
-    public static void setLight(boolean value) { LIGHT.set(value); }
-    public static void attach(Parent root) { ROOTS.put(root, Boolean.TRUE); apply(root); }
+    public static void setLight(boolean value) {
+        LIGHT.set(value);
+        // Snapshot weakly held roots after property listeners run; closing native dialogs can release roots.
+        for (Parent root : new java.util.ArrayList<>(ROOTS.keySet())) apply(root);
+    }
+    public static void attach(Parent root) {
+        // Old meeting roots used a forced class; actual windows follow the shared preference.
+        if (root.getScene() != null && root.getScene().getRoot() == root) root.getStyleClass().remove("theme-dark");
+        ROOTS.put(root, Boolean.TRUE); apply(root);
+    }
     private static void apply(Parent root) {
-        root.getStyleClass().removeAll("light-mode", "theme-dark");
-        if (isLight()) root.getStyleClass().add("light-mode");
+        root.getStyleClass().removeAll("light-mode");
+        if (!root.getStyleClass().contains("theme-dark") && isLight()) root.getStyleClass().add("light-mode");
     }
     public static Button toggleButton() {
         Button button = new Button(); button.getStyleClass().add("theme-toggle");

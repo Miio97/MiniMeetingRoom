@@ -5,6 +5,14 @@ import common.auth.AuthResponse;
 import common.auth.AuthWire;
 import common.auth.TlsSupport;
 import common.diagnostics.Diagnostics;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import common.meeting.RoomRequest;
+import common.meeting.RoomResponse;
+import common.chat.*;
+import server.messaging.ChatService;
+import server.meeting.RoomService;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -46,6 +54,9 @@ public final class AuthServer implements AutoCloseable {
 
     private final SSLServerSocket listener;
     private final Handler handler;
+    private final RoomService rooms;
+    private final ChatService chats;
+    private final Set<Thread> chatThreads = ConcurrentHashMap.newKeySet();
     private final ThreadPoolExecutor workers = new ThreadPoolExecutor(8, 8, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(32), Thread.ofPlatform().daemon().name("auth-worker-", 0).factory());
     private final Set<SSLSocket> clients = ConcurrentHashMap.newKeySet();
@@ -57,7 +68,12 @@ public final class AuthServer implements AutoCloseable {
     private Thread acceptThread;
 
     public AuthServer(SSLContext tls, InetSocketAddress address, Handler handler) throws IOException {
+        this(tls, address, handler, null);
+    }
+    public AuthServer(SSLContext tls, InetSocketAddress address, Handler handler, RoomService rooms) throws IOException {
         this.handler = handler;
+        this.rooms = rooms;
+        this.chats = rooms == null ? null : new ChatService(rooms);
         listener = (SSLServerSocket) tls.getServerSocketFactory().createServerSocket();
         try {
             listener.setReuseAddress(true);
@@ -97,7 +113,9 @@ public final class AuthServer implements AutoCloseable {
                 long acceptedAt = System.nanoTime();
                 long connectionId = acceptedConnections.incrementAndGet();
                 socket.setSoTimeout(10000);
+                socket.setTcpNoDelay(true);
                 clients.add(socket);
+                if (clients.size() > 128) { rejectedConnections.incrementAndGet(); closeClient(socket); continue; }
                 try {
                     workers.execute(() -> handle(socket, connectionId, acceptedAt));
                     Map<String, Object> fields = workload();
@@ -134,7 +152,9 @@ public final class AuthServer implements AutoCloseable {
         String responseCode = "NONE";
         String phase = "tls_handshake";
         String result = "transport_error";
-        try (socket) {
+        boolean handedOff = false;
+        boolean chatRequest = false;
+        try {
             try { socket.startHandshake(); }
             finally { handshakeMillis = elapsedMillis(handshakeAt); }
             phase = "request_read";
@@ -142,19 +162,51 @@ public final class AuthServer implements AutoCloseable {
             DataOutputStream output = new DataOutputStream(socket.getOutputStream());
             AuthResponse response;
             try {
-                AuthRequest request = AuthWire.read(input, AuthRequest.class);
+                JsonObject envelope = AuthWire.read(input, JsonObject.class);
+                if (envelope.has("action") && (!envelope.get("action").isJsonPrimitive() || !envelope.getAsJsonPrimitive("action").isString())) throw new IllegalArgumentException("Invalid action");
+                if (chats != null && envelope.has("action") && envelope.get("action").getAsString().startsWith("CHAT_")) {
+                    chatRequest = true;
+                    ChatRequest request = new Gson().fromJson(envelope, ChatRequest.class);
+                    phase = "request_handler";
+                    if ("CHAT_LISTEN".equals(request.action())) {
+                        ChatService.Subscription subscription = chats.subscribe(request, () -> {
+                            try { socket.close(); } catch (IOException ignored) { }
+                        });
+                        // Persistent readers never occupy the bounded authentication workers.
+                        Thread stream = Thread.ofVirtual().name("chat-stream-" + connectionId).unstarted(
+                                () -> streamChat(socket, output, subscription, connectionId, acceptedAt));
+                        chatThreads.add(stream); handedOff = true;
+                        try { stream.start(); }
+                        catch (RuntimeException error) { handedOff = false; chatThreads.remove(stream); subscription.close(); throw error; }
+                        result = "success"; responseCode = "OK"; phase = "chat_stream"; return;
+                    }
+                    ChatResponse chatResponse = chats.send(request);
+                    AuthWire.write(output, chatResponse);
+                    result = chatResponse.success() ? "success" : "rejected"; responseCode = safeResponseCode(chatResponse.code()); return;
+                }
+                if (rooms != null && envelope.has("action") && envelope.get("action").getAsString().startsWith("ROOM_")) {
+                    phase = "request_handler"; long handlerAt = System.nanoTime(); RoomResponse roomResponse;
+                    try { roomResponse = rooms.handle(new Gson().fromJson(envelope, RoomRequest.class)); }
+                    finally { handlerMillis = elapsedMillis(handlerAt); }
+                    responseCode = safeResponseCode(roomResponse.code()); phase = "response_write";
+                    AuthWire.write(output, roomResponse); result = roomResponse.success() ? "success" : "rejected"; phase = "connection_close"; return;
+                }
+                AuthRequest request = new Gson().fromJson(envelope, AuthRequest.class);
                 action = safeAction(request.action());
                 phase = "request_handler";
                 long handlerAt = System.nanoTime();
                 try { response = handler.handle(request); }
                 finally { handlerMillis = elapsedMillis(handlerAt); }
+            } catch (ChatException e) {
+                response = AuthResponse.error(e.code(), e.getMessage());
             } catch (SQLException e) {
                 Diagnostics.current().failure("server.request.failed", e,
                         Map.of("connection_id", connectionId, "phase", phase, "action", action));
                 // Do not send SQL, connection strings or credentials to the client.
                 System.err.println("Auth database error (SQLState=" + e.getSQLState() + ").");
-                response = AuthResponse.error("DATABASE_UNAVAILABLE", "Không thể xử lý tài khoản lúc này. Vui lòng thử lại.");
-            } catch (IOException | IllegalArgumentException e) {
+                response = AuthResponse.error("DATABASE_UNAVAILABLE", chatRequest
+                        ? "Không thể lưu tin nhắn lúc này. Vui lòng thử lại." : "Không thể xử lý tài khoản lúc này. Vui lòng thử lại.");
+            } catch (IOException | IllegalArgumentException | JsonParseException e) {
                 Diagnostics.current().failure("server.request.failed", e,
                         Map.of("connection_id", connectionId, "phase", phase, "action", action));
                 response = AuthResponse.error("INVALID_REQUEST", "Yêu cầu không hợp lệ.");
@@ -174,8 +226,7 @@ public final class AuthServer implements AutoCloseable {
             Diagnostics.current().failure("server.connection.failed", e,
                     Map.of("connection_id", connectionId, "phase", phase, "action", action));
         } finally {
-            clients.remove(socket);
-            completedConnections.incrementAndGet();
+            if (!handedOff) { closeClient(socket); completedConnections.incrementAndGet(); }
             Map<String, Object> fields = workload();
             fields.put("connection_id", connectionId);
             fields.put("action", action);
@@ -185,7 +236,41 @@ public final class AuthServer implements AutoCloseable {
             fields.put("tls_handshake_ms", handshakeMillis);
             if (handlerMillis >= 0) fields.put("handler_ms", handlerMillis);
             fields.put("total_ms", elapsedMillis(acceptedAt));
-            Diagnostics.current().event("server.connection.completed", fields);
+            Diagnostics.current().event(handedOff ? "server.chat.connected" : "server.connection.completed", fields);
+        }
+    }
+
+    private void streamChat(SSLSocket socket, DataOutputStream output, ChatService.Subscription subscription,
+            long connectionId, long acceptedAt) {
+        try (socket; subscription) {
+            try {
+                AuthWire.write(output, ChatResponse.ok(java.util.List.of()));
+                // History uses one message per bounded UTF-8 frame, including large escaped texts.
+                for (ChatMessage message : subscription.history()) {
+                    if (closed || subscription.ended()) return;
+                    chats.validate(subscription);
+                    AuthWire.write(output, ChatResponse.ok(java.util.List.of(message)));
+                }
+                while (!closed && !subscription.ended()) {
+                    ChatResponse event = subscription.next();
+                    if (subscription.ended()) break;
+                    chats.validate(subscription);
+                    AuthWire.write(output, event == null ? ChatResponse.ok(java.util.List.of()) : event);
+                }
+            } catch (ChatException error) {
+                AuthWire.write(output, ChatResponse.error(error.code(), error.getMessage()));
+            } catch (SQLException error) {
+                Diagnostics.current().failure("server.chat.database_failed", error, Map.of("connection_id", connectionId));
+                AuthWire.write(output, ChatResponse.error("DATABASE_UNAVAILABLE", "Không thể tải chat lúc này. Vui lòng thử lại."));
+            }
+        } catch (IOException error) {
+            if (!closed) Diagnostics.current().failure("server.chat.connection_closed", error, Map.of("connection_id", connectionId));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            closeClient(socket); chatThreads.remove(Thread.currentThread()); completedConnections.incrementAndGet();
+            Diagnostics.current().event("server.connection.completed", Map.of("connection_id", connectionId,
+                    "action", "OTHER", "total_ms", elapsedMillis(acceptedAt), "outcome", "chat_closed"));
         }
     }
 
@@ -201,10 +286,20 @@ public final class AuthServer implements AutoCloseable {
         try {
             listener.close();
         } finally {
+            if (chats != null) chats.close();
             clients.forEach(this::closeClient);
+            chatThreads.forEach(Thread::interrupt);
             workers.shutdownNow();
             try { workers.awaitTermination(1, TimeUnit.SECONDS); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            for (Thread thread : java.util.List.copyOf(chatThreads)) {
+                try { thread.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
+                if (System.nanoTime() >= deadline) break;
+            }
+            if (rooms != null) try { rooms.close(); }
+            catch (Exception error) { Diagnostics.current().failure("server.rooms.close_failed", error, Map.of()); }
             Map<String, Object> fields = workload();
             fields.put("workers_terminated", workers.isTerminated());
             Diagnostics.current().event("server.stopped", fields);
@@ -270,7 +365,7 @@ public final class AuthServer implements AutoCloseable {
             startupStep = "mở cổng TCP/TLS";
             startupPhase = "listener_bind";
             AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port),
-                    new ApplicationService()::handle);
+                    new ApplicationService()::handle, new RoomService());
             runningServer.set(server);
             startupPhase = "file_listener_bind";
             FileTransferServer files = fileServer(tls, transferConfig);

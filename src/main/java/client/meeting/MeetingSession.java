@@ -104,7 +104,7 @@ public final class MeetingSession implements AutoCloseable {
         });
     }
     public CompletableFuture<RoomSnapshot> join(boolean mic, boolean camera) {
-        return submit(() -> {
+        CompletableFuture<RoomSnapshot> attempt = submit(() -> {
             RoomPreview target = Objects.requireNonNull(preview, "ROOM_REQUIRED");
             JsonObject body = new JsonObject(); body.addProperty("joinCode", target.joinCode()); body.addProperty("pin", pin);
             body.addProperty("mic", mic); body.addProperty("camera", camera);
@@ -119,6 +119,17 @@ public final class MeetingSession implements AutoCloseable {
             pin = "";
             publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
         });
+        return attempt.handle((value, failure) -> {
+            if (failure == null) return CompletableFuture.completedFuture(value);
+            Throwable cause = failure;
+            while ((cause instanceof CompletionException || cause instanceof ExecutionException) && cause.getCause() != null) cause = cause.getCause();
+            if (cause instanceof SignalException signal && "APPROVAL_PENDING".equals(signal.code()) && !closed.get()) {
+                publish(State.CONNECTED, "Đang chờ chủ phòng duyệt. Bạn có thể hủy yêu cầu.");
+                return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS))
+                        .thenCompose(ignored -> join(mic, camera));
+            }
+            return CompletableFuture.<RoomSnapshot>failedFuture(cause);
+        }).thenCompose(value -> value);
     }
     public CompletableFuture<RoomSnapshot> refresh() { return submit(this::refreshNow); }
     private RoomSnapshot refreshNow() throws Exception {

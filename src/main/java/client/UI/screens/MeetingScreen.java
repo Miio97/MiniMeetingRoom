@@ -21,6 +21,20 @@ import java.util.List;
 
 /** Main meeting layout; video rooms borrow the session media owner and keep the file panel. */
 public final class MeetingScreen extends BorderPane {
+    private final client.network.NetworkMonitor network;
+    private final NetworkBadge networkBadge;
+    private NetworkStatsDialog networkDialog;
+    private final ChatPanel chatPanel;
+    private final ObservableList<common.meeting.Participant> managedPeople = FXCollections.observableArrayList();
+    private ParticipantPanel participantPanel;
+    private common.meeting.RoomResponse managedState;
+    public client.network.NetworkMonitor networkMonitor() { return network; }
+    public void refreshNetwork() { if (!disposed) networkBadge.quality(network.snapshot().quality()); }
+    private void networkStats() {
+        if (disposed || networkDialog != null) return;
+        networkDialog = new NetworkStatsDialog(manager.stage(), network);
+        try { networkDialog.showAndWait(); } finally { networkDialog.dispose(); networkDialog = null; }
+    }
     private final SceneManager manager;
     private final ObservableList<MockData.Participant> people;
     private final List<VideoTile> tiles = new ArrayList<>();
@@ -49,6 +63,8 @@ public final class MeetingScreen extends BorderPane {
     private final client.media.VideoCallController mediaController;
     private Label nativeStatus;
     private CameraSettingsDialog cameraSettings;
+    private DeviceSettingsDialog managementSettings;
+    private javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> managementListener;
     private java.util.concurrent.CompletableFuture<Void> cameraOperation;
     private final javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> videoRoomListener = (observable, before, after) -> {
         if (disposed || after == null) return;
@@ -63,14 +79,16 @@ public final class MeetingScreen extends BorderPane {
         Label duration = Ui.label("00:00:00", "meeting-time");
         IconButton copy = new IconButton("copy", "Sao chép mã phòng");
         copy.setOnAction(e -> { ClipboardContent content = new ClipboardContent(); content.putString(manager.room().code()); Clipboard.getSystemClipboard().setContent(content); copy.setIcon("check"); PauseTransition reset = new PauseTransition(Duration.seconds(1.5)); reset.setOnFinished(done -> copy.setIcon("copy")); reset.play(); });
-        Button badge = videoRoom ? Ui.button("Chưa có dữ liệu mạng", "network-badge", () -> { })
-                : new NetworkBadge(() -> new NetworkStatsDialog(manager.stage()).showAndWait());
-        if (videoRoom) badge.setDisable(true);
+        network = manager.authClient().startNetworkMonitoring();
+        networkBadge = new NetworkBadge(this::networkStats);
+        Button badge = networkBadge;
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label("ID " + manager.roomInfo().id() + " · " + manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, badge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
-        Tab participants = new Tab("Thành viên", videoRoom ? new VBox() : new ParticipantPanel(people, p -> { }, p -> { }, p -> { }, () -> { }, () -> { }, false));
+        participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand);
+        Tab participants = new Tab("Thành viên", participantPanel);
         filePanel = new FilePanel(manager);
-        Tab chat = new Tab("Chat", new ChatPanel(manager.user())); Tab files = new Tab("Tệp", filePanel);
+        chatPanel = new ChatPanel(manager);
+        Tab chat = new Tab("Chat", chatPanel); Tab files = new Tab("Tệp", filePanel);
         tabs.getTabs().addAll(participants, chat, files); tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); VBox.setVgrow(tabs, Priority.ALWAYS);
         IconButton close = new IconButton("close", "Đóng panel"); close.setOnAction(e -> togglePanel(-1));
         HBox panelHeader = Ui.row(8, Ui.label("Trong cuộc họp", "strong"), Ui.spacer(), close); panelHeader.setPadding(new Insets(12, 14, 8, 16)); panel.getChildren().addAll(panelHeader, tabs); panel.getStyleClass().add("meeting-panel");
@@ -82,7 +100,7 @@ public final class MeetingScreen extends BorderPane {
                 this::toggleMic, this::toggleCamera, this::toggleShare, () -> togglePanel(1), () -> togglePanel(0),
                 this::deviceSettings, this::leave);
         controls.users.active(true);
-        Label demo = Ui.label(videoRoom ? "Video và tệp dùng phòng hiện tại • Microphone, chia sẻ màn hình chưa bật; chat vẫn là bản xem trước."
+        Label demo = Ui.label(videoRoom ? "Video, chat và tệp dùng phòng hiện tại • Âm thanh và chia sẻ màn hình chưa bật."
                 : "Thành viên và tệp đồng bộ từ máy chủ • Camera, mic, chia sẻ và chat đang mô phỏng.", "caption"); demo.setWrapText(true);
         roomError.setWrapText(true); roomError.setId("meeting-room-error");
         MeetingToolbar bottom = new MeetingToolbar(controls, demo, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
@@ -90,7 +108,13 @@ public final class MeetingScreen extends BorderPane {
             var video = manager.sfuSession().video();
             nativeStatus = Ui.label("", "caption");
             nativeStatus.textProperty().bind(video.statusProperty());
-            bottom.content().getChildren().add(0, nativeStatus);
+            Button management = Ui.button("Quản lý phòng", "secondary", this::roomSettings); management.setId("room-management");
+            management.setVisible(manager.sfuSession().isHost()); management.setManaged(management.isVisible());
+            managementListener = (observable, before, after) -> {
+                if (!disposed) { management.setVisible(manager.sfuSession().isHost()); management.setManaged(management.isVisible()); }
+            };
+            manager.sfuSession().roomProperty().addListener(managementListener);
+            bottom.content().getChildren().addAll(nativeStatus, management);
             controls.mic.setDisable(true); controls.share.setDisable(true);
             video.cameraRequestedProperty().addListener(cameraListener);
             manager.sfuSession().roomProperty().addListener(videoRoomListener); renderNativeParticipants();
@@ -100,9 +124,9 @@ public final class MeetingScreen extends BorderPane {
             renderVideos();
         });
         tabs.getSelectionModel().selectedIndexProperty().addListener((obs, old, value) -> updatePanelButtons()); renderVideos();
-        clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> duration.setText(MockData.duration(elapsed())))); clock.setCycleCount(Animation.INDEFINITE); clock.play();
-        roomPoll = new Timeline(new KeyFrame(Duration.seconds(3), event -> refreshRoom()));
-        roomPoll.setCycleCount(Animation.INDEFINITE); if (!videoRoom) roomPoll.play();
+        clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> { duration.setText(MockData.duration(elapsed())); refreshNetwork(); })); clock.setCycleCount(Animation.INDEFINITE); clock.play();
+        roomPoll = new Timeline(new KeyFrame(Duration.seconds(1), event -> refreshRoom()));
+        roomPoll.setCycleCount(Animation.INDEFINITE); roomPoll.play(); if (videoRoom) refreshRoom();
     }
     private void applyParticipants(RoomInfo room) {
         if (room == null) return;
@@ -117,6 +141,18 @@ public final class MeetingScreen extends BorderPane {
     }
     private void refreshRoom() {
         if (disposed || polling || leaving) return;
+        if (videoRoom) {
+            polling = true;
+            manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> {
+                polling = false; if (disposed || leaving) return;
+                managedState = response; managedPeople.setAll(response.members());
+                participantPanel.waiting(response.waiting(), this::hostCommand); participantPanel.status("");
+                updateLock();
+            }, error -> {
+                polling = false; if (!disposed && !leaving) participantPanel.status(SceneManager.connectionError(error));
+            });
+            return;
+        }
         polling = true; String token = manager.sessionToken(); long id = manager.roomInfo().id();
         manager.runBackgroundRoomRequest(() -> manager.authClient().getRoom(token, id), response -> {
             if (disposed) return; polling = false;
@@ -241,19 +277,40 @@ public final class MeetingScreen extends BorderPane {
     }
     private void renderNativeParticipants() {
         var session = manager.sfuSession(); var room = session.snapshot(); if (room == null) return;
-        VBox rows = new VBox(10); rows.setPadding(new Insets(12));
-        if (session.isHost()) rows.getChildren().add(Ui.button(room.locked() ? "Mở khóa phòng" : "Khóa phòng", "secondary", () -> roomAction(session.lock(!room.locked()))));
-        for (var participant : room.participants()) {
-            VBox row = Ui.column(6, Ui.label(participant.displayName() + (participant.participantId().equals(session.selfParticipantId()) ? " (Bạn)" : ""), "strong"),
-                    Ui.label(participant.role() == common.meeting.RoomRole.HOST ? "Chủ phòng" : "Thành viên", "caption"));
-            if (session.isHost() && !participant.participantId().equals(session.selfParticipantId())) {
-                Button stop = Ui.button("Dừng video", "small-button", () -> roomAction(session.stopPublish(participant.participantId(), "VIDEO")));
-                stop.setDisable(!participant.mediaState().cameraRequested());
-                row.getChildren().add(Ui.row(8, stop, Ui.button("Mời ra", "small-button", () -> roomAction(session.kick(participant.participantId())))));
-            }
-            rows.getChildren().add(row);
+        var ids = room.collaborationRoom().participants();
+        java.util.List<common.meeting.Participant> next = new ArrayList<>();
+        for (int i = 0; i < room.participants().size(); i++) {
+            var person = room.participants().get(i);
+            next.add(new common.meeting.Participant(ids.get(i).userId(), person.displayName(), person.role() == common.meeting.RoomRole.HOST,
+                    person.mediaState().micRequested(), person.mediaState().cameraRequested()));
         }
-        tabs.getTabs().getFirst().setContent(Ui.scroll(rows));
+        managedPeople.setAll(next);
+    }
+    private void invite() {
+        if (!videoRoom || !manager.sfuSession().isHost()) return;
+        new InviteDialog(manager.stage(), manager.room().name(), manager.room().code(), manager.invitationPin()).showAndWait();
+    }
+    private void hostCommand(String action, Long target) {
+        manager.runMeetingRequest(manager.roomCommand(action, target), this::managedReply,
+                error -> { if (!disposed) roomError.setText(SceneManager.connectionError(error)); });
+    }
+    private void managedReply(common.meeting.RoomResponse response) {
+        if (disposed) return;
+        managedState = response; managedPeople.setAll(response.members()); participantPanel.waiting(response.waiting(), this::hostCommand);
+        if (response.room().closed()) manager.ended(elapsed(), peakPeople);
+        else roomAction(manager.sfuSession().refresh());
+    }
+    private void roomSettings() {
+        if (disposed || managedState == null || !manager.sfuSession().isHost() || managementSettings != null && managementSettings.isShowing()) return;
+        var state = managedState;
+        managementSettings = new DeviceSettingsDialog(manager.stage(), state.room(),
+                locked -> managedSettings(locked, null), approval -> managedSettings(null, approval), () -> hostCommand("ROOM_CLOSE", 0L));
+        managementSettings.show();
+    }
+    private void managedSettings(Boolean locked, Boolean approval) {
+        if (disposed) return;
+        manager.runMeetingRequest(common.meeting.RoomRequest.settings(manager.sessionToken(), manager.roomInfo().id(), manager.sfuSession().selfParticipantId(), locked, approval),
+                this::managedReply, error -> { if (!disposed) roomError.setText(SceneManager.connectionError(error)); });
     }
     private void roomAction(java.util.concurrent.CompletableFuture<?> action) {
         action.whenComplete((value, error) -> javafx.application.Platform.runLater(() -> {
@@ -261,12 +318,16 @@ public final class MeetingScreen extends BorderPane {
         }));
     }
     public void dispose() {
+        chatPanel.dispose(); manager.authClient().stopNetworkMonitoring(network);
+        if (networkDialog != null) { networkDialog.dispose(); networkDialog.close(); }
         if (cameraSettings != null) { cameraSettings.close(); cameraSettings = null; }
+        if (managementSettings != null) { managementSettings.close(); managementSettings = null; }
         disposed = true; filePanel.close(); clock.stop(); roomPoll.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose);
         if (nativeStatus != null) nativeStatus.textProperty().unbind();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.
             mediaSession.roomProperty().removeListener(videoRoomListener);
+            if (managementListener != null) mediaSession.roomProperty().removeListener(managementListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);
         }
     }

@@ -121,7 +121,7 @@ public class VideoCallIntegrationTest {
                     FxTestRuntime.call(() -> {
                         for (var account : List.of(host, guest)) {
                             var stage = new javafx.stage.Stage(); stages.add(stage);
-                            var manager = new client.UI.SceneManager(stage, fixture.database.client(), account == host ? hostFiles : guestFiles,
+                            var manager = new client.UI.SceneManager(stage, fixture.client(), account == host ? hostFiles : guestFiles,
                                     (token, expiry) -> fixture.session(account));
                             managers.add(manager); manager.acceptSession(account); manager.lobby();
                             assertNull(stage.getScene().getRoot().lookup("#open-sfu-rooms"));
@@ -243,6 +243,29 @@ public class VideoCallIntegrationTest {
                         assertTrue(find(root, "meeting-toolbar-content", javafx.scene.layout.VBox.class).isManaged());
                         assertTrue(hostMedia.publishingProperty().get()); return null;
                     });
+                    FxTestRuntime.call(() -> {
+                        for (var stage : stages) {
+                            var root = stage.getScene().getRoot(); root.applyCss(); root.layout();
+                            nodes(root).filter(javafx.scene.control.TabPane.class::isInstance)
+                                    .map(javafx.scene.control.TabPane.class::cast).findFirst().orElseThrow().getSelectionModel().select(1);
+                            root.applyCss(); root.layout();
+                        }
+                        return null;
+                    });
+                    FxTestRuntime.await(() -> !find(stages.get(0).getScene().getRoot(), "chat-send", javafx.scene.control.Button.class).isDisabled());
+                    FxTestRuntime.call(() -> {
+                        find(stages.get(0).getScene().getRoot(), "chat-input", javafx.scene.control.TextField.class).setText("Video and chat in one room");
+                        find(stages.get(0).getScene().getRoot(), "chat-send", javafx.scene.control.Button.class).fire(); return null;
+                    });
+                    try {
+                        FxTestRuntime.await(() -> nodes(stages.get(1).getScene().getRoot()).filter(javafx.scene.control.Label.class::isInstance)
+                                .map(javafx.scene.control.Label.class::cast).anyMatch(label -> label.getText().equals("Video and chat in one room")));
+                    } catch (AssertionError failure) {
+                        long stored = fixture.database.count("SELECT COUNT(*) FROM Tin_Nhan WHERE Loai_Tin_Nhan='VAN_BAN'");
+                        var status = FxTestRuntime.call(() -> stages.stream().map(stage -> nodes(stage.getScene().getRoot()).filter(javafx.scene.control.Label.class::isInstance)
+                                .map(javafx.scene.control.Label.class::cast).map(javafx.scene.control.Label::getText).toList()).toList());
+                        throw new AssertionError("Synthetic chat stored=" + stored + ", UI labels=" + status, failure);
+                    }
                     assertEquals(room.id(), FxTestRuntime.call(() -> managers.get(1).serverRoom().id()));
                     assertEquals(2, fixture.database.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
                     Path source = temporary.resolve("video-room-file.txt"); Files.writeString(source, "File sharing in the same authenticated video room.");
@@ -366,6 +389,12 @@ public class VideoCallIntegrationTest {
                 FxTestRuntime.await(() -> !controllers.get(1).publishingProperty().get());
                 sessions.get(0).kick(stopped).get(8, TimeUnit.SECONDS); controllers.get(1).closeComplete().get(8, TimeUnit.SECONDS);
                 FxTestRuntime.await(() -> sessions.get(0).participants().size() == 2 && sessions.get(2).participants().size() == 2);
+                String continuingId = sessions.get(2).selfParticipantId();
+                sessions.getFirst().leave().get(10, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> sessions.get(2).isHost() && sessions.get(2).participants().size() == 1);
+                assertTrue(FxTestRuntime.call(() -> controllers.get(2).publishingProperty().get()), "Host departure must preserve the next host's video publication");
+                long afterTransfer = controllers.get(2).frames(continuingId).receivedFrames();
+                FxTestRuntime.await(() -> controllers.get(2).frames(continuingId).receivedFrames() > afterTransfer + 3);
                 diagnostics.event("video.integration.completed", Map.of("outcome", "pass", "participant_count", 3));
             } finally {
                 sessions.forEach(MeetingSession::close);

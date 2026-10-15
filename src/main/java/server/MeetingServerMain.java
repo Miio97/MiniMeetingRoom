@@ -29,7 +29,7 @@ public final class MeetingServerMain {
                 AtomicReference<server.media.VideoCoordinator> videoReference = new AtomicReference<>();
                 Gson json = new Gson();
                 try (RoomService rooms = new RoomService(new RoomRepository(), Clock.systemUTC(), secrets.instanceId(),
-                        secrets.receiptKey(), ServerConfig.getInt("meeting.maxParticipants", 10), event -> {
+                        secrets.receiptKey(), ServerConfig.getInt("meeting.maxParticipants", 16), event -> {
                             SignalingServer server = signalingReference.get();
                             var video = videoReference.get(); if (video != null) video.roomEvent(event);
                             if (server != null) server.event(event.recipientConnectionId(), event.type(), event.roomId(),
@@ -60,7 +60,7 @@ public final class MeetingServerMain {
                         AuthService auth = new AuthService(hash -> { signaling.revokeSession(hash); rooms.revokeSession(hash); });
                         try (AuthServer authServer = new AuthServer(tls,
                                 new InetSocketAddress(ServerConfig.get("auth.bind", "127.0.0.1"), ServerConfig.getInt("auth.port", 8443)),
-                                new ApplicationService(auth, new server.rooms.RoomService(true))::handle);
+                                new ApplicationService(auth, new server.rooms.RoomService(true))::handle, rooms);
                                 var files = AuthServer.fileServer(tls, transferConfig)) {
                             Thread shutdown = new Thread(() -> {
                                 try {
