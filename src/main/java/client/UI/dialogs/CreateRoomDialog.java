@@ -1,27 +1,51 @@
 package client.UI.dialogs;
 
+import client.UI.SceneManager;
 import client.UI.components.Ui;
-import client.UI.mock.MockData;
+import common.room.RoomInfo;
+import common.room.RoomValidation;
+import javafx.event.ActionEvent;
 import javafx.scene.control.*;
 import javafx.scene.layout.VBox;
-import javafx.stage.Window;
 
-public final class CreateRoomDialog extends Dialog<CreateRoomDialog.Result> {
-    public record Result(MockData.Room room, boolean locked) { }
-    public CreateRoomDialog(Window owner) {
-        initOwner(owner); setTitle("Tạo phòng mới"); setHeaderText("Một không gian cho những ý tưởng mới"); Ui.style(this);
-        TextField name = new TextField(); name.setPromptText("Ví dụ: Họp nhóm sản phẩm");
-        PasswordField pin = new PasswordField(); pin.setPromptText("PIN gồm 4–6 chữ số");
-        Label error = Ui.label("", "error-text");
-        Spinner<Integer> capacity = new Spinner<>(2, 16, 10); capacity.setEditable(false); capacity.setMaxWidth(Double.MAX_VALUE); capacity.setAccessibleText("Số người tối đa trong phòng");
-        VBox content = Ui.column(16, Ui.field("Tên phòng", name), Ui.field("PIN", pin), Ui.field("Số người tối đa (bao gồm chủ phòng)", capacity), error); content.setPrefWidth(400);
-        getDialogPane().setContent(content);
-        ButtonType create = new ButtonType("Tạo phòng", ButtonBar.ButtonData.OK_DONE); getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, create);
-        ((Button) getDialogPane().lookupButton(ButtonType.CANCEL)).setText("Hủy");
-        Button submit = (Button) getDialogPane().lookupButton(create); submit.getStyleClass().add("primary");
-        submit.addEventFilter(javafx.event.ActionEvent.ACTION, e -> {
-            if (name.getText().isBlank() || !pin.getText().matches("\\d{4,6}")) { error.setText("Điền tên phòng và PIN gồm 4–6 số."); e.consume(); }
+/** Chỉ đóng thành công sau khi server tạo phòng và thêm chủ phòng. */
+public final class CreateRoomDialog extends Dialog<RoomInfo> {
+    private boolean pending;
+    public CreateRoomDialog(SceneManager manager) {
+        initOwner(manager.stage()); setTitle("Tạo phòng mới");
+        setHeaderText("Một không gian cho những ý tưởng mới"); Ui.style(this);
+        TextField name = new TextField(); name.setPromptText("Ví dụ: Họp nhóm sản phẩm"); name.setId("room-name");
+        PasswordField pin = new PasswordField(); pin.setPromptText("PIN gồm 4–6 chữ số"); pin.setId("room-pin");
+        Spinner<Integer> capacity = new Spinner<>(RoomValidation.MIN_CAPACITY, manager.maxRoomCapacity(), RoomValidation.DEFAULT_CAPACITY);
+        capacity.setId("room-capacity"); capacity.setEditable(false); capacity.setMaxWidth(Double.MAX_VALUE);
+        capacity.setAccessibleText("Số người tối đa trong phòng");
+        Label error = Ui.label("", "error-text"); error.setWrapText(true); error.setId("create-room-error");
+        VBox content = Ui.column(16, Ui.field("Tên phòng", name), Ui.field("PIN", pin),
+            Ui.field("Số người tối đa (bao gồm chủ phòng)", capacity),
+            Ui.label("Mã phòng và ID được máy chủ tạo tự động.", "caption"), error);
+        content.setPrefWidth(400); getDialogPane().setContent(content);
+        ButtonType create = new ButtonType("Tạo phòng", ButtonBar.ButtonData.OK_DONE);
+        getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, create);
+        Button cancel = (Button) getDialogPane().lookupButton(ButtonType.CANCEL); cancel.setText("Hủy");
+        Button submit = (Button) getDialogPane().lookupButton(create); submit.getStyleClass().add("primary"); submit.setId("create-room-submit");
+        setResultConverter(type -> null);
+        setOnCloseRequest(event -> { if (pending) event.consume(); });
+        submit.addEventFilter(ActionEvent.ACTION, event -> {
+            event.consume(); if (pending) return;
+            String validation = RoomValidation.nameError(name.getText());
+            if (validation == null) validation = RoomValidation.pinError(pin.getText());
+            if (validation == null) validation = RoomValidation.capacityError(capacity.getValue());
+            if (validation != null) { error.setText(validation); return; }
+            String roomName = name.getText(); String roomPin = pin.getText(); int limit = capacity.getValue();
+            pending = true; content.setDisable(true); submit.setDisable(true); cancel.setDisable(true); submit.setText("Đang tạo…"); error.setText("");
+            manager.requestCreateRoom(roomName, roomPin, limit, false, room -> {
+                pending = false; content.setDisable(false); submit.setDisable(false); cancel.setDisable(false); submit.setText("Tạo phòng");
+                pin.clear(); setResult(room); close();
+            }, cause -> {
+                pending = false; content.setDisable(false); submit.setDisable(false); cancel.setDisable(false); submit.setText("Tạo phòng");
+                error.setText(SceneManager.connectionError(cause));
+            });
         });
-        setResultConverter(type -> type == create ? new Result(new MockData.Room(name.getText().strip(), "", 1, "", pin.getText(), capacity.getValue()), false) : null);
+        setOnHidden(event -> pin.clear());
     }
 }

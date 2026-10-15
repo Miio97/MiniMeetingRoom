@@ -33,8 +33,8 @@ public final class ChatPanel extends BorderPane {
 
     public ChatPanel(SceneManager manager) {
         this.manager = manager;
-        token = manager.sessionToken(); ticket = manager.meetingState().ticket();
-        roomId = manager.meetingState().room().id(); userId = manager.authenticatedUser().id();
+        token = manager.sessionToken(); ticket = manager.hasVideoRoom() ? manager.sfuSession().selfParticipantId() : manager.meetingState() == null ? "" : manager.meetingState().ticket();
+        roomId = manager.hasVideoRoom() || manager.meetingState() == null ? manager.roomInfo().id() : manager.meetingState().room().id(); userId = manager.authenticatedUser().id();
         messages.setId("chat-messages"); messages.setPadding(new Insets(16)); setCenter(scroll);
         input.setId("chat-input"); input.setPromptText("Viết tin nhắn..."); HBox.setHgrow(input, Priority.ALWAYS);
         send.setId("chat-send"); send.getStyleClass().add("primary");

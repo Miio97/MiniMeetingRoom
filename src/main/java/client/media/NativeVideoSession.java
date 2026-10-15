@@ -1,0 +1,134 @@
+package client.media;
+
+import dev.onvoid.webrtc.*;
+import dev.onvoid.webrtc.media.*;
+import dev.onvoid.webrtc.media.audio.*;
+import dev.onvoid.webrtc.media.video.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/** Video-only native owner; dummy ADM never opens microphone or speaker devices. */
+public final class NativeVideoSession implements AutoCloseable {
+    private final AudioDeviceModule audio = new AudioDeviceModule(AudioLayer.kDummyAudio);
+    private final PeerConnectionFactory factory;
+    private final CustomVideoSource anchorSource;
+    private final VideoTrack anchor;
+    private final Set<Peer> peers = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    public NativeVideoSession() {
+        PeerConnectionFactory created = null; CustomVideoSource source = null; VideoTrack track = null;
+        try { created = new PeerConnectionFactory(audio); source = new CustomVideoSource(); track = created.createVideoTrack("receive-anchor", source); }
+        catch (RuntimeException | Error failure) { if (track != null) track.dispose(); if (source != null) source.dispose(); if (created != null) created.dispose(); audio.dispose(); throw failure; }
+        factory = created; anchorSource = source; anchor = track;
+    }
+    public Peer publisher(VideoInput input, VideoFrameMailbox preview) {
+        VideoTrack track = factory.createVideoTrack("camera-video", input.source());
+        try { return new Peer(track, true, preview); } catch (RuntimeException failure) { track.dispose(); throw failure; }
+    }
+    public Peer subscriber(VideoFrameMailbox output) { return new Peer(anchor, false, output); }
+    /** Local capture track without a PeerConnection; pre-join never publishes camera. */
+    public Preview preview(VideoInput input, VideoFrameMailbox output) { return new Preview(input, output); }
+    public final class Preview implements AutoCloseable {
+        private final VideoTrack track;
+        private final VideoFrameMailbox output;
+        private final VideoTrackSink binding;
+        private final AtomicBoolean closing = new AtomicBoolean();
+        private Preview(VideoInput input, VideoFrameMailbox output) {
+            if (closed.get()) throw new IllegalStateException("VIDEO_OWNER_CLOSED");
+            this.output = output; binding = output.bind();
+            track = factory.createVideoTrack("camera-preview", input.source());
+            try { track.addSink(binding); }
+            catch (RuntimeException failure) { track.dispose(); throw failure; }
+        }
+        @Override public void close() {
+            if (closing.compareAndSet(false, true)) { track.removeSink(binding); output.pause(); track.dispose(); }
+        }
+    }
+    public final class Peer implements PeerConnectionObserver, AutoCloseable {
+        private final RTCPeerConnection connection;
+        private final boolean publisher;
+        private final VideoTrack local;
+        private final VideoFrameMailbox sink;
+        private final VideoTrackSink binding;
+        private final AtomicBoolean closing = new AtomicBoolean();
+        private final CompletableFuture<Void> gathered = new CompletableFuture<>();
+        private final Set<CompletableFuture<?>> pending = ConcurrentHashMap.newKeySet();
+        private final List<RTCRtpReceiver> receivers = new CopyOnWriteArrayList<>();
+        private final Object trackLifecycle = new Object();
+        private volatile VideoTrack remote;
+        private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
+        private Peer(VideoTrack track, boolean publisher, VideoFrameMailbox sink) {
+            if (closed.get()) throw new IllegalStateException("VIDEO_OWNER_CLOSED");
+            this.publisher = publisher; this.local = track; this.sink = sink;
+            this.binding = sink.bind();
+            connection = factory.createPeerConnection(new RTCConfiguration(), this);
+            if (connection == null) throw new IllegalStateException("VIDEO_PEER_FAILED");
+            try {
+                RTCRtpTransceiverInit init = new RTCRtpTransceiverInit();
+                init.direction = publisher ? RTCRtpTransceiverDirection.SEND_ONLY : RTCRtpTransceiverDirection.RECV_ONLY;
+                if (publisher) {
+                    RTCRtpEncodingParameters encoding = new RTCRtpEncodingParameters(); encoding.active = true;
+                    encoding.maxBitrate = 700000; encoding.maxFramerate = 15.0; init.sendEncodings = List.of(encoding);
+                }
+                RTCRtpTransceiver transceiver = connection.addTransceiver(track, init);
+                try { transceiver.setCodecPreferences(factory.getRtpSenderCapabilities(MediaType.VIDEO).getCodecs().stream()
+                        .filter(codec -> "VP8".equalsIgnoreCase(codec.getName())).toList()); }
+                finally { transceiver.dispose(); }
+                if (publisher) track.addSink(binding);
+                peers.add(this);
+            } catch (RuntimeException failure) { connection.close(); throw failure; }
+        }
+        public boolean failed() { return state == RTCPeerConnectionState.FAILED || state == RTCPeerConnectionState.CLOSED; }
+        public boolean connected() { return state == RTCPeerConnectionState.CONNECTED; }
+        @Override public void onIceCandidate(RTCIceCandidate candidate) { }
+        @Override public void onIceGatheringChange(RTCIceGatheringState value) { if (value == RTCIceGatheringState.COMPLETE) gathered.complete(null); }
+        @Override public void onConnectionChange(RTCPeerConnectionState value) { state = value; }
+        @Override public void onTrack(RTCRtpTransceiver transceiver) {
+            try {
+                synchronized (trackLifecycle) {
+                    if (closing.get()) return;
+                    RTCRtpReceiver receiver = transceiver.getReceiver(); receivers.add(receiver);
+                    if (receiver.getTrack() instanceof VideoTrack video && remote == null) { remote = video; video.addSink(binding); }
+                }
+            } finally { transceiver.dispose(); }
+        }
+        @Override public void onAddTrack(RTCRtpReceiver receiver, MediaStream[] streams) { receiver.dispose(); }
+        @Override public void onRemoveTrack(RTCRtpReceiver receiver) { receiver.dispose(); }
+        public String offer() throws Exception {
+            CompletableFuture<RTCSessionDescription> offer = new CompletableFuture<>(); pending.add(offer);
+            connection.createOffer(new RTCOfferOptions(), new CreateSessionDescriptionObserver() {
+                public void onSuccess(RTCSessionDescription value) { offer.complete(value); }
+                public void onFailure(String ignored) { offer.completeExceptionally(new IllegalStateException("VIDEO_OFFER_FAILED")); }
+            });
+            try { set(offer.get(10, TimeUnit.SECONDS), false); gathered.get(10, TimeUnit.SECONDS); return connection.getLocalDescription().sdp; }
+            finally { pending.remove(offer); }
+        }
+        public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
+        private void set(RTCSessionDescription value, boolean remoteDescription) throws Exception {
+            CompletableFuture<Void> result = new CompletableFuture<>(); pending.add(result);
+            SetSessionDescriptionObserver observer = new SetSessionDescriptionObserver() {
+                public void onSuccess() { result.complete(null); }
+                public void onFailure(String ignored) { result.completeExceptionally(new IllegalStateException("VIDEO_DESCRIPTION_FAILED")); }
+            };
+            try { if (remoteDescription) connection.setRemoteDescription(value, observer); else connection.setLocalDescription(value, observer); result.get(10, TimeUnit.SECONDS); }
+            finally { pending.remove(result); }
+        }
+        @Override public void close() {
+            if (!closing.compareAndSet(false, true)) return;
+            pending.forEach(future -> future.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED")));
+            gathered.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED"));
+            synchronized (trackLifecycle) {
+                if (publisher) local.removeSink(binding);
+                VideoTrack received = remote; if (received != null) received.removeSink(binding);
+            }
+            sink.pause();
+            connection.close(); receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
+            if (publisher) local.dispose(); peers.remove(this);
+        }
+    }
+    @Override public void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        peers.forEach(Peer::close); anchor.dispose(); anchorSource.dispose(); factory.dispose(); audio.dispose();
+    }
+}

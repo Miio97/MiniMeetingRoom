@@ -213,7 +213,7 @@
 .light-mode .video-tile .muted-mic .vector-icon { -fx-stroke: #FF9292; }
 .light-mode .avatar-text { -fx-text-fill: white; }
 
-/* Workspace light theme; MeetingScreen always owns its dark palette. */
+/* Workspace light palette; meetings and dialogs follow ThemeManager as well. */
 .light-mode {
     -bg-main: #F7F8FC; -bg-surface: #FFFFFF; -bg-elevated: #F4F5F9; -border: #D5D9E2;
     -primary: #6C5CE7; -primary-hover: #5B4BD6; -text-main: #1F2430; -text-muted: #5B6475;

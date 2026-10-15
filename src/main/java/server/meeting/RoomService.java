@@ -1,244 +1,578 @@
 package server.meeting;
 
 import common.meeting.*;
-import common.chat.ChatException;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.sql.*;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import server.auth.ConnectionProvider;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import server.auth.PasswordHasher;
-import server.database.DatabaseConnection;
+import server.auth.SessionPrincipal;
 
-/** Duc: authenticated membership and host commands; live participants are never generated. */
+/** Single-server room authority. Listener must enqueue events without doing socket I/O. */
 public final class RoomService implements AutoCloseable {
-    private final ConnectionProvider connections;
+    private static final int MAX_LIVE_CONNECTIONS = 128;
+    private static final int MAX_ROOMS = 128;
+    private static final String CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    private final Object lock = new Object(), dispatchLock = new Object();
+    private final RoomRepository repository;
     private final Clock clock;
+    private final String instanceId, epoch;
+    private final byte[] receiptKey;
+    private final int maxParticipants;
+    private final Consumer<RoomEvent> listener;
     private final PasswordHasher pins = new PasswordHasher();
-    private final Map<Long, Room> rooms = new LinkedHashMap<>();
-    public RoomService() { this(DatabaseConnection::getConnection, Clock.systemUTC()); }
-    public RoomService(ConnectionProvider connections, Clock clock) { this.connections = connections; this.clock = clock; }
-
-    @FunctionalInterface public interface ChatAction<T> {
-        T handle(Connection connection, Participant participant) throws SQLException;
+    private final SecureRandom random = new SecureRandom();
+    private final Map<String, LiveRoom> rooms = new LinkedHashMap<>();
+    private final Map<String, Member> connections = new LinkedHashMap<>();
+    private final Map<String, PendingHistory> pendingHistory = new LinkedHashMap<>();
+    private final ArrayDeque<List<RoomEvent>> outbound = new ArrayDeque<>();
+    private LegacyRoomService legacy;
+    private final Map<Long, Long> pendingTransfers = new LinkedHashMap<>();
+    public RoomService() { this(server.database.DatabaseConnection::getConnection, Clock.systemUTC()); }
+    public RoomService(server.auth.ConnectionProvider connections, Clock clock) {
+        this(new RoomRepository(connections), clock, "legacy", new byte[32], 16, event -> { });
+        legacy = new LegacyRoomService(connections, clock);
     }
-    /** Duc: chat cannot bypass approval, a revoked session or a departed membership. */
-    public synchronized <T> T chat(String token, long roomId, String ticket, ChatAction<T> action)
-            throws SQLException, ChatException {
-        try (Connection connection = connections.getConnection()) {
-            User user = authenticate(connection, token);
-            if (user == null) throw new ChatException("SESSION_INVALID", "Phiên đăng nhập không hợp lệ.");
-            Room room = rooms.get(roomId);
-            if (room == null) throw new ChatException("ROOM_NOT_FOUND", "Không tìm thấy phòng.");
-            if (room.closed) throw new ChatException("ROOM_CLOSED", "Chủ phòng đã đóng phòng.");
-            Member member = room.members.get(user.id());
-            if (member == null || ticket == null || !ticket.equals(member.ticket)
-                    || member.lastSeen.isBefore(now().minusSeconds(10))) {
-                throw new ChatException("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc chưa được duyệt.");
+    private ScheduledExecutorService cleanup;
+    private boolean started, closed;
+
+    public RoomService(RoomRepository repository, Clock clock, String instanceId, byte[] receiptKey,
+            int maxParticipants, Consumer<RoomEvent> listener) {
+        this.repository = Objects.requireNonNull(repository); this.clock = Objects.requireNonNull(clock);
+        if (instanceId == null || !instanceId.matches("[A-Za-z0-9_-]{1,64}")) throw new IllegalArgumentException("Invalid instance identifier");
+        if (receiptKey == null || receiptKey.length < 32) throw new IllegalArgumentException("Receipt key must contain at least 32 bytes");
+        if (maxParticipants < 2 || maxParticipants > 250) throw new IllegalArgumentException("Invalid participant policy");
+        this.instanceId = instanceId; this.receiptKey = receiptKey.clone(); this.maxParticipants = maxParticipants;
+        this.listener = Objects.requireNonNull(listener); this.epoch = opaque("e_");
+    }
+
+    /** Preflight never creates tables; reconciliation only touches this instance's marked old rooms. */
+    public void start() throws SQLException {
+        synchronized (lock) {
+            if (started || closed) throw new IllegalStateException("Room service cannot start twice");
+            repository.checkSchema(); repository.reconcile(instanceId, epoch, clock.instant()); started = true;
+            cleanup = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("room-history-cleanup").factory());
+            cleanup.scheduleWithFixedDelay(this::maintenanceTick, 5, 5, TimeUnit.SECONDS);
+        }
+    }
+    public String serverEpoch() { return epoch; }
+    public int maxParticipants() { return maxParticipants; }
+    public int roomCount() { synchronized (lock) { return rooms.size(); } }
+    public int participantCount() { synchronized (lock) { return connections.size(); } }
+
+    public RoomSnapshot create(SessionPrincipal principal, String requestId, CreateRoomParams params) throws SQLException {
+        checkPrincipal(principal); requestId(requestId); Objects.requireNonNull(params);
+        String name = params.name() == null ? "" : params.name().strip();
+        if (name.isEmpty() || name.length() > 100 || params.capacity() < 2 || params.capacity() > maxParticipants) throw new RoomException("INVALID_ROOM");
+        validatePin(params.pin());
+        byte[] hash = fingerprint("CREATE_ROOM", name, params.pin(), params.capacity(), params.locked());
+        String pinHash = emptyPin(params.pin()) ? null : pins.hash(params.pin());
+        synchronized (lock) {
+            available();
+            RoomRepository.CreateResult result = null;
+            for (int attempt = 0; attempt < 8; attempt++) {
+                try {
+                    result = repository.create(principal, requestId, hash, instanceId, epoch, opaque("r_"), code(),
+                            name, pinHash, params.capacity(), params.locked(), rooms.size() < MAX_ROOMS, clock.instant()); break;
+                } catch (SQLException failure) {
+                    if (!("23505".equals(failure.getSQLState()) || failure.getErrorCode() == 1062) || attempt == 7) throw failure;
+                }
             }
-            return action.handle(connection, member.view(room.host));
+            RoomRepository.StoredRoom stored = Objects.requireNonNull(result).room();
+            if (stored == null) throw new RoomException("REQUEST_ALREADY_ENDED");
+            if (stored.status() == RoomStatus.CLOSED || !epoch.equals(stored.epoch())) return snapshot(new LiveRoom(stored, clock.instant()));
+            return snapshot(rooms.computeIfAbsent(stored.roomId(), ignored -> new LiveRoom(stored, clock.instant())));
         }
     }
 
-    public synchronized RoomResponse handle(RoomRequest request) throws SQLException {
-        if (request == null || request.action() == null) return error("INVALID_REQUEST", "Yêu cầu phòng không hợp lệ.");
-        try (Connection connection = connections.getConnection()) {
-            connection.setAutoCommit(false);
-            Map<Long, Room> before = new LinkedHashMap<>(); rooms.forEach((id, room) -> before.put(id, room.copy()));
-            try {
-                User user = authenticate(connection, request.token());
-                if (user == null) return error("SESSION_INVALID", "Phiên đăng nhập không hợp lệ.");
-                expire(connection);
-                RoomResponse result;
-                if ("ROOM_CREATE".equals(request.action())) result = create(connection, request, user);
-                else if ("ROOM_JOIN".equals(request.action())) result = join(connection, request, user);
-                else result = command(connection, request, user);
-                connection.commit(); return result;
-            } catch (SQLException | RuntimeException error) {
-                rooms.clear(); rooms.putAll(before); throw error;
-            } finally { connection.rollback(); }
+    public RoomPreview lookup(SessionPrincipal principal, String joinCode, String pin) throws SQLException {
+        checkPrincipal(principal);
+        RoomRepository.StoredRoom stored = find(joinCode); verifyPin(principal, stored, pin);
+        synchronized (lock) {
+            available(); LiveRoom room = requireRoom(stored.roomId());
+            return new RoomPreview(room.stored.roomId(), room.stored.joinCode(), room.stored.name(), room.stored.status(),
+                    room.stored.locked(), room.stored.capacity(), room.members.size());
         }
     }
-    private RoomResponse create(Connection connection, RoomRequest request, User user) throws SQLException {
-        String name = request.name() == null ? "" : request.name().strip();
-        if (name.isBlank() || name.length() > 100 || request.pin() == null || !request.pin().matches("\\d{4,6}")
-                || request.capacity() < 2 || request.capacity() > 16) return error("VALIDATION_ERROR", "Nhập tên phòng, PIN 4–6 số và sức chứa 2–16 người.");
-        if (present(user.id())) return error("ALREADY_IN_ROOM", "Tài khoản đang ở trong một phòng khác.");
-        Room room = new Room(); room.name = name; room.code = "MMR-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase(Locale.ROOT);
-        room.pin = pins.hash(request.pin()); room.capacity = request.capacity(); room.host = user.id();
-        try (PreparedStatement sql = connection.prepareStatement("INSERT INTO Phong_Hop (Ma_Phong_Tham_Gia, Ten_Phong, Ma_PIN_Bam, Ma_Chu_Phong, Trang_Thai, Da_Khoa, So_Nguoi_Toi_Da) VALUES (?, ?, ?, ?, 'DANG_HOAT_DONG', FALSE, ?)", Statement.RETURN_GENERATED_KEYS)) {
-            sql.setString(1, room.code); sql.setString(2, name); sql.setString(3, room.pin); sql.setLong(4, room.host); sql.setInt(5, room.capacity); sql.executeUpdate();
-            try (ResultSet keys = sql.getGeneratedKeys()) { if (!keys.next()) throw new SQLException("Missing room ID"); room.id = keys.getLong(1); }
-        }
-        admit(connection, room, new Member(user, UUID.randomUUID().toString(), now()));
-        rooms.put(room.id, room); return view(room, user.id(), false);
-    }
-    private RoomResponse join(Connection connection, RoomRequest request, User user) throws SQLException {
-        if (request.code() == null || request.code().length() > 20 || request.pin() == null || request.pin().length() > 6) return error("VALIDATION_ERROR", "Nhập mã phòng và PIN hợp lệ.");
-        Room room = load(connection, 0, request.code().strip().toUpperCase(Locale.ROOT));
-        if (room == null) return error("ROOM_NOT_FOUND", "Không tìm thấy phòng.");
-        if (room.closed) return error("ROOM_CLOSED", "Phòng đã đóng.");
-        if (!pins.verify(request.pin(), room.pin)) return error("WRONG_PIN", "PIN không đúng.");
-        if (room.waiting.containsKey(user.id())) return view(room, user.id(), true);
-        if (present(user.id())) return error("ALREADY_IN_ROOM", "Tài khoản đã tham gia hoặc đang chờ ở phòng khác.");
-        if (room.locked && room.host != user.id()) return error("ROOM_LOCKED", "Phòng đang khóa.");
-        if (room.members.size() >= room.capacity) return error("ROOM_FULL", "Phòng đã đủ người.");
-        Member member = new Member(user, UUID.randomUUID().toString(), now());
-        if (room.approval && !room.members.isEmpty() && room.host != user.id()) {
-            if (room.waiting.size() >= 20) return error("QUEUE_FULL", "Danh sách chờ đã đầy.");
-            room.waiting.put(user.id(), member); return view(room, user.id(), true);
-        }
-        admit(connection, room, member); return view(room, user.id(), false);
-    }
-    private RoomResponse command(Connection connection, RoomRequest request, User user) throws SQLException {
-        Room room = load(connection, request.roomId(), null);
-        if (room == null) return error("ROOM_NOT_FOUND", "Không tìm thấy phòng.");
-        if (room.closed) return error("ROOM_CLOSED", "Chủ phòng đã đóng phòng.");
-        Member member = room.members.get(user.id());
-        Member waiter = room.waiting.get(user.id());
-        if (member == null && waiter != null && Objects.equals(waiter.ticket, request.ticket())) {
-            waiter.lastSeen = now();
-            if ("ROOM_LEAVE".equals(request.action())) { room.waiting.remove(user.id()); return new RoomResponse(true, "OK", "", null, null, null, null, false); }
-            if ("ROOM_POLL".equals(request.action())) return view(room, user.id(), true);
-        }
-        if (member == null || !Objects.equals(member.ticket, request.ticket())) return error("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc đã bị mời ra.");
-        member.lastSeen = now();
-        switch (request.action()) {
-            case "ROOM_POLL": return view(room, user.id(), false);
-            case "ROOM_LEAVE": depart(connection, room, user.id(), "TU_ROI"); return new RoomResponse(true, "OK", "", null, null, null, null, false);
-            case "ROOM_MEDIA":
-                if (request.microphone() != null) member.microphone = request.microphone();
-                if (request.camera() != null) member.camera = request.camera();
-                return view(room, user.id(), false);
-            default: break;
-        }
-        if (room.host != user.id()) return error("HOST_REQUIRED", "Chỉ chủ phòng được thực hiện thao tác này.");
-        Member target = room.members.get(request.target());
-        switch (request.action()) {
-            case "ROOM_SETTINGS":
-                if (request.locked() != null) {
-                    try (PreparedStatement sql = connection.prepareStatement("UPDATE Phong_Hop SET Da_Khoa = ? WHERE Ma_Phong = ?")) { sql.setBoolean(1, request.locked()); sql.setLong(2, room.id); sql.executeUpdate(); }
-                    room.locked = request.locked();
+
+    public RoomJoinReply join(SessionPrincipal principal, String connectionId, long generation, String requestId,
+            String joinCode, String pin, boolean mic, boolean camera) throws SQLException {
+        checkPrincipal(principal); requestId(requestId); connectionId(connectionId);
+        if (generation < 1) throw new RoomException("INVALID_GENERATION");
+        RoomRepository.StoredRoom stored = find(joinCode); verifyPin(principal, stored, pin);
+        byte[] hash = fingerprint("JOIN_ROOM", stored.joinCode(), pin, mic, camera);
+        RoomJoinReply reply;
+        synchronized (lock) {
+            available(); eventBudget();
+            Member current = connections.get(connectionId);
+            if (current != null && (!current.roomId.equals(stored.roomId()) || current.generation != generation
+                    || current.principal.sessionId() != principal.sessionId())) throw new RoomException("ALREADY_IN_ROOM");
+            if (current == null && connections.size() >= MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
+            LiveRoom room = requireRoom(stored.roomId());
+            if (current == null) {
+                for (Member admitted : connections.values()) if (admitted.principal.userId() == principal.userId())
+                    throw new RoomException(admitted.roomId.equals(stored.roomId()) ? "ALREADY_JOINED" : "ALREADY_IN_ROOM");
+                for (LiveRoom other : rooms.values()) {
+                    Waiting waiting = other.waiting.get(principal.userId());
+                    if (waiting != null && (!other.stored.roomId().equals(stored.roomId()) || !waiting.connectionId.equals(connectionId)))
+                        throw new RoomException("ALREADY_IN_ROOM");
                 }
-                if (request.approval() != null) {
-                    room.approval = request.approval();
+            }
+            if (current == null && room.approval && room.stored.hostId() != principal.userId()) {
+                if (room.stored.status() == RoomStatus.READY) throw new RoomException("ROOM_NOT_STARTED");
+                if (room.stored.locked()) throw new RoomException("ROOM_LOCKED");
+                if (room.members.size() >= room.stored.capacity()) throw new RoomException("ROOM_FULL");
+                Waiting waiting = room.waiting.get(principal.userId());
+                if (waiting == null || !waiting.principal.tokenHash().equals(principal.tokenHash())) {
+                    if (room.waiting.size() >= 20) throw new RoomException("QUEUE_FULL");
+                    waiting = new Waiting(principal, connectionId, clock.instant()); room.waiting.put(principal.userId(), waiting);
                 }
-                if (!room.approval && !room.locked) {
-                    for (Member candidate : List.copyOf(room.waiting.values())) {
-                        if (room.members.size() >= room.capacity) break;
-                        if (authenticateHash(connection, candidate.user.sessionHash()) != null) admit(connection, room, candidate);
-                        room.waiting.remove(candidate.user.id());
+                waiting.seen = clock.instant();
+                if (waiting.rejected) { room.waiting.remove(principal.userId()); throw new RoomException("ADMISSION_REJECTED"); }
+                if (!waiting.approved) throw new RoomException("APPROVAL_PENDING");
+            }
+            RoomRepository.JoinResult result = repository.join(principal, requestId, hash, stored.id(), opaque("p_"), instanceId, epoch, clock.instant());
+            if (!result.active() || result.room().status() == RoomStatus.CLOSED) throw new RoomException("REQUEST_ALREADY_ENDED");
+            if (result.replay()) {
+                if (current == null || !current.participantId.equals(result.participantId())) throw new RoomException("ALREADY_JOINED");
+                reply = new RoomJoinReply(current.participantId, snapshot(room));
+            } else {
+                Member member = new Member(connectionId, generation, principal, stored.roomId(), result.membershipId(),
+                        result.participantId(), result.room().hostId() == principal.userId() ? RoomRole.HOST : RoomRole.MEMBER,
+                        new MediaState(mic, camera, false, false, false, false));
+                List<RoomEvent> events = new ArrayList<>(); room.stored = result.room(); room.revision++;
+                room.members.put(member.participantId, member); connections.put(connectionId, member); room.waiting.remove(principal.userId());
+                for (Member other : room.members.values()) if (other != member)
+                    events.add(event(other, "PARTICIPANT_JOINED", room, Map.of("participant", member.view())));
+                enqueue(events);
+                reply = new RoomJoinReply(member.participantId, snapshot(room));
+            }
+        }
+        drainEvents(); return reply;
+    }
+
+    public RoomSnapshot getRoom(String connectionId, String roomId) {
+        synchronized (lock) { available(); Member member = member(connectionId); sameRoom(member, roomId); return snapshot(requireRoom(roomId)); }
+    }
+    public MemberAuthorization assertMember(String connectionId, String roomId) {
+        synchronized (lock) {
+            available(); Member member = member(connectionId); sameRoom(member, roomId);
+            return new MemberAuthorization(member.roomId, member.participantId, member.generation, member.role, member.media);
+        }
+    }
+    public RoomSnapshot setMediaState(String connectionId, boolean mic, boolean camera, boolean share) {
+        RoomSnapshot reply;
+        synchronized (lock) {
+            available(); eventBudget(); Member member = member(connectionId); LiveRoom room = requireRoom(member.roomId);
+            MediaState state = new MediaState(mic, camera, share, false, false, false);
+            if (!state.equals(member.media)) { member.media = state; room.revision++; broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", state)); }
+            reply = snapshot(room);
+        }
+        drainEvents(); return reply;
+    }
+    /** Only the trusted media adapter confirms RTP publication, never a client body. */
+    public void confirmVideo(String connectionId, boolean publishing) {
+        synchronized (lock) {
+            Member member = member(connectionId); LiveRoom room = requireRoom(member.roomId);
+            MediaState old = member.media;
+            boolean active = publishing && old.cameraRequested();
+            if (old.videoPublishing() == active) return;
+            member.media = new MediaState(old.micRequested(), old.cameraRequested(), old.shareRequested(), old.audioPublishing(), active, old.sharePublishing());
+            room.revision++; broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", member.media));
+        }
+        drainEvents();
+    }
+    public RoomSnapshot setLocked(String connectionId, boolean locked) throws SQLException {
+        RoomSnapshot reply;
+        synchronized (lock) {
+            available(); eventBudget(); Member host = host(connectionId); LiveRoom room = requireRoom(host.roomId);
+            if (room.stored.locked() != locked) {
+                repository.setLocked(room.stored.id(), locked); room.stored = room.stored.withLock(locked); room.revision++;
+                broadcast(room, "ROOM_STATE", Map.of("locked", locked, "status", room.stored.status()));
+            }
+            reply = snapshot(room);
+        }
+        drainEvents(); return reply;
+    }
+    public RoomSnapshot stopPublish(String connectionId, String targetParticipantId, String kind) {
+        RoomSnapshot reply;
+        synchronized (lock) {
+            available(); eventBudget(); Member actor = host(connectionId); LiveRoom room = requireRoom(actor.roomId);
+            Member target = room.members.get(targetParticipantId); if (target == null) throw new RoomException("PARTICIPANT_NOT_FOUND");
+            MediaState old = target.media;
+            target.media = switch (kind == null ? "" : kind) {
+                case "AUDIO" -> new MediaState(false, old.cameraRequested(), old.shareRequested(), false, old.videoPublishing(), old.sharePublishing());
+                case "VIDEO" -> new MediaState(old.micRequested(), false, old.shareRequested(), old.audioPublishing(), false, old.sharePublishing());
+                case "SCREEN" -> new MediaState(old.micRequested(), old.cameraRequested(), false, old.audioPublishing(), old.videoPublishing(), false);
+                default -> throw new RoomException("INVALID_MEDIA_KIND");
+            };
+            room.revision++;
+            broadcast(room, "PUBLISH_STOPPED", Map.of("participantId", target.participantId, "kind", kind, "reason", "HOST_STOP"));
+            broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", target.participantId, "mediaState", target.media));
+            reply = snapshot(room);
+        }
+        drainEvents(); return reply;
+    }
+    public void kick(String connectionId, String targetParticipantId) {
+        synchronized (lock) {
+            available(); eventBudget(); Member actor = host(connectionId); LiveRoom room = requireRoom(actor.roomId);
+            Member target = room.members.get(targetParticipantId); if (target == null) throw new RoomException("PARTICIPANT_NOT_FOUND");
+            remove(target, "BI_MOI_RA");
+        }
+        drainEvents();
+    }
+    public void leave(String connectionId, String reason) {
+        synchronized (lock) {
+            for (LiveRoom room : rooms.values()) room.waiting.values().removeIf(waiting -> waiting.connectionId.equals(connectionId));
+            Member member = connections.get(connectionId); if (member != null) remove(member, normalizeReason(reason));
+        }
+        drainEvents();
+    }
+    public void revokeSession(String tokenHash) {
+        synchronized (lock) {
+            for (LiveRoom room : rooms.values()) room.waiting.values().removeIf(waiting -> waiting.principal.tokenHash().equals(tokenHash));
+            List<Member> affected = connections.values().stream().filter(member -> member.principal.tokenHash().equals(tokenHash)).toList();
+            for (Member member : affected) if (connections.containsKey(member.connectionId)) remove(member, "MAT_KET_NOI");
+        }
+        drainEvents();
+    }
+
+    private void remove(Member member, String reason) {
+        LiveRoom room = rooms.get(member.roomId); if (room == null) { connections.remove(member.connectionId); return; }
+        Instant now = clock.instant(); room.revision++;
+        boolean closeRoom = room.members.size() == 1 || "PHONG_DONG".equals(reason);
+        if (closeRoom) {
+            broadcast(room, "ROOM_CLOSED", Map.of("reason", reason));
+            for (Member other : room.members.values()) connections.remove(other.connectionId);
+            room.members.clear(); room.waiting.clear(); rooms.remove(member.roomId);
+            pendingTransfers.remove(room.stored.id());
+            persist(new PendingHistory(true, room.stored.id(), now, "PHONG_DONG"));
+        } else {
+            room.members.remove(member.participantId); connections.remove(member.connectionId);
+            persist(new PendingHistory(false, member.membershipId, now, reason));
+            if (member.role == RoomRole.HOST) {
+                Member next = room.members.values().iterator().next();
+                try { repository.transferHost(room.stored.id(), next.principal.userId()); }
+                catch (SQLException failure) { pendingTransfers.put(room.stored.id(), next.principal.userId()); }
+                room.stored = room.stored.withHost(next.principal.userId()); next.role = RoomRole.HOST;
+            }
+            List<RoomEvent> events = new ArrayList<>();
+            events.add(event(member, "ROOM_LEFT", room, Map.of("reason", reason)));
+            for (Member other : room.members.values()) events.add(event(other, "PARTICIPANT_LEFT", room,
+                    Map.of("participantId", member.participantId, "reason", reason)));
+            enqueue(events);
+        }
+    }
+
+    private void persist(PendingHistory task) {
+        String key = (task.room ? "room:" : "member:") + task.id;
+        try { task.run(repository); pendingHistory.remove(key); }
+        catch (SQLException failure) { pendingHistory.putIfAbsent(key, task); }
+    }
+    /** Also exposed for deterministic lifecycle tests without sleeping. */
+    public void maintenanceTick() {
+        synchronized (lock) {
+            if (closed) return;
+            var pending = pendingHistory.entrySet().iterator();
+            while (pending.hasNext()) {
+                try { pending.next().getValue().run(repository); pending.remove(); }
+                catch (SQLException failure) { /* Retry remains bounded by admitted room/member counts. */ }
+            }
+            var transfers = pendingTransfers.entrySet().iterator();
+            while (transfers.hasNext()) {
+                var transfer = transfers.next();
+                try { repository.transferHost(transfer.getKey(), transfer.getValue()); transfers.remove(); }
+                catch (SQLException failure) { }
+            }
+            Instant now = clock.instant();
+            for (LiveRoom room : rooms.values()) room.waiting.values().removeIf(waiting -> waiting.seen.isBefore(now.minusSeconds(10)) || !waiting.principal.expiresAt().isAfter(now));
+            for (Member member : new ArrayList<>(connections.values())) {
+                if (!member.principal.expiresAt().isAfter(now) && connections.containsKey(member.connectionId)) remove(member, "MAT_KET_NOI");
+            }
+            for (LiveRoom room : new ArrayList<>(rooms.values())) {
+                if (room.stored.status() == RoomStatus.READY && !room.readyDeadline.isAfter(now)) {
+                    rooms.remove(room.stored.roomId()); persist(new PendingHistory(true, room.stored.id(), now, "PHONG_DONG"));
+                }
+            }
+        }
+        drainEvents();
+    }
+    @Override public void close() {
+        ScheduledExecutorService worker;
+        synchronized (lock) {
+            if (closed) return; closed = true; worker = cleanup;
+            if (legacy != null) { try { legacy.close(); } catch (SQLException failure) { throw new IllegalStateException("Legacy room cleanup failed", failure); } }
+            for (LiveRoom room : new ArrayList<>(rooms.values())) {
+                room.revision++; broadcast(room, "ROOM_CLOSED", Map.of("reason", "SERVER_SHUTDOWN"));
+                persist(new PendingHistory(true, room.stored.id(), clock.instant(), "PHONG_DONG"));
+            }
+            connections.clear(); rooms.clear();
+        }
+        if (worker != null) { worker.shutdownNow(); try { worker.awaitTermination(1, TimeUnit.SECONDS); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); } }
+        drainEvents(); java.util.Arrays.fill(receiptKey, (byte) 0);
+    }
+
+    private RoomRepository.StoredRoom find(String joinCode) throws SQLException {
+        if (joinCode == null) throw new RoomException("ROOM_NOT_FOUND");
+        String identifier = joinCode.strip().toUpperCase(java.util.Locale.ROOT);
+        if (!identifier.matches("MMR-[A-Z2-9]{16}|[0-9]{1,19}")) throw new RoomException("ROOM_NOT_FOUND");
+        // This process owns live rooms; historical rows never authorize a live join.
+        // The committing repository still checks membership/capacity/current DB state.
+        synchronized (lock) {
+            for (LiveRoom room : rooms.values()) {
+                RoomRepository.StoredRoom stored = room.stored;
+                if ((identifier.equals(stored.joinCode()) || identifier.equals(Long.toString(stored.id())))
+                        && stored.status() != RoomStatus.CLOSED && epoch.equals(stored.epoch())) return stored;
+            }
+        }
+        throw new RoomException("ROOM_NOT_FOUND");
+    }
+    private void verifyPin(SessionPrincipal principal, RoomRepository.StoredRoom room, String pin) {
+        if (room.hostId() != principal.userId() && room.pinHash() != null && !pins.verify(pin, room.pinHash())) throw new RoomException("WRONG_PIN");
+    }
+    private void checkPrincipal(SessionPrincipal principal) {
+        if (principal == null || !principal.expiresAt().isAfter(clock.instant())) throw new RoomException("SESSION_INVALID");
+    }
+    private void available() {
+        if (!started || closed) throw new RoomException("SERVICE_UNAVAILABLE");
+        if (!pendingTransfers.isEmpty()) throw new RoomException("HISTORY_UNAVAILABLE");
+        if (pendingHistory.size() >= 256) throw new RoomException("HISTORY_UNAVAILABLE");
+    }
+    private void eventBudget() { if (outbound.size() >= 383) throw new RoomException("BACKPRESSURE"); }
+    private Member member(String connectionId) {
+        Member member = connections.get(connectionId); if (member == null) throw new RoomException("NOT_A_MEMBER");
+        checkPrincipal(member.principal); return member;
+    }
+    private Member host(String connectionId) {
+        Member member = member(connectionId); if (member.role != RoomRole.HOST) throw new RoomException("HOST_REQUIRED"); return member;
+    }
+    private static void sameRoom(Member member, String roomId) { if (!member.roomId.equals(roomId)) throw new RoomException("CROSS_ROOM_FORBIDDEN"); }
+    private LiveRoom requireRoom(String roomId) {
+        LiveRoom room = rooms.get(roomId); if (room == null) throw new RoomException("ROOM_NOT_ACTIVE"); return room;
+    }
+    private RoomSnapshot snapshot(LiveRoom room) {
+        String host = room.members.values().stream().filter(member -> member.role == RoomRole.HOST).map(member -> member.participantId).findFirst().orElse(null);
+        RoomRepository.StoredRoom stored = room.stored;
+        var collaboration = new common.room.RoomInfo(stored.id(), stored.name(), stored.joinCode(), stored.hostId(), stored.createdAt(),
+                switch (stored.status()) { case READY -> "CHO"; case ACTIVE -> "DANG_HOAT_DONG"; case CLOSED -> "DA_DONG"; },
+                stored.locked(), stored.capacity(), room.members.size(), room.members.values().stream()
+                        .map(member -> new common.room.RoomParticipant(member.principal.userId(), member.principal.displayName(),
+                                member.role == RoomRole.HOST ? "CHU_PHONG" : "THANH_VIEN")).toList());
+        return new RoomSnapshot(stored.roomId(), stored.joinCode(), stored.name(), stored.status(), stored.locked(),
+                stored.capacity(), host, room.revision, room.members.values().stream().map(Member::view).toList(), collaboration);
+    }
+    private void broadcast(LiveRoom room, String type, Object body) {
+        enqueue(room.members.values().stream().map(member -> event(member, type, room, body)).toList());
+    }
+    private RoomEvent event(Member recipient, String type, LiveRoom room, Object body) {
+        Map<String, Object> fields = new java.util.LinkedHashMap<>();
+        if (body instanceof Map<?, ?> values) values.forEach((key, value) -> {
+            if (key instanceof String name) fields.put(name, value);
+        });
+        fields.put("room", snapshot(room));
+        return new RoomEvent(recipient.connectionId, type, recipient.roomId, room.revision, Map.copyOf(fields));
+    }
+    private void enqueue(List<RoomEvent> events) {
+        if (!events.isEmpty()) {
+            // Normal mutations reserve 128 batches for terminal events from all admitted connections.
+            if (outbound.size() >= 512) throw new IllegalStateException("Terminal event budget exceeded");
+            outbound.addLast(List.copyOf(events));
+        }
+    }
+    private void drainEvents() {
+        synchronized (dispatchLock) {
+            while (true) {
+                List<RoomEvent> events;
+                synchronized (lock) { events = outbound.pollFirst(); }
+                if (events == null) return;
+                for (RoomEvent event : events) {
+                    try { listener.accept(event); }
+                    catch (RuntimeException deliveryFailure) { /* Listener owns connection backpressure/closure. */ }
+                }
+            }
+        }
+    }
+    private byte[] fingerprint(Object... fields) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256"); mac.init(new SecretKeySpec(receiptKey, "HmacSHA256"));
+            for (Object field : fields) {
+                byte[] value = String.valueOf(field).getBytes(StandardCharsets.UTF_8);
+                mac.update(java.nio.ByteBuffer.allocate(4).putInt(value.length).array()); mac.update(value);
+            }
+            return mac.doFinal();
+        } catch (GeneralSecurityException failure) { throw new IllegalStateException("Receipt hashing unavailable"); }
+    }
+    private String opaque(String prefix) {
+        byte[] bytes = new byte[16]; random.nextBytes(bytes); return prefix + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+    private String code() {
+        StringBuilder code = new StringBuilder("MMR-"); for (int i = 0; i < 16; i++) code.append(CODE_ALPHABET.charAt(random.nextInt(CODE_ALPHABET.length()))); return code.toString();
+    }
+    private static void requestId(String value) { if (value == null || !value.matches("[A-Za-z0-9_-]{16,64}")) throw new RoomException("INVALID_REQUEST_ID"); }
+    private static void connectionId(String value) { if (value == null || !value.matches("[A-Za-z0-9_-]{1,64}")) throw new RoomException("INVALID_CONNECTION_ID"); }
+    private static boolean emptyPin(String pin) { return pin == null || pin.isBlank(); }
+    private static void validatePin(String pin) { if (!emptyPin(pin) && !pin.matches("[0-9]{4,6}")) throw new RoomException("INVALID_PIN"); }
+    private static String normalizeReason(String reason) {
+        return switch (reason == null ? "" : reason) {
+            case "TU_ROI", "SELF", "USER_LEFT" -> "TU_ROI";
+            case "BI_MOI_RA" -> "BI_MOI_RA";
+            case "PHONG_DONG" -> "PHONG_DONG";
+            default -> "MAT_KET_NOI";
+        };
+    }
+    private static final class LiveRoom {
+        RoomRepository.StoredRoom stored; final Map<String, Member> members = new LinkedHashMap<>();
+        final Map<Long, Waiting> waiting = new LinkedHashMap<>(); boolean approval;
+        final Instant readyDeadline; long revision;
+        LiveRoom(RoomRepository.StoredRoom stored, Instant now) { this.stored = stored; readyDeadline = now.plus(Duration.ofMinutes(10)); }
+    }
+    private static final class Member {
+        final String connectionId, roomId, participantId; final long generation, membershipId;
+        final SessionPrincipal principal; RoomRole role; MediaState media;
+        Member(String connectionId, long generation, SessionPrincipal principal, String roomId, long membershipId,
+                String participantId, RoomRole role, MediaState media) {
+            this.connectionId = connectionId; this.generation = generation; this.principal = principal; this.roomId = roomId;
+            this.membershipId = membershipId; this.participantId = participantId; this.role = role; this.media = media;
+        }
+        ParticipantView view() { return new ParticipantView(participantId, principal.displayName(), role, media); }
+    }
+    private static final class Waiting {
+        final SessionPrincipal principal; final String connectionId; Instant seen; boolean approved, rejected;
+        Waiting(SessionPrincipal principal, String connectionId, Instant now) { this.principal = principal; this.connectionId = connectionId; seen = now; }
+    }
+    @FunctionalInterface public interface ChatAction<T> {
+        T handle(java.sql.Connection connection, Participant participant) throws SQLException;
+    }
+    public <T> T chat(String token, long roomId, String ticket, ChatAction<T> action) throws SQLException, common.chat.ChatException {
+        if (legacy != null) return legacy.chat(token, roomId, ticket, action::handle);
+        SessionPrincipal principal = new server.auth.SessionValidator(repository.connections(), clock).validate(token)
+                .orElseThrow(() -> new common.chat.ChatException("SESSION_INVALID", "Phiên đăng nhập không hợp lệ."));
+        synchronized (lock) {
+            Member member = authorized(principal, roomId, ticket);
+            if (member == null) throw new common.chat.ChatException("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc chưa được duyệt.");
+            try (var connection = repository.connections().getConnection()) { return action.handle(connection, participant(member)); }
+        }
+    }
+    private Member authorized(SessionPrincipal principal, long roomId, String ticket) {
+        if (ticket == null) return null;
+        for (Member member : connections.values()) {
+            LiveRoom room = rooms.get(member.roomId);
+            if (room != null && room.stored.id() == roomId && member.participantId.equals(ticket)
+                    && member.principal.sessionId() == principal.sessionId() && member.principal.tokenHash().equals(principal.tokenHash())
+                    && member.principal.expiresAt().isAfter(clock.instant())) return member;
+        }
+        return null;
+    }
+    private Participant participant(Member member) {
+        return new Participant(member.principal.userId(), member.principal.displayName(), member.role == RoomRole.HOST,
+                member.media.micRequested(), member.media.cameraRequested());
+    }
+    private RoomResponse managedView(Member self) {
+        LiveRoom room = requireRoom(self.roomId);
+        var stored = room.stored;
+        return new RoomResponse(true, "OK", "", new RoomView(stored.id(), stored.name(), stored.joinCode(), stored.capacity(), stored.locked(), room.approval, false),
+                self.participantId, room.members.values().stream().map(this::participant).toList(),
+                self.role == RoomRole.HOST ? room.waiting.values().stream().filter(waiting -> !waiting.rejected && !waiting.approved)
+                        .map(waiting -> new Participant(waiting.principal.userId(), waiting.principal.displayName(), false, false, false)).toList() : List.of(), false);
+    }
+    public RoomResponse handle(RoomRequest request) throws SQLException {
+        if (legacy != null) return legacy.handle(request);
+        if (request == null || request.action() == null) return RoomResponse.error("INVALID_REQUEST", "Yêu cầu không hợp lệ.");
+        SessionPrincipal principal = new server.auth.SessionValidator(repository.connections(), clock).validate(request.token()).orElse(null);
+        if (principal == null) return RoomResponse.error("SESSION_INVALID", "Phiên đăng nhập không hợp lệ.");
+        RoomResponse response;
+        try {
+            synchronized (lock) {
+                available(); eventBudget(); Member self = authorized(principal, request.roomId(), request.ticket());
+                if (self == null) return RoomResponse.error("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc chưa được duyệt.");
+                LiveRoom room = requireRoom(self.roomId);
+                Member target = room.members.values().stream().filter(member -> member.principal.userId() == request.target()).findFirst().orElse(null);
+                switch (request.action()) {
+                    case "ROOM_POLL" -> { }
+                    case "ROOM_MEDIA" -> {
+                        MediaState old = self.media;
+                        self.media = new MediaState(request.microphone() == null ? old.micRequested() : request.microphone(),
+                                request.camera() == null ? old.cameraRequested() : request.camera(), old.shareRequested(), old.audioPublishing(), old.videoPublishing(), old.sharePublishing());
+                        room.revision++; broadcast(room, "PARTICIPANT_STATE", Map.of());
+                    }
+                    default -> {
+                        if (self.role != RoomRole.HOST) throw new RoomException("HOST_REQUIRED");
+                        switch (request.action()) {
+                            case "ROOM_SETTINGS" -> {
+                                if (request.locked() != null) { repository.setLocked(room.stored.id(), request.locked()); room.stored = room.stored.withLock(request.locked()); }
+                                if (request.approval() != null) room.approval = request.approval();
+                                room.revision++; broadcast(room, "ROOM_STATE", Map.of());
+                            }
+                            case "ROOM_PENDING_APPROVE", "ROOM_PENDING_REJECT" -> {
+                                Waiting waiting = room.waiting.get(request.target());
+                                if (waiting == null) throw new RoomException("PARTICIPANT_NOT_FOUND");
+                                if (room.stored.locked() && request.action().equals("ROOM_PENDING_APPROVE")) throw new RoomException("ROOM_LOCKED");
+                                if (room.members.size() >= room.stored.capacity() && request.action().equals("ROOM_PENDING_APPROVE")) throw new RoomException("ROOM_FULL");
+                                if (request.action().equals("ROOM_PENDING_APPROVE") && new server.auth.SessionValidator(repository.connections(), clock).validateHash(waiting.principal.tokenHash()).isEmpty()) {
+                                    room.waiting.remove(request.target()); throw new RoomException("SESSION_INVALID");
+                                }
+                                waiting.approved = request.action().equals("ROOM_PENDING_APPROVE"); waiting.rejected = !waiting.approved;
+                            }
+                            case "ROOM_CLOSE" -> {
+                                remove(self, "PHONG_DONG");
+                                response = new RoomResponse(true, "OK", "", new RoomView(request.roomId(), room.stored.name(), room.stored.joinCode(), room.stored.capacity(), room.stored.locked(), room.approval, true), self.participantId, List.of(), List.of(), false);
+                                return response;
+                            }
+                            case "ROOM_TRANSFER", "ROOM_KICK", "ROOM_MIC_OFF", "ROOM_CAMERA_OFF" -> {
+                                if (target == null || target == self) throw new RoomException("PARTICIPANT_NOT_FOUND");
+                                if (request.action().equals("ROOM_TRANSFER")) {
+                                    repository.transferHost(room.stored.id(), target.principal.userId());
+                                    self.role = RoomRole.MEMBER; target.role = RoomRole.HOST; room.stored = room.stored.withHost(target.principal.userId());
+                                    room.revision++; broadcast(room, "ROOM_STATE", Map.of());
+                                } else if (request.action().equals("ROOM_KICK")) remove(target, "BI_MOI_RA");
+                                else {
+                                    String kind = request.action().equals("ROOM_MIC_OFF") ? "AUDIO" : "VIDEO";
+                                    MediaState old = target.media;
+                                    target.media = kind.equals("AUDIO") ? new MediaState(false, old.cameraRequested(), old.shareRequested(), false, old.videoPublishing(), old.sharePublishing())
+                                            : new MediaState(old.micRequested(), false, old.shareRequested(), old.audioPublishing(), false, old.sharePublishing());
+                                    room.revision++; broadcast(room, "PUBLISH_STOPPED", Map.of("participantId", target.participantId, "kind", kind, "reason", "HOST_STOP"));
+                                }
+                            }
+                            default -> throw new RoomException("INVALID_REQUEST");
+                        }
                     }
                 }
-                return view(room, user.id(), false);
-            case "ROOM_CLOSE":
-                for (long id : List.copyOf(room.members.keySet())) depart(connection, room, id, "PHONG_DONG");
-                execute(connection, "UPDATE Phong_Hop SET Trang_Thai = 'DA_DONG', Ngay_Dong = CURRENT_TIMESTAMP WHERE Ma_Phong = ?", room.id);
-                room.closed = true; room.waiting.clear(); return new RoomResponse(true, "OK", "", room.view(), null, null, null, false);
-            case "ROOM_PENDING_APPROVE":
-                Member pending = room.waiting.get(request.target());
-                if (pending == null) return error("INVALID_TARGET", "Yêu cầu chờ không còn tồn tại.");
-                if (authenticateHash(connection, pending.user.sessionHash()) == null) {
-                    room.waiting.remove(request.target()); return error("SESSION_INVALID", "Người chờ đã đăng xuất hoặc hết phiên.");
-                }
-                if (room.locked) return error("ROOM_LOCKED", "Mở khóa phòng trước khi duyệt.");
-                if (room.members.size() >= room.capacity) return error("ROOM_FULL", "Phòng đã đủ người.");
-                admit(connection, room, pending); room.waiting.remove(pending.user.id()); return view(room, user.id(), false);
-            case "ROOM_PENDING_REJECT": room.waiting.remove(request.target()); return view(room, user.id(), false);
-            case "ROOM_KICK", "ROOM_MIC_OFF", "ROOM_CAMERA_OFF", "ROOM_TRANSFER":
-                if (target == null || target.user.id() == user.id()) return error("INVALID_TARGET", "Chọn một thành viên khác đang trong phòng.");
-                if ("ROOM_KICK".equals(request.action())) depart(connection, room, target.user.id(), "BI_MOI_RA");
-                if ("ROOM_MIC_OFF".equals(request.action())) target.microphone = false;
-                if ("ROOM_CAMERA_OFF".equals(request.action())) target.camera = false;
-                if ("ROOM_TRANSFER".equals(request.action())) transfer(connection, room, target.user.id());
-                return view(room, user.id(), false);
-            default: return error("INVALID_REQUEST", "Thao tác không được hỗ trợ.");
-        }
-    }
-    private void admit(Connection connection, Room room, Member member) throws SQLException {
-        if (room.members.isEmpty()) transfer(connection, room, member.user.id());
-        try (PreparedStatement sql = connection.prepareStatement("UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = CURRENT_TIMESTAMP, Ly_Do_Roi = 'MAT_KET_NOI' WHERE Ma_Phong = ? AND Ma_Nguoi_Dung = ? AND Roi_Phong_Luc IS NULL")) {
-            sql.setLong(1, room.id); sql.setLong(2, member.user.id()); sql.executeUpdate();
-        }
-        try (PreparedStatement sql = connection.prepareStatement("INSERT INTO Thanh_Vien_Phong (Ma_Phong, Ma_Nguoi_Dung, Vai_Tro) VALUES (?, ?, ?)", Statement.RETURN_GENERATED_KEYS)) {
-            sql.setLong(1, room.id); sql.setLong(2, member.user.id()); sql.setString(3, room.host == member.user.id() ? "CHU_PHONG" : "THANH_VIEN"); sql.executeUpdate();
-            try (ResultSet keys = sql.getGeneratedKeys()) { if (!keys.next()) throw new SQLException("Missing membership ID"); member.membership = keys.getLong(1); }
-        }
-        member.lastSeen = now(); room.members.put(member.user.id(), member);
-    }
-    private void depart(Connection connection, Room room, long user, String reason) throws SQLException {
-        Member member = room.members.get(user); if (member == null) return;
-        try (PreparedStatement sql = connection.prepareStatement("UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = CURRENT_TIMESTAMP, Ly_Do_Roi = ? WHERE Ma_Thanh_Vien_Phong = ? AND Roi_Phong_Luc IS NULL")) {
-            sql.setString(1, reason); sql.setLong(2, member.membership); sql.executeUpdate();
-        }
-        room.members.remove(user);
-        if (room.host == user && !room.members.isEmpty() && !"PHONG_DONG".equals(reason)) transfer(connection, room, room.members.keySet().iterator().next());
-        if (room.members.isEmpty()) room.waiting.clear();
-    }
-    private void transfer(Connection connection, Room room, long host) throws SQLException {
-        try (PreparedStatement sql = connection.prepareStatement("UPDATE Phong_Hop SET Ma_Chu_Phong = ? WHERE Ma_Phong = ?")) { sql.setLong(1, host); sql.setLong(2, room.id); sql.executeUpdate(); }
-        try (PreparedStatement sql = connection.prepareStatement("UPDATE Thanh_Vien_Phong SET Vai_Tro = CASE WHEN Ma_Nguoi_Dung = ? THEN 'CHU_PHONG' ELSE 'THANH_VIEN' END WHERE Ma_Phong = ? AND Roi_Phong_Luc IS NULL")) { sql.setLong(1, host); sql.setLong(2, room.id); sql.executeUpdate(); }
-        room.host = host;
-    }
-    private void expire(Connection connection) throws SQLException {
-        Instant cutoff = now().minusSeconds(10);
-        for (Room room : rooms.values()) {
-            for (Member member : List.copyOf(room.members.values())) if (member.lastSeen.isBefore(cutoff)) depart(connection, room, member.user.id(), "MAT_KET_NOI");
-            room.waiting.values().removeIf(member -> member.lastSeen.isBefore(cutoff));
-        }
-    }
-    private Room load(Connection connection, long id, String code) throws SQLException {
-        for (Room room : rooms.values()) if (code == null ? room.id == id : room.code.equals(code)) return room;
-        try (PreparedStatement sql = connection.prepareStatement("SELECT Ma_Phong, Ten_Phong, Ma_Phong_Tham_Gia, Ma_PIN_Bam, Ma_Chu_Phong, Da_Khoa, So_Nguoi_Toi_Da, Trang_Thai FROM Phong_Hop WHERE " + (code == null ? "Ma_Phong = ?" : "Ma_Phong_Tham_Gia = ?"))) {
-            if (code == null) sql.setLong(1, id); else sql.setString(1, code);
-            try (ResultSet result = sql.executeQuery()) {
-                if (!result.next()) return null;
-                Room room = new Room(); room.id = result.getLong(1); room.name = result.getString(2); room.code = result.getString(3); room.pin = result.getString(4); room.host = result.getLong(5); room.locked = result.getBoolean(6); room.capacity = result.getInt(7); room.closed = "DA_DONG".equals(result.getString(8)); rooms.put(room.id, room); return room;
+                response = managedView(self);
             }
+            return response;
+        } catch (RoomException error) { return RoomResponse.error(error.code(), controlError(error.code())); }
+        finally { drainEvents(); }
+    }
+    private static String controlError(String code) {
+        return switch (code) {
+            case "HOST_REQUIRED" -> "Chỉ chủ phòng được thực hiện thao tác này.";
+            case "ROOM_LOCKED" -> "Mở khóa phòng trước khi duyệt.";
+            case "ROOM_FULL" -> "Phòng đã đủ người.";
+            case "PARTICIPANT_NOT_FOUND" -> "Thành viên hoặc yêu cầu chờ không còn tồn tại.";
+            case "SESSION_INVALID" -> "Phiên đăng nhập không còn hợp lệ.";
+            case "HISTORY_UNAVAILABLE" -> "Đang đồng bộ trạng thái phòng. Vui lòng thử lại.";
+            default -> "Thao tác chưa hoàn tất. Vui lòng thử lại.";
+        };
+    }
+    private record PendingHistory(boolean room, long id, Instant at, String reason) {
+        void run(RoomRepository repository) throws SQLException {
+            if (room) repository.closeRoom(id, at, reason); else repository.leave(id, at, reason);
         }
-    }
-    private User authenticate(Connection connection, String token) throws SQLException {
-        if (token == null || token.isBlank() || token.length() > 256) return null;
-        return authenticateHash(connection, hash(token));
-    }
-    private User authenticateHash(Connection connection, String tokenHash) throws SQLException {
-        try (PreparedStatement sql = connection.prepareStatement("SELECT u.Ma_Nguoi_Dung, u.Ten_Hien_Thi FROM Phien_Dang_Nhap p JOIN Nguoi_Dung u ON u.Ma_Nguoi_Dung = p.Ma_Nguoi_Dung WHERE p.Token_Bam = ? AND p.Thu_Hoi_Luc IS NULL AND p.Het_Han_Luc > ? AND u.Trang_Thai = 'HOAT_DONG'")) {
-            sql.setString(1, tokenHash); sql.setTimestamp(2, Timestamp.from(now()), Calendar.getInstance(TimeZone.getTimeZone("UTC")));
-            try (ResultSet result = sql.executeQuery()) { return result.next() ? new User(result.getLong(1), result.getString(2), tokenHash) : null; }
-        }
-    }
-    private RoomResponse view(Room room, long user, boolean pending) {
-        Member self = pending ? room.waiting.get(user) : room.members.get(user);
-        return new RoomResponse(true, "OK", "", room.view(), self.ticket,
-                pending ? List.of() : room.members.values().stream().map(member -> member.view(room.host)).toList(),
-                room.host == user ? room.waiting.values().stream().map(member -> member.view(0)).toList() : List.of(), pending);
-    }
-    private boolean present(long user) { return rooms.values().stream().anyMatch(room -> room.members.containsKey(user) || room.waiting.containsKey(user)); }
-    private Instant now() { return clock.instant(); }
-    private static RoomResponse error(String code, String message) { return RoomResponse.error(code, message); }
-    private static String hash(String token) {
-        try { return Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8))); }
-        catch (NoSuchAlgorithmException error) { throw new IllegalStateException(error); }
-    }
-    private static void execute(Connection connection, String query, long id) throws SQLException { try (PreparedStatement sql = connection.prepareStatement(query)) { sql.setLong(1, id); sql.executeUpdate(); } }
-    @Override public synchronized void close() throws SQLException {
-        try (Connection connection = connections.getConnection()) { for (Room room : rooms.values()) for (long user : List.copyOf(room.members.keySet())) depart(connection, room, user, "MAT_KET_NOI"); }
-        rooms.clear();
-    }
-    private record User(long id, String name, String sessionHash) { }
-    private static final class Member {
-        final User user; final String ticket; long membership; Instant lastSeen; boolean microphone, camera;
-        Member(User user, String ticket, Instant time) { this.user = user; this.ticket = ticket; lastSeen = time; }
-        Participant view(long host) { return new Participant(user.id(), user.name(), user.id() == host, microphone, camera); }
-        Member copy() { Member member = new Member(user, ticket, lastSeen); member.membership = membership; member.microphone = microphone; member.camera = camera; return member; }
-    }
-    private static final class Room {
-        long id, host; String name, code, pin; int capacity; boolean locked, approval, closed;
-        final Map<Long, Member> members = new LinkedHashMap<>(), waiting = new LinkedHashMap<>();
-        RoomView view() { return new RoomView(id, name, code, capacity, locked, approval, closed); }
-        Room copy() { Room room = new Room(); room.id = id; room.host = host; room.name = name; room.code = code; room.pin = pin; room.capacity = capacity; room.locked = locked; room.approval = approval; room.closed = closed; members.forEach((id, member) -> room.members.put(id, member.copy())); waiting.forEach((id, member) -> room.waiting.put(id, member.copy())); return room; }
     }
 }

@@ -1,16 +1,30 @@
 # MiniMeetingRoom
 
-Ứng dụng desktop Java 21/JavaFX. Đăng ký, đăng nhập và đăng xuất đã kết nối MySQL qua server TCP/TLS riêng. Các chức năng phòng họp, chat, thiết bị và media hiện vẫn dùng dữ liệu demo.
+Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên, video call và chia sẻ tệp đã kết nối backend. Form tạo/tham gia có sẵn dùng signaling TCP/TLS cho phòng mới; dữ liệu tệp dùng dịch vụ TCP/TLS riêng với cùng membership. Chat văn bản thời gian thực, duyệt thành viên, khóa phòng, mời ra và chuyển chủ dùng cùng phòng với video và tệp. Khi chủ phòng rời đi, quyền chủ phòng tự chuyển cho người còn lại. Voice chat và chia sẻ màn hình chưa triển khai.
+
+## Truyền tệp qua TCP/TLS
+
+Tab **Tệp** hỗ trợ chọn tệp, tải lên/tải xuống theo luồng, kiểm tra SHA-256, tiến độ, tạm dừng, tiếp tục và hủy. Server kiểm tra phiên cùng quyền thành viên phòng; client cùng phòng cập nhật metadata mỗi 3 giây. `server.AuthServer` hiện khởi động cả auth trên cổng **8443** và dịch vụ tệp riêng trên cổng **9001**.
+
+Với database đã tồn tại, áp dụng **một lần** [migration 001](database/migrations/001_file_transfer.sql) trước khi bật dịch vụ tệp; server không tự sửa database. Database mới dùng [schema.sql](database/schema.sql), không chạy thêm migration này. Xem [báo cáo, cấu hình, hướng dẫn hai client và giới hạn hiện tại](docs/file-transfer.md). Phần hướng dẫn auth bên dưới vẫn áp dụng; khi dùng tệp qua LAN cần mở thêm cổng TCP 9001 và cấu hình `file.transfer.bind`.
+
+Video qua WebRTC/Pion chạy ngay từ **Tạo phòng / Tham gia phòng → trước khi vào phòng → màn hình họp**, không cần nút SFU riêng. Camera xem trước chỉ hiển thị cục bộ; vào phòng mới gửi video nếu bạn đã bật. Năm bài native integration đã kiểm thử 2/3 client với nguồn hình tạo sẵn, gồm hai JVM cùng máy, giao diện chính và gửi/tải tệp trong cùng phòng; camera thật cần người dùng chủ động nghiệm thu. Xem [cách chạy video call](docs/video-call.md), [kiến trúc](docs/sfu-architecture.md) và [kiểm thử](docs/sfu-testing.md).
+
+Camera chỉ hỏi quyền khi nhấn **Bật camera** nếu chưa được cho phép; quyền đã chấp nhận được ghi nhớ trên máy. Từ chối hoặc đóng hộp thoại sẽ không cho vào giao diện họp; có thể nhấn Bật camera để thử lại. Không còn nút Quyền camera/Tìm camera. Phòng chờ bỏ các dòng đếm camera, mô tả kỹ thuật và thông báo tính năng chưa triển khai; chỉ hiện lỗi khi cần. Nút **Ẩn/Hiện thanh công cụ** trong cuộc họp giúp tăng vùng video mà không dừng media. Quyền camera của Windows vẫn cần cho phép ứng dụng desktop truy cập.
+
+Chọn thiết bị ở **Cài đặt** trong cuộc họp; danh sách ẩn các camera ảo OBS/ByteCast và chỉ đếm camera còn lại. Nút **Camera** nhận nhấn liên tục, áp dụng trạng thái cuối cùng thay vì xếp hàng nhiều lần mở thiết bị; thời gian capture/WebRTC vẫn phụ thuộc thiết bị và kết nối. Driver camera đọc chậm được tách khỏi worker nhận video; định dạng có timeout trong Java helper riêng và được tái sử dụng trong phiên để bật lại nhanh hơn. **Sáng/Tối** trong Cài đặt đổi đồng thời giao diện cuộc họp và dialog. Thử hai cửa sổ với một webcam: bật camera ở một cửa sổ, để camera cửa sổ kia tắt để kiểm tra nhận hình. Không cần migration database cho bản sửa này.
 
 ## Chạy trên máy phát triển
 
-Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans) và MySQL có các bảng trong `database/schema.sql`. Nếu database đã có đủ bảng thì không chạy lại schema.
+Trong NetBeans, **Run File** `src/main/java/server/Main.java` để khởi động toàn bộ server; chờ `MMR_MEETING_SERVER_READY`, sau đó **Run File** `src/main/java/client/Main.java`. `server.Main` dùng cùng bộ khởi động với script dưới đây, bao gồm auth, phòng, signaling, truyền tệp (theo cấu hình) và media video.
 
-1. Cấu hình database trong `config/auth-server.properties`. File này chỉ nằm trên máy server và được Git bỏ qua. Bản mẫu là `config/auth-server.properties.example`. Để chạy server và client trên cùng máy nhưng tiếp tục dùng Railway, đặt `db.url`, `db.user`, `db.password` theo database Railway hiện có; đặt `auth.bind=127.0.0.1`, `auth.port=8443`, `auth.keystore=config/auth-dev.p12`. Trong `config/auth-client.properties`, đặt `auth.host=127.0.0.1`, `auth.port=8443`, `auth.certificate=config/auth-server.cer`. Không cần cài MySQL local khi dùng Railway.
+Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy trên máy local; database MySQL vẫn ở Railway**. Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans), kết nối tới Railway và các bảng cần thiết trong database hiện có. Không cần khởi động MySQL local. Nếu database đã có đủ bảng thì không chạy lại schema.
+
+1. Giữ thông tin Railway hiện có trong các khóa `db.url`, `db.user`, `db.password` của `config/auth-server.properties`. File chỉ nằm trên máy chạy server và được Git bỏ qua. `db.url` dùng dạng `jdbc:mysql://<host-public>:<port>/<database>?sslMode=REQUIRED` với host, port và tên database thực tế của Railway. Bản mẫu `config/auth-server.properties.example` dùng placeholder để không chứa thông tin đăng nhập thật; không chép đè cấu hình đang hoạt động bằng placeholder. Client kết nối `localhost`; server lắng nghe `127.0.0.1` trên các cổng 8443 và 9001. Client không chứa thông tin đăng nhập database.
 2. Mở PowerShell tại thư mục dự án và chạy server:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\scripts\start-server.ps1
+   powershell -ExecutionPolicy Bypass -File .\scripts\start-meeting-server.ps1
    ```
 
    Script tự tạo chứng chỉ TLS phát triển nếu chưa có, rồi khởi động `server.AuthServer` tại `127.0.0.1:8443`. Giữ terminal này mở. Server kiểm tra bảng bằng truy vấn chỉ đọc, không tự tạo hay sửa database.
@@ -28,17 +42,29 @@ Cần JDK 21 trở lên, Maven (hoặc Maven đi kèm NetBeans) và MySQL có c�
 
 Thông tin tài khoản hiện chỉ đọc; chỉnh sửa tên và đổi mật khẩu sẽ được triển khai ở bước riêng.
 
+## Tạo và tham gia phòng
+
+Sau khi đăng nhập, chọn **Tạo phòng**, nhập tên phòng 1–100 ký tự, PIN gồm 4–6 chữ số và sức chứa. Sức chứa mặc định là 10; phòng video cho phép 2–16 người theo chính sách mặc định của server (`meeting.maxParticipants`), phòng auth cũ vẫn có giới hạn 250 người bao gồm chủ phòng; đây là giới hạn quản lý thành viên, chưa phải năng lực truyền media. Server sinh `room_id`, mã `MMR-` cùng 16 ký tự ngẫu nhiên, xác định `host_id` từ phiên đăng nhập và lưu `created_at` theo UTC. Server chỉ lưu hash của PIN và không trả lại PIN/hash. PIN người dùng vừa nhập chỉ giữ trong bộ nhớ phiên phòng để chủ phòng chủ động sao chép lời mời; không ghi ra file hay log và xóa khi rời phòng. Chủ phòng được thêm vào phòng ngay khi tạo thành công.
+
+Chia sẻ **ID hoặc mã phòng cùng PIN** cho người khác. Tại sảnh, nhập ID/mã và PIN rồi chọn **Tham gia**. Server kiểm tra phiên đăng nhập, phòng có tồn tại, PIN, trạng thái phòng, khóa phòng và số chỗ còn lại. Chỉ khi thành công client mới chuyển sang màn hình trước khi vào phòng. Mã phòng không phân biệt hoa/thường; PIN được kiểm tra nguyên vẹn, kể cả chữ số 0 ở đầu.
+
+Danh sách **Phòng gần đây của bạn** lấy từ database, tối đa 20 phòng đã tạo hoặc tham gia. Nút **Nhập PIN** điền lại mã phòng, vẫn yêu cầu PIN và xác nhận từ server. Màn hình họp nhận thay đổi thành viên qua signaling và cập nhật danh sách chờ khoảng 1 giây một lần. Tab **Tệp** truyền dữ liệu thật qua TCP/TLS; tab **Chat** nhận tin nhắn đẩy qua TLS, lưu lịch sử trong database. Video dùng camera thật khi được người dùng cho phép. Nút **Quản lý phòng** dành cho chủ phòng có khóa/mở khóa, bật/tắt duyệt thành viên và đóng phòng cho mọi người. Menu thành viên hỗ trợ chuyển chủ, mời ra và yêu cầu tắt thiết bị; microphone và chia sẻ màn hình chưa có media thật.
+
+Quay về sảnh từ màn hình trước khi vào phòng hoặc chọn rời cuộc họp sẽ cập nhật `Thanh_Vien_Phong`. Khi người cuối cùng rời phòng, server đổi trạng thái thành `DA_DONG`; mã phòng đó không thể tham gia lại. Đăng xuất hoặc đóng ứng dụng cố gắng gửi thao tác rời phòng trước khi thu hồi phiên. Phòng video dùng heartbeat của kết nối signaling để dọn thành viên mất kết nối và chuyển chủ nếu cần; phòng auth cũ vẫn có hạn chế dọn thành viên khi tiến trình bị tắt đột ngột.
+
+Dùng **`server.Main`** hoặc `scripts/start-meeting-server.ps1` để khởi động đồng thời auth/chat TLS, signaling, dịch vụ tệp và media. Các thành phần dùng cùng `Phong_Hop` và `Thanh_Vien_Phong`; người chờ duyệt chưa có membership để truy cập chat/tệp/video. Database cũ cần các migration của main theo hướng dẫn SFU và truyền tệp; bản ghép này không thêm migration mới và không tự sửa database. Chạy một server và hai client bằng hai tài khoản khác nhau để thử tạo và tham gia cùng phòng.
+
 Quy tắc đăng ký được dùng chung ở giao diện và server. Server kiểm tra tên đăng nhập khớp chính xác với tên lưu trong database, kể cả khi [collation MySQL không phân biệt hoa/thường](https://dev.mysql.com/doc/refman/8.4/en/case-sensitivity.html). Không cần thay đổi schema hoặc dữ liệu Railway. Ràng buộc unique hiện tại vẫn ngăn đăng ký một tên chỉ khác chữ hoa/thường với tài khoản đã có. Quy tắc độ phức tạp mật khẩu áp dụng cho đăng ký mới; tài khoản có sẵn vẫn đăng nhập bằng mật khẩu cũ.
 
 ## Khi khởi động server gặp lỗi
 
 `BindException` ở `127.0.0.1:8443` thường có nghĩa là auth server đã chạy trong terminal hoặc NetBeans khác. Mỗi địa chỉ/cổng chỉ dùng cho một auth server đang lắng nghe. Nếu server đã sẵn sàng, chỉ chạy client; nếu cần khởi động lại, dừng server cũ bằng **Stop** trong NetBeans hoặc **Ctrl+C** ở terminal server trước. Nếu đã cấu hình `auth.bind` khác, kiểm tra địa chỉ đó thuộc máy đang chạy server.
 
-`DatabaseConnection` kết nối tới MySQL Railway bằng cấu hình trong `config/auth-server.properties`; `TestDatabase` chỉ kiểm tra kết nối và các bảng. Auth server mở một cổng TCP/TLS riêng cho client, rồi sử dụng `DatabaseConnection` để truy vấn Railway. Thông báo lỗi khởi động phân biệt bước MySQL, chứng chỉ TLS và mở cổng.
+`DatabaseConnection` của server local kết nối tới MySQL Railway theo cấu hình trong `config/auth-server.properties`. `TestDatabase` chỉ kiểm tra kết nối và các bảng. Client gọi server local qua TCP/TLS; chỉ server sử dụng JDBC để truy vấn Railway. Thông báo lỗi khởi động phân biệt bước MySQL, chứng chỉ TLS và mở cổng. Việc không có listener MySQL ở `localhost:3306` không ảnh hưởng mô hình này.
 
 ## Cấu hình kết nối
 
-Server đọc `config/auth-server.properties`; đổi đường dẫn bằng JVM property `-Dmmr.server.config=...`. Client đọc `config/auth-client.properties` nếu có; bản mẫu là `config/auth-client.properties.example`, JVM property là `-Dmmr.client.config=...`. Đường dẫn tương đối tính từ thư mục chạy dự án. File `.env` không được tự động nạp.
+Server đọc `config/auth-server.properties`; đổi đường dẫn bằng JVM property `-Dmmr.server.config=...`. Client đọc `config/auth-client.properties` nếu có; bản mẫu là `config/auth-client.properties.example`, JVM property là `-Dmmr.client.config=...`. Đường dẫn tương đối tính từ thư mục chạy dự án. File `.env` không được tự động nạp. Các biến `MMR_DB_*` nếu đã đặt sẽ ưu tiên hơn file; khởi động lại server sau khi chỉnh cấu hình vì file được nạp một lần khi tiến trình khởi tạo.
 
 | Biến môi trường | Ý nghĩa |
 |---|---|
@@ -63,10 +89,11 @@ Trên từng máy client, sao chép `config/auth-client.properties.example` thà
 ## Cấu trúc xác thực
 
 - `client/UI/screens/AuthScreen.java`: biểu mẫu sẵn có, kiểm tra dữ liệu và hiển thị kết quả. Tác vụ mạng chạy nền.
-- `client/auth/AuthClient.java`: gọi đăng ký, đăng nhập, đăng xuất qua TLS 1.2/1.3.
-- `common/auth`: DTO và protocol gồm độ dài 4 byte + JSON UTF-8, tối đa 16 KiB/thông điệp.
+- `client/auth/AuthClient.java`: gọi xác thực và các thao tác phòng qua TLS 1.2/1.3.
+- `common/auth`, `common/room`: DTO và protocol gồm độ dài 4 byte + JSON UTF-8, tối đa 256 KiB/thông điệp để chứa snapshot tối đa 250 thành viên.
 - `server/AuthServer.java`: nhận kết nối, giới hạn worker, timeout và gọi service.
 - `server/auth`: xác thực, băm mật khẩu và truy vấn bằng `PreparedStatement` trên `Nguoi_Dung`/`Phien_Dang_Nhap`.
+- `server/ApplicationService.java`, `server/rooms/RoomService.java`: điều phối yêu cầu, kiểm tra phiên, tạo/tham gia/rời phòng và đọc danh sách thành viên. Thao tác thay đổi phòng dùng transaction và khóa dòng phòng; mức READ COMMITTED tránh đếm số chỗ theo snapshot cũ khi nhiều người vào đồng thời. Xem [cơ chế khóa dòng](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html) và [mức cô lập của MySQL](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html).
 
 Mật khẩu được băm PBKDF2-HMAC-SHA256 với salt ngẫu nhiên và 600.000 vòng theo [hướng dẫn OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). Mật khẩu gốc không lưu trong database hoặc trạng thái phiên giao diện. Token ngẫu nhiên chỉ giữ trong bộ nhớ client; database lưu SHA-256 của token và hạn dùng. TLS kiểm tra danh tính máy chủ theo [hướng dẫn JSSE của Java](https://docs.oracle.com/en/java/javase/21/security/java-secure-socket-extension-jsse-reference-guide.html).
 
@@ -80,4 +107,4 @@ Server và client tự ghi nhật ký kiểm thử `.txt` trong `logs/diagnostic
 mvn test
 ```
 
-Các test dùng H2 in-memory và TLS server cục bộ để kiểm tra đăng ký, trùng tài khoản/email, đăng nhập, trạng thái tài khoản, phiên, thu hồi token, framing và xác minh chứng chỉ. Test không ghi dữ liệu lên MySQL đang dùng.
+Các test dùng H2 in-memory, TLS server cục bộ và cửa sổ JavaFX ẩn để kiểm tra xác thực, tạo phòng, ID/mã phòng, PIN, phòng đóng/khóa/đầy, quyền truy cập, phiên hết hạn, nhiều người tranh chỗ cuối, rời phòng, framing, xác minh chứng chỉ và streaming upload/download. Test không ghi dữ liệu lên MySQL đang dùng.

@@ -13,6 +13,22 @@
     </properties>
     <dependencies>
         <dependency>
+            <groupId>dev.onvoid.webrtc</groupId>
+            <artifactId>webrtc-java</artifactId>
+            <version>0.19.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>7.0.2</version>
+        </dependency>
+        <!-- Pool configuration can contain credentials; application diagnostics own safe logging. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-nop</artifactId>
+            <version>2.0.17</version>
+        </dependency>
+        <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-controls</artifactId>
             <version>${javafx.version}</version>
@@ -51,6 +67,10 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <!-- Also isolates a normal test run after a probe left compiled classes. -->
+                    <excludes><exclude>**/WebRtcClientProbeTest.java</exclude><exclude>**/VideoCallIntegrationTest.java</exclude></excludes>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
@@ -72,4 +92,47 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>video-integration</id>
+            <build><plugins>
+                <plugin><groupId>org.codehaus.mojo</groupId><artifactId>build-helper-maven-plugin</artifactId><version>3.6.0</version>
+                    <executions><execution><id>video-integration-source</id><phase>generate-test-sources</phase><goals><goal>add-test-source</goal></goals>
+                        <configuration><sources><source>src/video-test/java</source></sources></configuration>
+                    </execution></executions>
+                </plugin>
+                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.2</version>
+                    <configuration><excludes combine.self="override" /></configuration>
+                </plugin>
+            </plugins></build>
+        </profile>
+        <!-- Historical Milestone 0 harness; native dependency is shared with production video. -->
+        <profile>
+            <id>media-probe</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration><excludes combine.self="override" /></configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>build-helper-maven-plugin</artifactId>
+                        <version>3.6.0</version>
+                        <executions>
+                            <execution>
+                                <id>media-probe-sources</id>
+                                <phase>generate-test-sources</phase>
+                                <goals><goal>add-test-source</goal></goals>
+                                <configuration>
+                                    <sources><source>src/media-test/java</source></sources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

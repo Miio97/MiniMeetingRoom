@@ -16,13 +16,20 @@ import java.util.WeakHashMap;
 public final class ThemeManager {
     private static final BooleanProperty LIGHT = new SimpleBooleanProperty(true);
     private static final WeakHashMap<Parent, Boolean> ROOTS = new WeakHashMap<>();
-    static { LIGHT.addListener((obs, old, value) -> ROOTS.keySet().forEach(ThemeManager::apply)); }
     private ThemeManager() { }
     public static boolean isLight() { return LIGHT.get(); }
-    public static void setLight(boolean value) { LIGHT.set(value); }
-    public static void attach(Parent root) { ROOTS.put(root, Boolean.TRUE); apply(root); }
+    public static void setLight(boolean value) {
+        LIGHT.set(value);
+        // Snapshot weakly held roots after property listeners run; closing native dialogs can release roots.
+        for (Parent root : new java.util.ArrayList<>(ROOTS.keySet())) apply(root);
+    }
+    public static void attach(Parent root) {
+        // Old meeting roots used a forced class; actual windows follow the shared preference.
+        if (root.getScene() != null && root.getScene().getRoot() == root) root.getStyleClass().remove("theme-dark");
+        ROOTS.put(root, Boolean.TRUE); apply(root);
+    }
     private static void apply(Parent root) {
-        root.getStyleClass().remove("light-mode");
+        root.getStyleClass().removeAll("light-mode");
         if (!root.getStyleClass().contains("theme-dark") && isLight()) root.getStyleClass().add("light-mode");
     }
     public static Button toggleButton() {
@@ -37,6 +44,7 @@ public final class ThemeManager {
     /** Lựa chọn có trạng thái rõ ràng trong Cài đặt, thay vì nút đổi theme rải rác. */
     public static HBox selector() {
         Button light = new Button("☀  Sáng"), dark = new Button("☾  Tối");
+        light.setId("theme-light"); dark.setId("theme-dark");
         light.getStyleClass().add("theme-choice"); dark.getStyleClass().add("theme-choice");
         light.setOnAction(e -> setLight(true)); dark.setOnAction(e -> setLight(false));
         HBox choices = new HBox(6, light, dark); choices.getStyleClass().add("theme-selector");
