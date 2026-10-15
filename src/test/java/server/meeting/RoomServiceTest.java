@@ -119,6 +119,27 @@ class RoomServiceTest {
     }
 
     @Test
+    void joiningOnlyAcceptsPublicRoomCodeAndPinWhileInternalIdsKeepWorking() throws Exception {
+        RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);
+        for (String invalid : List.of(Long.toString(room.collaborationRoom().id()), "999999999", room.roomId())) {
+            error("ROOM_NOT_FOUND", () -> service.lookup(principal(2), invalid, "1234"));
+            error("ROOM_NOT_FOUND", () -> service.join(principal(2), "member-b", 1, "join-member-00002",
+                    room.roomId(), invalid, "1234", false, false));
+            assertEquals(1, service.participantCount()); assertEquals(1, count("Thanh_Vien_Phong"));
+        }
+        String code = "  " + room.joinCode().toLowerCase(java.util.Locale.ROOT) + "  ";
+        error("WRONG_PIN", () -> service.lookup(principal(2), code, "9999"));
+        RoomPreview preview = service.lookup(principal(2), code, "1234");
+        assertEquals(room.roomId(), preview.roomId()); assertEquals(room.joinCode(), preview.joinCode());
+        RoomJoinReply joined = service.join(principal(2), "member-b", 1, "join-member-00002",
+                preview.roomId(), code, "1234", false, false);
+        assertEquals(2, joined.room().participants().size()); assertEquals(2, count("Thanh_Vien_Phong"));
+        assertEquals(room.roomId(), service.getRoom("member-b", room.roomId()).roomId());
+        assertEquals(joined.selfParticipantId(), service.assertMember("member-b", room.roomId()).participantId());
+        service.leave("member-b", "TU_ROI"); assertEquals(1, service.participantCount());
+    }
+
+    @Test
     void concurrentLastSeatIsAdmittedOnce() throws Exception {
         RoomSnapshot room = create(1, "create-room-00001", 2, false); join(1, "host-a", "join-host-000001", room);
         CountDownLatch ready = new CountDownLatch(2), start = new CountDownLatch(1);
@@ -160,6 +181,127 @@ class RoomServiceTest {
         assertEquals("DANG_HOAT_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
         assertEquals("2", scalar("SELECT CAST(Ma_Chu_Phong AS VARCHAR) FROM Phong_Hop"));
         assertFalse(events.stream().anyMatch(event -> event.recipientConnectionId().equals("member-b") && event.type().equals("ROOM_CLOSED")));
+    }
+
+    @Test
+    void onlyOwnerCanReopenAndOriginalRoomPinAndHistoryArePreserved() throws Exception {
+        RoomSnapshot room = create(1, "create-room-00001", 3, false);
+        join(1, "host-a", "join-host-000001", room); join(2, "member-b", "join-member-00002", room);
+        error("ROOM_ALREADY_ACTIVE", () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        error("HOST_REQUIRED", () -> service.reopen(principal(2), "reopen-room-00002", room.joinCode()));
+        service.setLocked("host-a", true); service.leave("host-a", "PHONG_DONG");
+        String pinHash = scalar("SELECT Ma_PIN_Bam FROM Phong_Hop");
+        error("HOST_REQUIRED", () -> service.reopen(principal(2), "reopen-room-00002", room.joinCode()));
+        RoomSnapshot reopened = service.reopen(principal(1), "reopen-room-00001", Long.toString(room.collaborationRoom().id()));
+        assertEquals(room.collaborationRoom().id(), reopened.collaborationRoom().id());
+        assertEquals(room.collaborationRoom().createdAt(), reopened.collaborationRoom().createdAt());
+        assertEquals(room.collaborationRoom().hostId(), reopened.collaborationRoom().hostId());
+        assertEquals(room.joinCode(), reopened.joinCode()); assertEquals(room.name(), reopened.name());
+        assertEquals(room.capacity(), reopened.capacity()); assertNotEquals(room.roomId(), reopened.roomId());
+        assertEquals(RoomStatus.READY, reopened.status()); assertFalse(reopened.locked()); assertTrue(reopened.participants().isEmpty());
+        assertEquals(pinHash, scalar("SELECT Ma_PIN_Bam FROM Phong_Hop")); assertNull(scalar("SELECT Ngay_Dong FROM Phong_Hop"));
+        assertEquals(1, count("Phong_Hop")); assertEquals(2, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NOT NULL"));
+        error("ROOM_NOT_STARTED", () -> join(2, "member-b", "join-member-00003", reopened));
+        error("WRONG_PIN", () -> service.lookup(principal(2), reopened.joinCode(), "9999"));
+        RoomJoinReply host = service.join(principal(1), "host-a", 1, "join-host-000002", reopened.roomId(),
+                reopened.joinCode(), "", false, false);
+        assertEquals(RoomRole.HOST, host.room().participants().getFirst().role());
+        join(2, "member-b", "join-member-00003", reopened);
+        assertEquals(4, count("Thanh_Vien_Phong")); assertEquals(2, service.participantCount());
+        error("CROSS_ROOM_FORBIDDEN", () -> service.assertMember("host-a", room.roomId()));
+    }
+
+    @Test
+    void reopenReceiptReplaysOneGenerationAndStaleJoinsAndCloseWritesAreFenced() throws Exception {
+        RoomSnapshot original = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", original);
+        service.leave("host-a", "TU_ROI");
+        RoomSnapshot reopened = service.reopen(principal(1), "reopen-room-00001", original.joinCode());
+        assertEquals(reopened, service.reopen(principal(1), "reopen-room-00001", original.joinCode()));
+        error("REQUEST_ID_REUSED", () -> service.reopen(principal(1), "reopen-room-00001", "999999"));
+        error("STALE_ROOM", () -> service.join(principal(2), "member-b", 1, "join-member-00002", original.roomId(),
+                original.joinCode(), "1234", false, false));
+        join(1, "host-a", "join-host-000002", reopened);
+        assertEquals(reopened.roomId(), service.reopen(principal(1), "reopen-room-00001", original.joinCode()).roomId());
+        error("STALE_ROOM", () -> service.join(principal(2), "member-b", 1, "join-member-00002", original.roomId(),
+                original.joinCode(), "1234", false, false));
+        repository.closeRoom(original.collaborationRoom().id(), original.roomId(), NOW, "PHONG_DONG");
+        assertEquals("DANG_HOAT_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        service.leave("host-a", "TU_ROI");
+        error("REQUEST_ALREADY_ENDED", () -> service.reopen(principal(1), "reopen-room-00001", original.joinCode()));
+        RoomSnapshot next = service.reopen(principal(1), "reopen-room-00002", original.joinCode());
+        assertNotEquals(reopened.roomId(), next.roomId()); assertEquals(original.joinCode(), next.joinCode());
+        error("REQUEST_ALREADY_ENDED", () -> service.reopen(principal(1), "reopen-room-00001", original.joinCode()));
+        assertEquals(1, count("Phong_Hop")); assertEquals(2, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NOT NULL"));
+    }
+
+    @Test
+    void concurrentReopenRequestsAdmitExactlyOneNewMeetingRun() throws Exception {
+        RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);
+        service.leave("host-a", "TU_ROI");
+        CountDownLatch ready = new CountDownLatch(2), start = new CountDownLatch(1);
+        try (var workers = Executors.newFixedThreadPool(2)) {
+            var first = workers.submit(() -> raceReopen("reopen-room-00001", room, ready, start));
+            var second = workers.submit(() -> raceReopen("reopen-room-00002", room, ready, start));
+            assertTrue(ready.await(3, TimeUnit.SECONDS)); start.countDown();
+            List<String> results = List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));
+            assertEquals(1, results.stream().filter("ROOM_ALREADY_ACTIVE"::equals).count());
+            assertEquals(1, results.stream().filter(value -> value.matches("r_[A-Za-z0-9_-]{22}")).count());
+        }
+        assertEquals(1, service.roomCount()); assertEquals(1, count("Phong_Hop"));
+        assertEquals(1, countWhere("MMR_Yeu_Cau_Phong", "Operation='REOPEN_ROOM'"));
+    }
+
+    @Test
+    void expiredRevokedAndInactiveSessionsCannotReopenAndFailedReceiptRollsBack() throws Exception {
+        RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);
+        service.leave("host-a", "TU_ROI");
+        error("SESSION_INVALID", () -> service.reopen(null, "reopen-room-00001", room.joinCode()));
+        var expired = new SessionPrincipal(1, 1, "User 1", NOW, hashFor(1));
+        error("SESSION_INVALID", () -> service.reopen(expired, "reopen-room-00001", room.joinCode()));
+        execute("UPDATE Phien_Dang_Nhap SET Thu_Hoi_Luc=CURRENT_TIMESTAMP WHERE Ma_Phien=1");
+        error("SESSION_INVALID", () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        execute("UPDATE Phien_Dang_Nhap SET Thu_Hoi_Luc=NULL WHERE Ma_Phien=1");
+        execute("UPDATE Nguoi_Dung SET Trang_Thai='VO_HIEU_HOA' WHERE Ma_Nguoi_Dung=1");
+        error("SESSION_INVALID", () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        execute("UPDATE Nguoi_Dung SET Trang_Thai='HOAT_DONG' WHERE Ma_Nguoi_Dung=1");
+        execute("ALTER TABLE MMR_Yeu_Cau_Phong ADD CONSTRAINT reject_reopen CHECK(Operation<>'REOPEN_ROOM')");
+        assertThrows(SQLException.class, () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        assertEquals("DA_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        assertEquals(room.roomId(), scalar("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh"));
+        assertEquals(0, service.roomCount()); assertEquals(2, count("MMR_Yeu_Cau_Phong"));
+    }
+
+    @Test
+    void failedCloseHistoryMustBeRepairedBeforeReopenOrReplay() throws Exception {
+        AtomicBoolean unavailable = new AtomicBoolean();
+        repository = new RoomRepository(() -> {
+            if (unavailable.get()) throw new SQLException("private-database-unavailable");
+            return DriverManager.getConnection(url);
+        });
+        service = newService("instance-b", events::add); service.start();
+        RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);
+        unavailable.set(true); service.leave("host-a", "TU_ROI"); unavailable.set(false);
+        error("HISTORY_UNAVAILABLE", () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        assertEquals(0, service.roomCount());
+        service.maintenanceTick(); RoomSnapshot reopened = service.reopen(principal(1), "reopen-room-00001", room.joinCode());
+        join(1, "host-a", "join-host-000002", reopened);
+        unavailable.set(true); service.leave("host-a", "TU_ROI"); unavailable.set(false);
+        error("HISTORY_UNAVAILABLE", () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        service.maintenanceTick();
+        error("REQUEST_ALREADY_ENDED", () -> service.reopen(principal(1), "reopen-room-00001", room.joinCode()));
+        assertEquals(0, service.roomCount()); assertEquals("DA_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+    }
+
+    @Test
+    void reconciledRoomReopensInNewEpochAndOldServerCleanupCannotCloseIt() throws Exception {
+        RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);
+        RoomService restarted = newService("instance-a", events::add); restarted.start();
+        RoomSnapshot reopened = restarted.reopen(principal(1), "reopen-room-00001", room.joinCode());
+        assertNotEquals(room.roomId(), reopened.roomId()); assertEquals(RoomStatus.READY, reopened.status());
+        assertEquals(restarted.serverEpoch(), scalar("SELECT Server_Epoch FROM MMR_Phong_Van_Hanh"));
+        service.close(); assertEquals("CHO", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        restarted.join(principal(1), "new-host", 1, "join-host-000002", reopened.roomId(), reopened.joinCode(), "", false, false);
+        assertEquals(1, restarted.participantCount()); assertEquals(2, count("Thanh_Vien_Phong"));
     }
 
     @Test
@@ -254,6 +396,11 @@ class RoomServiceTest {
     private String raceJoin(int user, RoomSnapshot room, CountDownLatch ready, CountDownLatch start) throws Exception {
         ready.countDown(); start.await();
         try { join(user, "member-" + user, "join-member-0000" + user, room); return "OK"; }
+        catch (RoomException failure) { return failure.code(); }
+    }
+    private String raceReopen(String request, RoomSnapshot room, CountDownLatch ready, CountDownLatch start) throws Exception {
+        ready.countDown(); start.await();
+        try { return service.reopen(principal(1), request, room.joinCode()).roomId(); }
         catch (RoomException failure) { return failure.code(); }
     }
     private RoomSnapshot create(int user, String request, int capacity, boolean locked) throws SQLException {

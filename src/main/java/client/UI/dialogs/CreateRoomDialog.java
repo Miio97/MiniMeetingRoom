@@ -22,7 +22,7 @@ public final class CreateRoomDialog extends Dialog<RoomInfo> {
         Label error = Ui.label("", "error-text"); error.setWrapText(true); error.setId("create-room-error");
         VBox content = Ui.column(16, Ui.field("Tên phòng", name), Ui.field("PIN", pin),
             Ui.field("Số người tối đa (bao gồm chủ phòng)", capacity),
-            Ui.label("Mã phòng và ID được máy chủ tạo tự động.", "caption"), error);
+            Ui.label("Mã phòng được máy chủ tạo tự động.", "caption"), error);
         content.setPrefWidth(400); getDialogPane().setContent(content);
         ButtonType create = new ButtonType("Tạo phòng", ButtonBar.ButtonData.OK_DONE);
         getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, create);

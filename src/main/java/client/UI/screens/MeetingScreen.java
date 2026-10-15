@@ -83,7 +83,7 @@ public final class MeetingScreen extends BorderPane {
         networkBadge = new NetworkBadge(this::networkStats);
         Button badge = networkBadge;
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
-        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label("ID " + manager.roomInfo().id() + " · " + manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, badge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
+        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, badge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
         participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand);
         Tab participants = new Tab("Thành viên", participantPanel);
         filePanel = new FilePanel(manager);

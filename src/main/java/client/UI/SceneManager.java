@@ -270,6 +270,14 @@ public final class SceneManager {
             case "ROOM_FULL" -> "Phòng đã đủ số người tham gia.";
             case "ROOM_LOCKED" -> "Phòng đang khóa.";
             case "ROOM_NOT_FOUND", "ROOM_NOT_ACTIVE" -> "Không tìm thấy phòng đang hoạt động.";
+            case "ROOM_CLOSED" -> "Phòng đã kết thúc. Chủ phòng có thể mở lại phòng.";
+            case "ROOM_ALREADY_ACTIVE" -> "Phòng đã được mở. Hãy làm mới danh sách và tham gia phòng.";
+            case "ROOM_NOT_STARTED" -> "Chủ phòng chưa vào phòng. Vui lòng thử lại sau.";
+            case "HOST_REQUIRED" -> "Chỉ chủ phòng mới được thực hiện thao tác này.";
+            case "HISTORY_UNAVAILABLE" -> "Máy chủ đang lưu trạng thái phòng. Vui lòng thử lại sau.";
+            case "REQUEST_ALREADY_ENDED" -> "Lượt mở hoặc tham gia phòng này đã kết thúc. Hãy làm mới danh sách và thử lại.";
+            case "REQUEST_EXPIRED" -> "Yêu cầu mở phòng đã hết hạn. Vui lòng thử lại.";
+            case "STALE_ROOM" -> "Phòng đã được mở lại. Hãy tham gia lại từ sảnh.";
             case "SESSION_INVALID" -> "Phiên đăng nhập không còn hợp lệ. Hãy đăng nhập lại.";
             case "ALREADY_JOINED", "ALREADY_IN_ROOM" -> "Tài khoản đã tham gia phòng trên kết nối khác.";
             case "INVALID_ROOM" -> "Tên phòng hoặc số người tối đa không hợp lệ.";
@@ -442,12 +450,39 @@ public final class SceneManager {
             } else failure.accept(error);
         });
     }
+    public void requestReopenRoom(long roomId, Consumer<RoomInfo> success, Consumer<Throwable> failure) {
+        if (closing || sessionToken == null) return;
+        if (roomJoined) { failure.accept(new IOException("Hãy rời phòng hiện tại trước khi mở lại phòng.")); return; }
+        String token = sessionToken;
+        Consumer<Throwable> rejected = error -> {
+            if (closing || !java.util.Objects.equals(token, sessionToken)) return;
+            Throwable cause = unwrap(error);
+            if (cause instanceof common.signaling.SignalException signal && "SESSION_INVALID".equals(signal.code())) {
+                sessionExpired(AuthResponse.error("SESSION_EXPIRED", "Phiên đăng nhập đã hết hạn.")); return;
+            }
+            failure.accept(cause);
+        };
+        Consumer<RoomInfo> reopened = room -> {
+            if (!closing && java.util.Objects.equals(token, sessionToken)) success.accept(room);
+        };
+        if (meetingFactory == null) { legacyRoomRequest(() -> authClient.reopenRoom(token, roomId), reopened, rejected); return; }
+        var session = sfuSession();
+        deliverMeetingRoom(session.reopen(Long.toString(roomId)).thenCompose(preview -> session.join(false, false)), reopened, error -> {
+            Throwable cause = unwrap(error);
+            if (cause instanceof common.signaling.SignalException signal && "ROOM_NOT_FOUND".equals(signal.code())) {
+                closeSfuSession();
+                legacyRoomRequest(() -> authClient.reopenRoom(token, roomId), reopened, rejected);
+            } else rejected.accept(cause);
+        });
+    }
     private void legacyRoomRequest(Callable<AuthResponse> request, Consumer<RoomInfo> success, Consumer<Throwable> failure) {
+        String ownerToken = sessionToken;
         runAuthRequest(request, response -> {
+            if (closing || !java.util.Objects.equals(ownerToken, sessionToken)) return;
             if (sessionExpired(response)) return;
             if (response.success() && response.room() != null) success.accept(response.room());
             else failure.accept(new IOException(response.message() == null ? "Yêu cầu phòng chưa hoàn tất." : response.message()));
-        }, failure);
+        }, error -> { if (!closing && java.util.Objects.equals(ownerToken, sessionToken)) failure.accept(error); });
     }
     private void deliverMeetingRoom(java.util.concurrent.CompletableFuture<common.meeting.RoomSnapshot> request,
             Consumer<RoomInfo> success, Consumer<Throwable> failure) {
@@ -505,7 +540,8 @@ public final class SceneManager {
             leaveRoom(() -> ended(seconds, count), this::roomError);
             return;
         }
-        show(new MeetingEndedScreen(this, seconds, count), 1100, 700, true, () -> { });
+        MeetingEndedScreen view = new MeetingEndedScreen(this, seconds, count);
+        show(view, 1100, 700, true, view::dispose);
     }
     /** Existing entry points use the same room authority as the visible forms. */
     public void createRoom(String name, String pin, int capacity, boolean locked) {

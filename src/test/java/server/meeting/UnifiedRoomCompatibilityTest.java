@@ -102,6 +102,40 @@ class UnifiedRoomCompatibilityTest {
         assertThrows(common.filetransfer.TransferException.class, () -> files.authorize(guest.user().id(), id));
         assertEquals(1, database.count("SELECT COUNT(*) FROM Phong_Hop"));
     }
+    @Test void transferredHostCanReopenWithFreshRightsAndPreservedChatHistory() throws Exception {
+        var owner = database.account("owner", "Owner"); var successor = database.account("successor", "Successor");
+        var a = session(owner); var b = session(successor);
+        a.create(new CreateRoomParams("Reopened unified room", "1234", 3, false)).get(10, TimeUnit.SECONDS);
+        a.join(false, false).get(10, TimeUnit.SECONDS);
+        var original = a.snapshot(); long id = original.collaborationRoom().id(); String code = original.joinCode();
+        b.lookup(code, "1234").get(10, TimeUnit.SECONDS); b.join(false, false).get(10, TimeUnit.SECONDS);
+        String oldTicket = b.selfParticipantId();
+        transport.chat(ChatRequest.send(owner.token(), id, a.selfParticipantId(), "before reopening"));
+        a.leave().get(10, TimeUnit.SECONDS); waitFor(b::isHost);
+        transport.meeting(command("ROOM_CLOSE", successor, b, 0));
+        waitFor(() -> b.snapshot() == null && rooms.participantCount() == 0);
+        var forbidden = assertThrows(ExecutionException.class, () -> a.reopen(code).get(10, TimeUnit.SECONDS));
+        assertEquals("HOST_REQUIRED", ((common.signaling.SignalException) forbidden.getCause()).code());
+        var preview = b.reopen(code).get(10, TimeUnit.SECONDS);
+        assertNotEquals(original.roomId(), preview.roomId()); assertEquals(code, preview.joinCode());
+        var files = new FileMetadataRepository(database::connection);
+        assertThrows(common.filetransfer.TransferException.class, () -> files.authorize(successor.user().id(), id));
+        b.join(false, false).get(10, TimeUnit.SECONDS);
+        assertTrue(b.isHost()); assertEquals(id, b.snapshot().collaborationRoom().id());
+        assertEquals(original.collaborationRoom().createdAt(), b.snapshot().collaborationRoom().createdAt());
+        assertNotEquals(oldTicket, b.selfParticipantId()); files.authorize(successor.user().id(), id);
+        assertThrows(common.chat.ChatException.class, () -> transport.chat(ChatRequest.send(successor.token(), id, oldTicket, "stale ticket")));
+        transport.chat(ChatRequest.send(successor.token(), id, b.selfParticipantId(), "after reopening"));
+        var history = new CopyOnWriteArrayList<ChatMessage>();
+        chats.add(transport.listenChat(ChatRequest.listen(successor.token(), id, b.selfParticipantId()), response -> history.addAll(response.messages()), error -> { }));
+        waitFor(() -> history.stream().anyMatch(message -> message.text().equals("before reopening"))
+                && history.stream().anyMatch(message -> message.text().equals("after reopening")));
+        var numericJoin = assertThrows(ExecutionException.class, () -> a.lookup(Long.toString(id), "1234").get(10, TimeUnit.SECONDS));
+        assertEquals("ROOM_NOT_FOUND", ((common.signaling.SignalException) numericJoin.getCause()).code());
+        a.lookup(code, "1234").get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);
+        assertFalse(a.isHost()); assertEquals(2, rooms.participantCount());
+        assertEquals(1, database.count("SELECT COUNT(*) FROM Phong_Hop"));
+    }
     @Test void explicitTransferKickAndAdmissionCancelRevokeRights() throws Exception {
         var host = database.account("host", "Host"); var guest = database.account("guest", "Guest"); var pending = database.account("waiter", "Waiter");
         var a = session(host); var b = session(guest); var c = session(pending);

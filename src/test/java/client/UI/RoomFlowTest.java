@@ -3,6 +3,7 @@ package client.UI;
 import client.UI.dialogs.CreateRoomDialog;
 import client.UI.screens.LobbyScreen;
 import client.UI.screens.MeetingScreen;
+import client.UI.screens.MeetingEndedScreen;
 import client.UI.screens.PreJoinScreen;
 import client.filetransfer.FileTransferClient;
 import common.auth.AuthResponse;
@@ -11,7 +12,12 @@ import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -33,8 +39,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import support.FxTestRuntime;
 import support.RoomTestFixture;
+import support.RoomUiAssertions;
 import server.filetransfer.FileMetadataRepository;
 import server.filetransfer.FileStorageService;
 import server.filetransfer.FileTransferServer;
@@ -136,6 +144,7 @@ class RoomFlowTest {
         FxTestRuntime.call(() -> {
             dialog = new CreateRoomDialog(manager);
             dialog.getDialogPane().applyCss(); dialog.getDialogPane().layout();
+            RoomUiAssertions.noRoomIds(dialog.getDialogPane(), 1);
             assertFalse(dialog.isShowing());
             TextField name = node(dialog.getDialogPane(), "room-name", TextField.class);
             TextField pin = node(dialog.getDialogPane(), "room-pin", TextField.class);
@@ -167,7 +176,7 @@ class RoomFlowTest {
         FxTestRuntime.call(() -> {
             assertEquals("", node(dialog.getDialogPane(), "room-pin", TextField.class).getText());
             manager.preJoin(created); assertTrue(root() instanceof PreJoinScreen);
-            assertTrue(hasLabel(root(), created.code())); assertTrue(hasLabel(root(), "ID " + created.id()));
+            assertTrue(hasLabel(root(), created.code())); RoomUiAssertions.noRoomIds(root(), created.id());
             assertTrue(manager.isRoomJoined()); assertEquals("", manager.room().pin()); return null;
         });
         snapshot("room-prejoin.png", root(), 1100, 700);
@@ -179,6 +188,7 @@ class RoomFlowTest {
         });
         FxTestRuntime.call(() -> {
             assertTrue(hasLabel(root(), "1/10 người")); assertFalse(hasLabel(root(), "UI DEMO"));
+            RoomUiAssertions.noRoomIds(root(), created.id());
             assertFalse(stage.isShowing()); return null;
         });
         snapshot("room-meeting.png", root(), 1280, 800);
@@ -192,6 +202,42 @@ class RoomFlowTest {
         FxTestRuntime.call(() -> { node(root(), "refresh-rooms", Button.class).fire(); return null; });
         FxTestRuntime.await(() -> !node(root(), "refresh-rooms", Button.class).isDisabled());
         assertEquals(requests + 1, actions.stream().filter("LIST_ROOMS"::equals).count());
+    }
+
+    @Test
+    @ResourceLock("jvm-default-time-zone")
+    void filePanelDisplaysVietnamTimeFromUtcMetadataRegardlessOfDefaultTimezone() throws Exception {
+        TimeZone original = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"));
+            RoomInfo room = fixture.client().createRoom(host.token(), "Phòng kiểm tra giờ tệp", "1234", 3).room();
+            FileMetadataRepository metadata = new FileMetadataRepository(fixture::connection,
+                    Clock.fixed(Instant.parse("2026-10-15T18:05:00Z"), ZoneOffset.UTC));
+            var file = metadata.complete(UUID.randomUUID(), host.user().id(), room.id(), "gio-viet-nam.txt",
+                    "text/plain", 12, "0".repeat(64), "timezone-test/file.bin");
+            assertEquals("2026-10-15T18:05:00Z", file.createdAt());
+            hiddenClient(host);
+            FxTestRuntime.call(() -> { manager.preJoin(room); manager.meeting(); return null; });
+            FxTestRuntime.await(() -> {
+                if (!(root() instanceof MeetingScreen)) return false;
+                TabPane tabs = nodes(root()).filter(TabPane.class::isInstance).map(TabPane.class::cast).findFirst().orElseThrow();
+                return hasLabel((Parent) tabs.getTabs().get(2).getContent(), "16/10 01:05");
+            });
+            FxTestRuntime.call(() -> {
+                TabPane tabs = nodes(root()).filter(TabPane.class::isInstance).map(TabPane.class::cast).findFirst().orElseThrow();
+                Parent files = (Parent) tabs.getTabs().get(2).getContent();
+                assertTrue(hasLabel(files, "gio-viet-nam.txt"));
+                assertTrue(hasLabel(files, "16/10 01:05"));
+                assertFalse(hasLabel(files, "2026-10-15T18:05:00Z"));
+                assertFalse(hasLabel(files, "15/10 11:05"));
+                RoomUiAssertions.noRoomIds(files, room.id());
+                assertFalse(stage.isShowing()); return null;
+            });
+        } finally {
+            try {
+                if (manager != null) FxTestRuntime.call(() -> { manager.shutdown(); stage.hide(); manager = null; return null; });
+            } finally { TimeZone.setDefault(original); }
+        }
     }
 
     @Test void blockedBackgroundListDoesNotDelayForegroundRoomAction() throws Exception {
@@ -210,14 +256,89 @@ class RoomFlowTest {
         blockedRequestRelease.countDown();
     }
 
+    @Test void hostReopensEndedRecentRoomAsynchronouslyWithSameCodeAndPin() throws Exception {
+        RoomInfo room = fixture.client().createRoom(host.token(), "Phòng mở lại", "7642", 3).room();
+        assertTrue(fixture.client().leaveRoom(host.token(), room.id()).success());
+        hiddenClient(host); blockedAction = "REOPEN_ROOM";
+        Parent oldLobby = FxTestRuntime.call(this::root);
+        FxTestRuntime.call(() -> {
+            Button reopen = node(root(), "room-action-" + room.id(), Button.class);
+            assertEquals("Mở lại phòng", reopen.getText()); assertFalse(reopen.isDisabled());
+            reopen.fire(); reopen.fire(); assertTrue(root().isDisabled()); return null;
+        });
+        assertTrue(blockedRequestReceived.await(5, TimeUnit.SECONDS));
+        FxTestRuntime.call(() -> { assertTrue(root() instanceof LobbyScreen); assertFalse(stage.isShowing()); return null; });
+        blockedRequestRelease.countDown();
+        FxTestRuntime.await(() -> root() instanceof PreJoinScreen);
+        FxTestRuntime.call(() -> {
+            assertEquals(room.id(), manager.roomInfo().id()); assertEquals(room.code(), manager.roomInfo().code());
+            assertEquals(1, manager.roomInfo().people()); assertTrue(manager.isRoomJoined());
+            assertEquals("", node(oldLobby, "join-room-pin", TextField.class).getText()); return null;
+        });
+        assertEquals(1, actions.stream().filter("REOPEN_ROOM"::equals).count());
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Phong_Hop"));
+        AuthResponse guest = fixture.account("ReopenGuest", "Khách mở lại");
+        assertFalse(fixture.client().joinRoom(guest.token(), room.code(), "9999").success());
+        assertTrue(fixture.client().joinRoom(guest.token(), room.code(), "7642").success());
+    }
+
+    @Test void guestCannotReopenEndedRoomAndHostSeesInlineFailureWhenAlreadyReopened() throws Exception {
+        RoomInfo room = fixture.client().createRoom(host.token(), "Phòng quyền chủ", "1234", 3).room();
+        AuthResponse guest = fixture.account("ClosedGuest", "Khách lịch sử");
+        assertTrue(fixture.client().joinRoom(guest.token(), room.code(), "1234").success());
+        assertTrue(fixture.client().leaveRoom(host.token(), room.id()).success());
+        assertTrue(fixture.client().leaveRoom(guest.token(), room.id()).success());
+        hiddenClient(guest);
+        FxTestRuntime.call(() -> {
+            Button action = node(root(), "room-action-" + room.id(), Button.class);
+            assertEquals("Đã đóng", action.getText()); assertTrue(action.isDisabled());
+            action.fire(); assertFalse(actions.contains("REOPEN_ROOM"));
+            manager.acceptSession(host); manager.lobby(); return null;
+        });
+        FxTestRuntime.await(() -> !node(root(), "refresh-rooms", Button.class).isDisabled());
+        assertTrue(fixture.client().reopenRoom(host.token(), room.id()).success());
+        FxTestRuntime.call(() -> { node(root(), "room-action-" + room.id(), Button.class).fire(); return null; });
+        FxTestRuntime.await(() -> !root().isDisabled() && !node(root(), "rooms-status", Label.class).getText().equals("Đang mở lại phòng…"));
+        FxTestRuntime.call(() -> {
+            assertTrue(root() instanceof LobbyScreen); assertFalse(manager.isRoomJoined());
+            assertFalse(node(root(), "rooms-status", Label.class).getText().isBlank()); return null;
+        });
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+    }
+
+    @Test void hostCanReopenDirectlyFromMeetingEndedScreen() throws Exception {
+        RoomInfo room = fixture.client().createRoom(host.token(), "Kết thúc rồi mở", "1234", 3).room();
+        hiddenClient(host);
+        FxTestRuntime.call(() -> { manager.preJoin(room); manager.ended(42, 1); return null; });
+        FxTestRuntime.await(() -> root() instanceof MeetingEndedScreen);
+        FxTestRuntime.call(() -> {
+            RoomUiAssertions.noRoomIds(root(), room.id());
+            Button reopen = node(root(), "reopen-room-submit", Button.class);
+            assertEquals("Mở lại phòng", reopen.getText()); reopen.fire(); return null;
+        });
+        FxTestRuntime.await(() -> root() instanceof PreJoinScreen);
+        FxTestRuntime.call(() -> { assertEquals(room.id(), manager.roomInfo().id()); assertTrue(manager.isRoomJoined()); return null; });
+    }
+
     @Test
-    void lobbyRejectsWrongPinJoinsRealRoomByIdAndBackButtonRemovesMembership() throws Exception {
+    void lobbyRejectsNumericIdLocallyAndWrongPinThenJoinsByCodeAndBackRemovesMembership() throws Exception {
         RoomInfo room = fixture.client().createRoom(host.token(), "Họp hai máy", "7642", 10).room();
         AuthResponse guest = fixture.account("GuestUser", "Khách tham gia");
         hiddenClient(guest);
+        long joinsBefore = actions.stream().filter("JOIN_ROOM"::equals).count();
+        FxTestRuntime.call(() -> {
+            TextField identifier = node(root(), "join-room-identifier", TextField.class);
+            identifier.setText(Long.toString(room.id()));
+            node(root(), "join-room-pin", TextField.class).setText("7642");
+            node(root(), "join-room-submit", Button.class).fire();
+            assertFalse(root().isDisabled());
+            assertFalse(node(root(), "join-room-error", Label.class).getText().isBlank());
+            assertEquals(joinsBefore, actions.stream().filter("JOIN_ROOM"::equals).count());
+            identifier.setText(room.code()); RoomUiAssertions.noRoomIds(root(), room.id()); return null;
+        });
         blockedAction = "JOIN_ROOM";
         FxTestRuntime.call(() -> {
-            node(root(), "join-room-identifier", TextField.class).setText(Long.toString(room.id()));
+            node(root(), "join-room-identifier", TextField.class).setText(room.code());
             node(root(), "join-room-pin", TextField.class).setText("9999");
             node(root(), "join-room-submit", Button.class).fire();
             assertTrue(root().isDisabled()); return null;
@@ -237,6 +358,7 @@ class RoomFlowTest {
         FxTestRuntime.await(() -> root() instanceof PreJoinScreen);
         FxTestRuntime.call(() -> {
             assertEquals(room.id(), manager.roomInfo().id()); assertEquals(2, manager.roomInfo().people());
+            RoomUiAssertions.noRoomIds(root(), room.id());
             assertEquals("", node(oldLobby, "join-room-pin", TextField.class).getText());
             assertTrue(manager.isRoomJoined()); assertFalse(stage.isShowing()); return null;
         });
@@ -247,6 +369,7 @@ class RoomFlowTest {
         FxTestRuntime.await(() -> !node(root(), "refresh-rooms", Button.class).isDisabled());
         FxTestRuntime.call(() -> {
             assertTrue(hasLabel(root(), room.name())); assertTrue(hasLabel(root(), room.code()));
+            RoomUiAssertions.noRoomIds(root(), room.id());
             assertFalse(stage.isShowing()); return null;
         });
     }

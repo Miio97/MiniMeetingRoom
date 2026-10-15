@@ -32,13 +32,18 @@ public final class MeetingHandler implements SignalingServer.Handler {
                     var room = rooms.create(connection.principal(), request.requestId(), params);
                     response.add("room", JSON.toJsonTree(room)); type = "ROOM_CREATED";
                 }
+                case "REOPEN_ROOM" -> {
+                    var room = rooms.reopen(connection.principal(), request.requestId(), text(body, "joinCode", 20));
+                    response.add("room", JSON.toJsonTree(room)); type = "ROOM_REOPENED";
+                }
                 case "LOOKUP_ROOM" -> {
-                    var preview = rooms.lookup(connection.principal(), text(body, "joinCode", 20), text(body, "pin", 6));
+                    var preview = rooms.lookup(connection.principal(), text(body, "joinCode", 64), text(body, "pin", 6));
                     response.add("preview", JSON.toJsonTree(preview)); type = "ROOM_PREVIEW";
                 }
                 case "JOIN_ROOM" -> {
+                    if (request.roomId() == null) throw new SignalException("INVALID_REQUEST");
                     var joined = rooms.join(connection.principal(), connection.id(), connection.generation(), request.requestId(),
-                            text(body, "joinCode", 20), text(body, "pin", 6), bool(body, "mic", false), bool(body, "camera", false));
+                            request.roomId(), text(body, "joinCode", 64), text(body, "pin", 6), bool(body, "mic", false), bool(body, "camera", false));
                     response.add("join", JSON.toJsonTree(joined)); type = "ROOM_JOINED";
                 }
                 case "GET_ROOM" -> {

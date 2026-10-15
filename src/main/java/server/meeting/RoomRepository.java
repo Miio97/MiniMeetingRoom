@@ -103,6 +103,59 @@ public final class RoomRepository {
         });
     }
 
+    /** A new opaque ID separates each meeting run while retaining the public room and its history. */
+    CreateResult reopen(SessionPrincipal principal, String requestId, byte[] bodyHash, String instance,
+            String epoch, String roomId, String identifier, boolean admissionAllowed,
+            java.util.function.LongPredicate historyReady, Instant now) throws SQLException {
+        return transaction(connection -> {
+            lockSession(connection, principal, now);
+            Receipt receipt = receipt(connection, principal, requestId, "REOPEN_ROOM", bodyHash, now);
+            if (receipt != null) {
+                StoredRoom previous = loadRoom(connection, receipt.roomId());
+                if (previous != null && !historyReady.test(previous.id())) throw new RoomException("HISTORY_UNAVAILABLE");
+                if (previous == null || !instance.equals(previous.instanceId())
+                        || !epoch.equals(previous.epoch()) || previous.status() == RoomStatus.CLOSED
+                        || !previous.roomId().equals(receipt.participantId())) throw new RoomException("REQUEST_ALREADY_ENDED");
+                if (previous.hostId() != principal.userId()) throw new RoomException("HOST_REQUIRED");
+                return new CreateResult(previous, true);
+            }
+            StoredRoom previous;
+            String selector = identifier.matches("[0-9]{1,19}") ? "r.Ma_Phong=?" : "r.Ma_Phong_Tham_Gia=?";
+            try (PreparedStatement statement = connection.prepareStatement(
+                    ROOM_SELECT + "WHERE x.Instance_ID=? AND " + selector + " FOR UPDATE")) {
+                statement.setString(1, instance);
+                if (identifier.matches("[0-9]{1,19}")) {
+                    try { statement.setLong(2, Long.parseLong(identifier)); }
+                    catch (NumberFormatException invalid) { throw new RoomException("ROOM_NOT_FOUND"); }
+                } else statement.setString(2, identifier);
+                try (ResultSet rows = statement.executeQuery()) { previous = rows.next() ? room(rows) : null; }
+            }
+            if (previous == null) throw new RoomException("ROOM_NOT_FOUND");
+            if (previous.hostId() != principal.userId()) throw new RoomException("HOST_REQUIRED");
+            if (!historyReady.test(previous.id())) throw new RoomException("HISTORY_UNAVAILABLE");
+            if (previous.status() != RoomStatus.CLOSED) throw new RoomException("ROOM_ALREADY_ACTIVE");
+            if (!admissionAllowed) throw new RoomException("SERVER_CAPACITY");
+            // End any stale history row defensively; a reopen never resurrects old membership.
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc=?, Ly_Do_Roi='PHONG_DONG' WHERE Ma_Phong=? AND Roi_Phong_Luc IS NULL")) {
+                timestamp(statement, 1, now); statement.setLong(2, previous.id()); statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE Phong_Hop SET Trang_Thai='CHO', Da_Khoa=FALSE, Ngay_Dong=NULL WHERE Ma_Phong=?")) {
+                statement.setLong(1, previous.id()); statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE MMR_Phong_Van_Hanh SET Room_Opaque_ID=?, Server_Epoch=? WHERE Ma_Phong=?")) {
+                statement.setString(1, roomId); statement.setString(2, epoch); statement.setLong(3, previous.id()); statement.executeUpdate();
+            }
+            // This column is unused by reopen receipts and can retain the precise generation without a schema change.
+            completeReceipt(connection, principal, requestId, "REOPEN_ROOM", bodyHash, previous.id(), null, roomId, now);
+            return new CreateResult(new StoredRoom(previous.id(), roomId, previous.joinCode(), previous.name(),
+                    previous.pinHash(), previous.hostId(), RoomStatus.READY, false, previous.capacity(),
+                    instance, epoch, previous.createdAt()), false);
+        });
+    }
+
     JoinResult join(SessionPrincipal principal, String requestId, byte[] bodyHash, long roomId,
             String participantId, String instanceId, String epoch, Instant now) throws SQLException {
         return transaction(connection -> {
@@ -157,8 +210,12 @@ public final class RoomRepository {
         });
     }
 
-    void closeRoom(long roomId, Instant now, String reason) throws SQLException {
-        transaction(connection -> { loadRoomForUpdate(connection, roomId); closeRoom(connection, roomId, now, reason); return null; });
+    void closeRoom(long roomId, String expectedOpaqueId, Instant now, String reason) throws SQLException {
+        transaction(connection -> {
+            StoredRoom room = loadRoomForUpdate(connection, roomId);
+            if (room != null && room.roomId().equals(expectedOpaqueId)) closeRoom(connection, roomId, now, reason);
+            return null;
+        });
     }
 
     void setLocked(long roomId, boolean locked) throws SQLException {

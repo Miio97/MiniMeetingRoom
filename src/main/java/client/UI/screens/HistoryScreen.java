@@ -1,12 +1,16 @@
 package client.UI.screens;
 
 import client.UI.SceneManager;
+import client.UI.VietnamTime;
 import client.UI.components.*;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
-import java.time.*;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.TemporalAdjusters;
 import java.util.*;
@@ -20,7 +24,7 @@ public final class HistoryScreen extends BorderPane {
         ComboBox<String> filter = Ui.devices(List.of("Tất cả", "Tuần này", "Tháng này")); filter.setMinWidth(150);
         main.getChildren().addAll(Ui.label("Lịch sử cuộc họp", "title"), Ui.label("Nhìn lại các cuộc trò chuyện và ý tưởng đã chia sẻ.", "muted"), Ui.row(12, search, filter));
         VBox list = new VBox(12); main.getChildren().add(list);
-        LocalDate today = LocalDate.now(ZoneId.of("Asia/Ho_Chi_Minh"));
+        LocalDate today = VietnamTime.today();
         String[] names = {"Design sync · Nhóm sản phẩm", "Cà phê & ý tưởng", "Sprint planning", "Nhóm học Java", "Review giao diện", "Chia sẻ kiến thức", "Weekly team sync", "Lên kế hoạch dự án", "Demo sản phẩm"};
         List<Meeting> meetings = new ArrayList<>();
         int[] offsets = {0, 1, 2, 3, 6, 9, 15, 25, 38};

@@ -20,7 +20,7 @@ public final class PreJoinScreen extends BorderPane {
     public void requireCameraPermission() { if (entryError != null) entryError.setText("Bạn cần cho phép camera để vào phòng họp."); }
     public PreJoinScreen(SceneManager manager) {
         setPadding(new Insets(32));
-        setTop(Ui.column(8, Ui.label("TRƯỚC KHI VÀO PHÒNG", "eyebrow"), Ui.label("Bạn đã sẵn sàng?", "title"), Ui.label(manager.room().name() + "  ·  ID " + manager.roomInfo().id() + "  ·  " + manager.room().code(), "muted")));
+        setTop(Ui.column(8, Ui.label("TRƯỚC KHI VÀO PHÒNG", "eyebrow"), Ui.label("Bạn đã sẵn sàng?", "title"), Ui.label(manager.room().name() + "  ·  " + manager.room().code(), "muted")));
         if (manager.hasVideoRoom()) { meter = new Timeline(); buildVideoPreview(manager); return; }
         StackPane preview = new StackPane(); preview.getStyleClass().add("preview"); preview.setMinHeight(300);
         Label state = Ui.label("Camera xem trước · mô phỏng", "preview-caption"); StackPane.setAlignment(state, Pos.BOTTOM_CENTER); StackPane.setMargin(state, new Insets(24));

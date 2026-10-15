@@ -4,6 +4,7 @@ import client.UI.SceneManager;
 import client.auth.ChatConnection;
 import common.chat.*;
 import javafx.animation.PauseTransition;
+import client.UI.VietnamTime;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -11,8 +12,6 @@ import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.util.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.TreeMap;
 
@@ -86,7 +85,7 @@ public final class ChatPanel extends BorderPane {
     }
     private VBox entry(ChatMessage message) {
         boolean mine = message.userId() == userId;
-        String time = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()).format(Instant.parse(message.sentAt()));
+        String time = VietnamTime.formatTime(Instant.parse(message.sentAt()));
         Label bubble = Ui.label(message.text(), "bubble"); bubble.getStyleClass().add(mine ? "bubble-mine" : "bubble-other"); bubble.setMaxWidth(248);
         bubble.setUserData(message.id());
         VBox entry = Ui.column(6, Ui.label((mine ? "Bạn" : message.name()) + "  ·  " + time, "caption"), bubble);

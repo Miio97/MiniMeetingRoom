@@ -59,7 +59,7 @@ public final class MeetingSession implements AutoCloseable {
     private volatile String pin = "";
     private volatile long joinedAt;
     private State currentState = State.READY;
-    private Intent createIntent, joinIntent;
+    private Intent createIntent, reopenIntent, joinIntent;
 
     public MeetingSession(String token, Instant expiresAt) {
         this(token, expiresAt, SignalingClient::new);
@@ -103,6 +103,24 @@ public final class MeetingSession implements AutoCloseable {
             prepare(found, suppliedPin); return found;
         });
     }
+    public CompletableFuture<RoomPreview> reopen(String identifier) {
+        return submit(() -> {
+            JsonObject body = new JsonObject(); body.addProperty("joinCode", identifier);
+            if (reopenIntent == null || !reopenIntent.body().equals(body)) reopenIntent = new Intent(UUID.randomUUID().toString(), body.deepCopy());
+            RoomSnapshot reopened;
+            try { reopened = decode(command("REOPEN_ROOM", null, body, reopenIntent.id()), "room", RoomSnapshot.class); }
+            catch (Exception failure) {
+                if (failure instanceof SignalException signal && java.util.Set.of("REQUEST_ALREADY_ENDED", "REQUEST_EXPIRED").contains(signal.code())) {
+                    reopenIntent = null; joinIntent = null;
+                }
+                throw failure;
+            }
+            if (preview == null || !Objects.equals(preview.roomId(), reopened.roomId())) joinIntent = null;
+            preview = new RoomPreview(reopened.roomId(), reopened.joinCode(), reopened.name(), reopened.status(), reopened.locked(), reopened.capacity(), reopened.participants().size());
+            // Keep the request ID until JOIN succeeds, so a failed connection can retry the same reopening.
+            pin = ""; return preview;
+        });
+    }
     public CompletableFuture<RoomSnapshot> join(boolean mic, boolean camera) {
         CompletableFuture<RoomSnapshot> attempt = submit(() -> {
             RoomPreview target = Objects.requireNonNull(preview, "ROOM_REQUIRED");
@@ -115,7 +133,7 @@ public final class MeetingSession implements AutoCloseable {
                 if (failure instanceof SignalException signal && "REQUEST_ALREADY_ENDED".equals(signal.code())) joinIntent = null;
                 throw failure;
             }
-            self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null;
+            self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null; reopenIntent = null;
             pin = "";
             publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
         });
@@ -164,7 +182,7 @@ public final class MeetingSession implements AutoCloseable {
         closeVideo();
         return submit(() -> {
             try { if (snapshot != null) command("LEAVE_ROOM", snapshot.roomId(), new JsonObject(), UUID.randomUUID().toString()); }
-            finally { snapshot = null; self = null; pin = ""; joinIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); }
+            finally { snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); }
             return null;
         });
     }
@@ -206,7 +224,14 @@ public final class MeetingSession implements AutoCloseable {
         String expectedRoom = active != null ? active.roomId() : preview == null ? null : preview.roomId();
         if (!Objects.equals(expectedRoom, message.roomId())) return;
         if ("ROOM_CLOSED".equals(message.type()) || "ROOM_LEFT".equals(message.type())) {
-            submit(() -> { if (currentConnection(message)) { closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); } return null; }); return;
+            submit(() -> {
+                RoomSnapshot current = snapshot;
+                String currentRoom = current != null ? current.roomId() : preview == null ? null : preview.roomId();
+                if (currentConnection(message) && Objects.equals(currentRoom, message.roomId())) {
+                    closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng.");
+                }
+                return null;
+            }); return;
         }
         if (active != null && message.revision() != null && message.revision() <= active.revision()) return;
         if (message.body().has("room")) {
@@ -288,7 +313,7 @@ public final class MeetingSession implements AutoCloseable {
     }
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        closeVideo(); closeTransport(); worker.shutdownNow(); snapshot = null; self = null; pin = ""; createIntent = null; joinIntent = null;
+        closeVideo(); closeTransport(); worker.shutdownNow(); snapshot = null; self = null; pin = ""; createIntent = null; reopenIntent = null; joinIntent = null;
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
         publish(State.CLOSED, "Session đã đóng.");
     }

@@ -139,13 +139,15 @@ public class VideoCallIntegrationTest {
                     var room = FxTestRuntime.call(() -> {
                         var result = createdDialog.getResult(); managers.get(0).preJoin(result);
                         assertTrue(stages.get(0).getScene().getRoot() instanceof client.UI.screens.PreJoinScreen);
+                        RoomUiAssertions.noRoomIds(stages.get(0).getScene().getRoot(), result.id());
                         assertTrue(managers.get(0).hasVideoRoom()); return result;
                     });
                     assertEquals(1, fixture.database.count("SELECT COUNT(*) FROM Phong_Hop"));
                     assertEquals(1, fixture.database.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
                     FxTestRuntime.call(() -> {
                         var lobby = stages.get(1).getScene().getRoot();
-                        find(lobby, "join-room-identifier", javafx.scene.control.TextField.class).setText(Long.toString(room.id()));
+                        RoomUiAssertions.noRoomIds(lobby, room.id());
+                        find(lobby, "join-room-identifier", javafx.scene.control.TextField.class).setText(room.code());
                         find(lobby, "join-room-pin", javafx.scene.control.TextField.class).setText("9999");
                         find(lobby, "join-room-submit", javafx.scene.control.Button.class).fire(); return null;
                     });
@@ -200,7 +202,8 @@ public class VideoCallIntegrationTest {
                     assertTrue(beforeMeeting.getAsJsonObject("sources").isEmpty(), "Pre-join camera must stay private until Enter Meeting");
                     FxTestRuntime.call(() -> {
                         for (var stage : stages) find(stage.getScene().getRoot(), "enter-meeting", javafx.scene.control.Button.class).fire();
-                        assertTrue(stages.stream().allMatch(stage -> stage.getScene().getRoot() instanceof client.UI.screens.MeetingScreen)); return null;
+                        assertTrue(stages.stream().allMatch(stage -> stage.getScene().getRoot() instanceof client.UI.screens.MeetingScreen));
+                        stages.forEach(stage -> RoomUiAssertions.noRoomIds(stage.getScene().getRoot(), room.id())); return null;
                     });
                     String hostId = hostSession.selfParticipantId(), guestId = guestSession.selfParticipantId();
                     FxTestRuntime.await(() -> hostMedia.frames(guestId).receivedFrames() >= 3 && guestMedia.frames(hostId).receivedFrames() >= 3);
@@ -293,8 +296,25 @@ public class VideoCallIntegrationTest {
                     });
                     guestMedia.closeComplete().get(10, TimeUnit.SECONDS);
                     FxTestRuntime.await(() -> stages.get(1).getScene().getRoot() instanceof client.UI.screens.MeetingEndedScreen && !managers.get(1).isRoomJoined());
+                    FxTestRuntime.call(() -> { RoomUiAssertions.noRoomIds(stages.get(1).getScene().getRoot(), room.id()); return null; });
                     FxTestRuntime.await(() -> hostSession.participants().size() == 1);
                     assertTrue(FxTestRuntime.call(() -> hostMedia.publishingProperty().get()));
+                    assertThrows(java.io.IOException.class, () -> guestFiles.listFiles(guest.token(), room.id(), 0));
+                    FxTestRuntime.call(() -> {
+                        assertEquals("Vào lại phòng", find(stages.get(1).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).getText());
+                        find(stages.get(0).getScene().getRoot(), "leave-meeting", javafx.scene.control.Button.class).fire(); return null;
+                    });
+                    hostMedia.closeComplete().get(10, TimeUnit.SECONDS);
+                    FxTestRuntime.await(() -> stages.get(0).getScene().getRoot() instanceof client.UI.screens.MeetingEndedScreen
+                            && find(stages.get(0).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).getText().equals("Mở lại phòng"));
+                    FxTestRuntime.call(() -> { find(stages.get(0).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).fire(); return null; });
+                    FxTestRuntime.await(() -> stages.get(0).getScene().getRoot() instanceof client.UI.screens.PreJoinScreen);
+                    FxTestRuntime.call(() -> {
+                        assertEquals(room.id(), managers.get(0).serverRoom().id()); assertEquals(room.code(), managers.get(0).serverRoom().code());
+                        RoomUiAssertions.noRoomIds(stages.get(0).getScene().getRoot(), room.id()); return null;
+                    });
+                    assertEquals(1, fixture.database.count("SELECT COUNT(*) FROM Phong_Hop"));
+                    assertEquals(1, fixture.database.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
                     assertThrows(java.io.IOException.class, () -> guestFiles.listFiles(guest.token(), room.id(), 0));
                 } finally {
                     var closingDialog = dialog;

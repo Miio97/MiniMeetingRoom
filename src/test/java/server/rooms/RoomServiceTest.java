@@ -145,10 +145,16 @@ class RoomServiceTest {
     }
 
     @Test
-    void joinByNumericIdAndCaseInsensitiveCodeReturnsAllParticipants() throws Exception {
+    void joinRejectsNumericIdWithoutWritingAndCaseInsensitiveCodeReturnsAllParticipants() throws Exception {
         RoomInfo room = create(host, "Họp nhóm", 10).room();
         AuthResponse byId = join(guest, " " + room.id() + " ", PIN);
-        assertTrue(byId.success());
+        assertFalse(byId.success());
+        assertEquals("VALIDATION_ERROR", byId.code());
+        assertNull(byId.room());
+        assertFalse(byId.message().contains("ID"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        assertTrue(join(guest, room.code(), PIN).success());
         AuthResponse byCode = join(other, "  " + room.code().toLowerCase() + "  ", PIN);
         assertTrue(byCode.success());
         assertEquals(3, byCode.room().people());
@@ -163,7 +169,8 @@ class RoomServiceTest {
         RoomInfo room = create(host, "Small", 2).room();
         assertTrue(join(guest, room.code(), PIN).success());
         assertEquals("INVALID_ROOM_PIN", join(guest, room.code(), "9999").code());
-        assertTrue(join(guest, Long.toString(room.id()), PIN).success());
+        assertEquals("VALIDATION_ERROR", join(guest, Long.toString(room.id()), PIN).code());
+        assertTrue(join(guest, room.code(), PIN).success());
         assertTrue(join(host, room.code(), PIN).success());
         assertEquals(2, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
         assertEquals("ROOM_FULL", join(other, room.code(), PIN).code());
@@ -173,7 +180,7 @@ class RoomServiceTest {
     void joinRejectsMissingWrongPinLockedClosedAndClosedTimestampWithoutWriting() throws Exception {
         RoomInfo room = create(host, "Checks", 10).room();
         assertEquals("ROOM_NOT_FOUND", join(guest, "MMR-FFFFFFFF", PIN).code());
-        assertEquals("ROOM_NOT_FOUND", join(guest, "999999999", PIN).code());
+        assertEquals("VALIDATION_ERROR", join(guest, "999999999", PIN).code());
         assertEquals("VALIDATION_ERROR", join(guest, "' OR '1'='1", PIN).code());
         assertEquals("INVALID_ROOM_PIN", join(guest, room.code(), "9999").code());
         execute("UPDATE Phong_Hop SET Da_Khoa = TRUE");
@@ -322,6 +329,112 @@ class RoomServiceTest {
     }
 
     @Test
+    void hostReopensSameRoomPreservingPinMetadataAndAttendanceHistory() throws Exception {
+        RoomInfo original = create(host, "Mở lại họp nhóm", 3).room();
+        assertTrue(join(guest, original.code(), PIN).success());
+        assertTrue(action("LEAVE_ROOM", guest, original.code()).success());
+        assertTrue(action("LEAVE_ROOM", host, original.code()).success());
+        execute("UPDATE Phong_Hop SET Da_Khoa = TRUE");
+        String hash = textValue("SELECT Ma_PIN_Bam FROM Phong_Hop");
+
+        AuthResponse reopened = action("REOPEN_ROOM", host, Long.toString(original.id()));
+        assertTrue(reopened.success(), reopened::message);
+        RoomInfo room = reopened.room();
+        assertEquals(original.id(), room.id());
+        assertEquals(original.code(), room.code());
+        assertEquals(original.name(), room.name());
+        assertEquals(original.hostId(), room.hostId());
+        assertEquals(original.createdAt(), room.createdAt());
+        assertEquals(original.capacity(), room.capacity());
+        assertEquals("DANG_HOAT_DONG", room.status());
+        assertFalse(room.locked());
+        assertNull(timestamp("SELECT Ngay_Dong FROM Phong_Hop"));
+        assertEquals(hash, textValue("SELECT Ma_PIN_Bam FROM Phong_Hop"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Phong_Hop"));
+        assertEquals(1, room.people());
+        assertEquals(host.userId(), room.participants().getFirst().userId());
+        assertEquals("CHU_PHONG", room.participants().getFirst().role());
+        assertEquals(2, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL AND Ly_Do_Roi = 'TU_ROI'"));
+        assertEquals(3, count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        assertEquals("ROOM_ACCESS_DENIED", action("GET_ROOM", guest, original.code()).code());
+        assertEquals("INVALID_ROOM_PIN", join(guest, room.code(), "9999").code());
+        assertTrue(join(guest, room.code(), PIN).success());
+        assertEquals(2, action("GET_ROOM", host, original.code()).room().people());
+    }
+
+    @Test
+    void reopeningRejectsNonHostMissingAndAlreadyActiveRoomsWithoutChangingMemberships() throws Exception {
+        RoomInfo room = create(host, "Quyền mở lại", 10).room();
+        assertEquals("ROOM_ALREADY_ACTIVE", action("REOPEN_ROOM", host, room.code()).code());
+        assertTrue(join(guest, room.code(), PIN).success());
+        assertTrue(action("LEAVE_ROOM", guest, room.code()).success());
+        assertTrue(action("LEAVE_ROOM", host, room.code()).success());
+        assertEquals("ROOM_ACCESS_DENIED", action("REOPEN_ROOM", guest, room.code()).code());
+        assertEquals("ROOM_ACCESS_DENIED", action("REOPEN_ROOM", other, room.code()).code());
+        assertEquals("ROOM_NOT_FOUND", action("REOPEN_ROOM", host, "999999999").code());
+        assertEquals("DA_DONG", textValue("SELECT Trang_Thai FROM Phong_Hop"));
+        assertEquals(0, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        assertEquals(2, count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+    }
+
+    @Test
+    void reopeningEndsStaleMembershipsWithoutRevivingFormerGuests() throws Exception {
+        RoomInfo room = create(host, "Lịch sử cũ", 10).room();
+        assertTrue(join(guest, room.code(), PIN).success());
+        execute("UPDATE Phong_Hop SET Trang_Thai = 'DA_DONG', Ngay_Dong = TIMESTAMP '2026-10-14 10:00:00'");
+        AuthResponse reopened = action("REOPEN_ROOM", host, room.code());
+        assertTrue(reopened.success());
+        assertEquals(1, reopened.room().people());
+        assertEquals(2, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL AND Ly_Do_Roi = 'PHONG_DONG'"));
+        assertEquals("ROOM_ACCESS_DENIED", action("GET_ROOM", guest, room.code()).code());
+    }
+
+    @Test
+    void concurrentReopenCreatesOnlyOneFreshHostMembership() throws Exception {
+        RoomInfo room = create(host, "Mở lại đồng thời", 10).room();
+        assertTrue(action("LEAVE_ROOM", host, room.code()).success());
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            CountDownLatch start = new CountDownLatch(1);
+            var first = executor.submit(() -> { start.await(); return action("REOPEN_ROOM", host, room.code()); });
+            var second = executor.submit(() -> { start.await(); return action("REOPEN_ROOM", host, room.code()); });
+            start.countDown();
+            AuthResponse one = first.get(15, TimeUnit.SECONDS);
+            AuthResponse two = second.get(15, TimeUnit.SECONDS);
+            assertNotEquals(one.success(), two.success());
+            assertEquals("ROOM_ALREADY_ACTIVE", one.success() ? two.code() : one.code());
+            assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+            assertEquals(2, count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        }
+    }
+
+    @Test
+    void reopeningRollsBackStatusAndHistoryWhenFreshHostMembershipFails() throws Exception {
+        RoomInfo room = create(host, "Mở lại nguyên tử", 10).room();
+        assertTrue(action("LEAVE_ROOM", host, room.code()).success());
+        execute("ALTER TABLE Thanh_Vien_Phong ADD CONSTRAINT deny_fresh_host CHECK (Vai_Tro <> 'CHU_PHONG' OR Roi_Phong_Luc IS NOT NULL)");
+        assertThrows(SQLException.class, () -> action("REOPEN_ROOM", host, room.code()));
+        assertEquals("DA_DONG", textValue("SELECT Trang_Thai FROM Phong_Hop"));
+        assertEquals(NOW, timestamp("SELECT Ngay_Dong FROM Phong_Hop"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        assertEquals(0, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+    }
+
+    @Test
+    void legacyReopenCannotMutateSignalingOwnedRoom() throws Exception {
+        RoomInfo room = create(host, "Phòng signaling", 10).room();
+        assertTrue(action("LEAVE_ROOM", host, room.code()).success());
+        execute("CREATE TABLE MMR_Phong_Van_Hanh (Ma_Phong BIGINT PRIMARY KEY REFERENCES Phong_Hop(Ma_Phong))");
+        execute("INSERT INTO MMR_Phong_Van_Hanh VALUES (" + room.id() + ")");
+        RoomService guarded = new RoomService(() -> DriverManager.getConnection(url), new PasswordHasher(),
+                Clock.fixed(NOW, ZoneOffset.UTC), true);
+        AuthResponse response = guarded.handle(request("REOPEN_ROOM", host.token(),
+                new RoomRequest(null, null, Long.toString(room.id()), 0)));
+        assertEquals("ROOM_NOT_FOUND", response.code());
+        assertEquals("DA_DONG", textValue("SELECT Trang_Thai FROM Phong_Hop"));
+        assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+    }
+
+    @Test
     void unrelatedLeaveCannotCloseAnEmptyWaitingRoom() throws Exception {
         RoomInfo room = create(host, "Waiting", 10).room();
         execute("DELETE FROM Thanh_Vien_Phong");
@@ -358,10 +471,15 @@ class RoomServiceTest {
                 new RoomRequest(null, PIN, " ", 0))).code());
         assertEquals("VALIDATION_ERROR", disconnected.handle(request("JOIN_ROOM", host.token(),
                 new RoomRequest(null, "bad", "1", 0))).code());
+        assertEquals("VALIDATION_ERROR", disconnected.handle(request("JOIN_ROOM", host.token(),
+                new RoomRequest(null, PIN, "1", 0))).code());
+        assertEquals("VALIDATION_ERROR", disconnected.handle(request("REOPEN_ROOM", host.token(), null)).code());
+        assertEquals("VALIDATION_ERROR", disconnected.handle(request("REOPEN_ROOM", host.token(),
+                new RoomRequest(null, null, "' OR '1'='1", 0))).code());
     }
 
     private void assertAllActionsRejectSession(String token, String identifier) throws SQLException {
-        for (String action : List.of("CREATE_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM")) {
+        for (String action : List.of("CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM")) {
             RoomRequest room = new RoomRequest("Attack", PIN, identifier, 10);
             assertEquals("SESSION_EXPIRED", service.handle(request(action, token, room)).code(), action);
         }
