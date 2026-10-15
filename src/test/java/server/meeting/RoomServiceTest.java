@@ -118,6 +118,23 @@ class RoomServiceTest {
         assertEquals(2, service.getRoom("host-a", room.roomId()).participants().size());
     }
 
+    @Test void engineConfirmsEachKindAndHostStopsOnlyTheSelectedKind() throws Exception {
+        RoomSnapshot room=create(1,"create-media-kinds",3,false); join(1,"host-a","join-host-media-001",room);
+        var guest=join(2,"member-b","join-guest-media",room);
+        service.setMediaState("member-b",true,true,true);
+        MediaState requested=service.assertMember("member-b",room.roomId()).mediaState();
+        assertFalse(requested.audioPublishing()); assertFalse(requested.sharePublishing());
+        service.confirmAudio("member-b",true);service.confirmVideo("member-b",true);service.confirmShare("member-b",true);
+        service.setMediaRequested("member-b","VIDEO",false);
+        MediaState state=service.assertMember("member-b",room.roomId()).mediaState();
+        assertTrue(state.audioPublishing());assertTrue(state.sharePublishing());assertFalse(state.videoPublishing());
+        error("HOST_REQUIRED",() -> service.stopPublish("member-b",guest.selfParticipantId(),"AUDIO"));
+        service.stopPublish("host-a",guest.selfParticipantId(),"AUDIO");service.confirmAudio("member-b",true);
+        state=service.assertMember("member-b",room.roomId()).mediaState();
+        assertFalse(state.micRequested());assertFalse(state.audioPublishing());assertTrue(state.sharePublishing());
+        service.stopPublish("host-a",guest.selfParticipantId(),"SCREEN");service.confirmShare("member-b",true);
+        assertFalse(service.assertMember("member-b",room.roomId()).mediaState().sharePublishing());
+    }
     @Test
     void joiningOnlyAcceptsPublicRoomCodeAndPinWhileInternalIdsKeepWorking() throws Exception {
         RoomSnapshot room = create(1, "create-room-00001", 3, false); join(1, "host-a", "join-host-000001", room);

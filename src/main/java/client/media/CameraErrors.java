@@ -12,14 +12,33 @@ public final class CameraErrors {
         if (error instanceof TimeoutException) return "CAMERA_CATALOG_TIMEOUT";
         String code = error instanceof SignalException signal ? signal.code() : error.getMessage();
         if (code != null && Set.of("CAMERA_PERMISSION_REQUIRED", "CAMERA_FORMAT_UNAVAILABLE", "CAMERA_NOT_FOUND", "CAMERA_NO_FRAMES",
-                "CAMERA_CATALOG_TIMEOUT", "VIDEO_OFFER_FAILED", "VIDEO_DESCRIPTION_FAILED", "ICE_TIMEOUT", "SOURCE_UNAVAILABLE", "CONNECTION_CLOSED", "MEDIA_NOT_READY").contains(code)) return code;
+                "MICROPHONE_PERMISSION_REQUIRED", "MICROPHONE_OPEN_FAILED", "AUDIO_OUTPUT_FAILED", "AUDIO_CONNECTION_FAILED", "SCREEN_CONNECTION_FAILED", "MEDIA_BUSY", "MEDIA_CLOSED", "ENGINE_CHANGED", "LEASE_EXPIRED", "AUDIO_CLEANUP_FAILED", "SHARE_IN_USE", "SCREEN_NO_FRAMES", "SCREEN_CAPTURE_FAILED", "CAMERA_CATALOG_TIMEOUT", "VIDEO_OFFER_FAILED", "VIDEO_DESCRIPTION_FAILED", "ICE_TIMEOUT", "SOURCE_UNAVAILABLE", "CONNECTION_CLOSED", "MEDIA_NOT_READY").contains(code)) return code;
         String detail = code == null ? "" : code.toLowerCase(java.util.Locale.ROOT);
         if (detail.contains("access denied") || detail.contains("permission") || detail.contains("0x80070005")) return "CAMERA_ACCESS_DENIED";
         if (detail.contains("busy") || detail.contains("in use") || detail.contains("being used")) return "CAMERA_DEVICE_BUSY";
         return "CAMERA_OPEN_FAILED";
     }
+    public static String audioCode(Throwable error) {
+        while (error.getCause() != null && (error instanceof CompletionException || error instanceof ExecutionException)) error=error.getCause();
+        if (error instanceof InterruptedException || error instanceof CancellationException) return "CONNECTION_CLOSED";
+        if (error instanceof TimeoutException) return "AUDIO_CONNECTION_FAILED";
+        String code=code(error);
+        return code.equals("VIDEO_OFFER_FAILED") || code.equals("VIDEO_DESCRIPTION_FAILED") || code.equals("ICE_TIMEOUT") ? "AUDIO_CONNECTION_FAILED" : code.startsWith("CAMERA_") ? "MICROPHONE_OPEN_FAILED" : code;
+    }
+    public static String audioMessage(Throwable error) { return message(new SignalException(audioCode(error))); }
+    public static String screenCode(Throwable error) { String code=code(error); return code.equals("VIDEO_OFFER_FAILED") || code.equals("VIDEO_DESCRIPTION_FAILED") || code.equals("ICE_TIMEOUT") ? "SCREEN_CONNECTION_FAILED" : code.startsWith("CAMERA_") ? "SCREEN_CAPTURE_FAILED" : code; }
+    public static String screenMessage(Throwable error) { return message(new SignalException(screenCode(error))); }
     public static String message(Throwable error) {
         return switch (code(error)) {
+            case "AUDIO_CONNECTION_FAILED" -> "Không kết nối được âm thanh. Kiểm tra mạng rồi chủ động bật lại mic.";
+            case "SCREEN_CONNECTION_FAILED" -> "Không kết nối được nguồn chia sẻ. Kiểm tra mạng và chọn lại nguồn.";
+            case "MEDIA_BUSY" -> "Thiết bị hoặc server đang bận. Vui lòng thử lại.";
+            case "MEDIA_CLOSED", "ENGINE_CHANGED", "LEASE_EXPIRED" -> "Kết nối media đã dừng. Hãy chủ động bật lại sau khi kết nối phòng ổn định.";
+            case "MICROPHONE_PERMISSION_REQUIRED" -> "Nhấn Bật mic và cho phép sử dụng microphone.";
+            case "AUDIO_OUTPUT_FAILED" -> "Không mở được loa. Kiểm tra thiết bị phát âm thanh trong Windows và chọn lại Loa trong Cài đặt.";
+            case "MICROPHONE_OPEN_FAILED", "AUDIO_CLEANUP_FAILED" -> "Không mở được âm thanh. Kiểm tra Microphone trong Windows Settings → Privacy & security và thiết bị trong Cài đặt.";
+            case "SHARE_IN_USE" -> "Đã có người đang chia sẻ màn hình trong phòng.";
+            case "SCREEN_NO_FRAMES", "SCREEN_CAPTURE_FAILED" -> "Không nhận được hình màn hình. Kiểm tra quyền Windows, khôi phục cửa sổ đang thu nhỏ hoặc chọn lại nguồn chia sẻ.";
             case "CAMERA_PERMISSION_REQUIRED" -> "Nhấn Bật camera và cho phép để tiếp tục.";
             case "CAMERA_ACCESS_DENIED" -> "Windows đang chặn camera. Kiểm tra quyền camera dành cho desktop apps.";
             case "CAMERA_DEVICE_BUSY" -> "Camera đang được ứng dụng hoặc cửa sổ khác sử dụng. Tắt camera ở cửa sổ đó hoặc chọn thiết bị khác.";

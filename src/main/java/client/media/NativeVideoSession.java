@@ -23,10 +23,13 @@ public final class NativeVideoSession implements AutoCloseable {
         factory = created; anchorSource = source; anchor = track;
     }
     public Peer publisher(VideoInput input, VideoFrameMailbox preview) {
-        VideoTrack track = factory.createVideoTrack("camera-video", input.source());
-        try { return new Peer(track, true, preview); } catch (RuntimeException failure) { track.dispose(); throw failure; }
+        return publisher(input,preview,700000,15);
     }
-    public Peer subscriber(VideoFrameMailbox output) { return new Peer(anchor, false, output); }
+    public Peer publisher(VideoInput input, VideoFrameMailbox preview, int bitrate, int fps) {
+        VideoTrack track = factory.createVideoTrack("camera-video", input.source());
+        try { return new Peer(track, true, preview, bitrate, fps); } catch (RuntimeException failure) { track.dispose(); throw failure; }
+    }
+    public Peer subscriber(VideoFrameMailbox output) { return new Peer(anchor, false, output, 700000, 15); }
     /** Local capture track without a PeerConnection; pre-join never publishes camera. */
     public Preview preview(VideoInput input, VideoFrameMailbox output) { return new Preview(input, output); }
     public final class Preview implements AutoCloseable {
@@ -58,7 +61,7 @@ public final class NativeVideoSession implements AutoCloseable {
         private final Object trackLifecycle = new Object();
         private volatile VideoTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
-        private Peer(VideoTrack track, boolean publisher, VideoFrameMailbox sink) {
+        private Peer(VideoTrack track, boolean publisher, VideoFrameMailbox sink, int bitrate, int fps) {
             if (closed.get()) throw new IllegalStateException("VIDEO_OWNER_CLOSED");
             this.publisher = publisher; this.local = track; this.sink = sink;
             this.binding = sink.bind();
@@ -69,7 +72,7 @@ public final class NativeVideoSession implements AutoCloseable {
                 init.direction = publisher ? RTCRtpTransceiverDirection.SEND_ONLY : RTCRtpTransceiverDirection.RECV_ONLY;
                 if (publisher) {
                     RTCRtpEncodingParameters encoding = new RTCRtpEncodingParameters(); encoding.active = true;
-                    encoding.maxBitrate = 700000; encoding.maxFramerate = 15.0; init.sendEncodings = List.of(encoding);
+                    encoding.maxBitrate = bitrate; encoding.maxFramerate = (double) fps; init.sendEncodings = List.of(encoding);
                 }
                 RTCRtpTransceiver transceiver = connection.addTransceiver(track, init);
                 try { transceiver.setCodecPreferences(factory.getRtpSenderCapabilities(MediaType.VIDEO).getCodecs().stream()

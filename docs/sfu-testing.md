@@ -1,6 +1,44 @@
 # Kiểm chứng SFU — Mốc 0 và video tích hợp
 
-**Mốc 0 và phòng/signaling Mốc 1 đã có bằng chứng thực thi; video hiện đã tích hợp vào phòng SFU.** Native integration trao đổi nguồn video tạo sẵn qua Go và render JavaFX. Theo yêu cầu mới nhất chỉ làm video trước; không đánh dấu hoàn thành Mốc 2 audio/video toàn bộ hoặc Mốc 3–4. Chưa có kết quả camera/microphone vật lý, khả năng tải hoặc cuộc gọi dài.
+## Bản mở rộng audio/screen — 15/10/2026
+
+Baseline Java: 194 tests, 0 failures/errors, 2 skipped (symlink Windows/performance opt-in), target/baseline-java.txt. Go bản gốc HEAD được chép nguyên từ Git sang target/go-baseline để chạy lại độc lập trong lúc chuẩn bị toolchain: 4 bài top-level PASS, target/go-baseline-tests.txt. Không ghi dữ liệu thử lên Railway; toàn bộ thay đổi này không có schema/migration.
+
+Giai đoạn A: AudioCallIntegrationTest ban đầu (1) + 5 VideoCallIntegrationTest PASS (6 test, không skip), target/audio-native-tests.txt. Unit/UI/server/diagnostics 22 test PASS ở target/audio-unit-tests.txt. Các kết quả này ghi lại mốc A; kết quả tổng cuối bên dưới thay thế khi đánh giá bản giao.
+
+Giai đoạn B và kiểm tra chung:
+
+Hồi quy Java: **199 tests, 0 failures/errors, 2 skipped**, BUILD SUCCESS (`target/media-regression-final.txt`). Hai skip vẫn là symlink Windows và performance opt-in.
+
+Lượt tổng trên mã bàn giao, chạy `mvn -B -Pvideo-integration test`: **208 tests, 0 failures/errors, 2 skipped**, BUILD SUCCESS (`target/media-all-final.txt`), hoàn tất ngày 15/10/2026. Bao gồm 199 bài hồi quy và 9 bài native trong cùng lượt Maven; không cộng lại các lượt kiểm tra riêng vào tổng này.
+
+File chính của giai đoạn A: `client/media/AudioCallController`, `NativeAudioSession`, `MicrophoneConsentStore`, `client/UI/components/AudioControls`; mở rộng `server/media/VideoCoordinator`, `server/meeting/RoomService`, `MeetingHandler` và `media/video/engine.go` để hỗ trợ AUDIO độc lập camera. Giai đoạn B: `client/media/ScreenCallController`, `ScreenVideoInput`, `client/UI/dialogs/ScreenSourceDialog`; tích hợp vào `MeetingScreen`, `VideoCallController` và mở rộng engine/coordinator cho SCREEN. Nguồn Java nằm dưới `src/main/java`; script kiểm thử và sáu tài liệu chạy/kiến trúc/hợp đồng/kiểm thử/diagnostics/README đã cập nhật.
+
+- Go engine: 7 bài top-level + 3 subtest codec PASS trong target/media-go-final.txt. Pion thật fanout Opus/VP8 camera/VP8 screen giữ nguyên codec payload; cross-room, một publication/kind, SHARE_IN_USE; dừng AUDIO giữ camera/screen/người khác, dừng screen giải phóng slot, revoke/expiry đóng audio/screen, queue packet/byte/cancel/age hữu hạn và audio drop không có PLI.
+- Native qua script scripts/test-video-call.ps1: 9 bài PASS gồm AudioCallIntegrationTest (2), ScreenCallIntegrationTest (2), VideoCallIntegrationTest (5), không failure/error/skip. H2/TLS + Go process thật, PCM/CustomAudioSource/HeadlessAudioDeviceModule và I420 tạo sẵn. Không mở mic/loa/camera/màn hình thật. Kết quả lưu trong target/media-native-final.txt. Ảnh target/screen-generated-preview.png đã được kiểm tra bố cục share lớn, thumbnail camera, badge và thanh điều khiển; ảnh dùng nguồn I420 tạo sẵn.
+- Audio: ba client mỗi bên nhận PCM decoded từ từng nguồn còn lại; mute/host stop giữ camera, guest không có quyền host, kick/logout/leave thu hồi; người còn lại tiếp tục. Mic 100 thao tác áp dụng lựa chọn cuối.
+- Screen: I420 nguồn riêng cùng camera; hai client nhận, có người vào muộn; nguồn thứ hai bị SHARE_IN_USE; host stop giữ camera, 100 thao tác dọn publication; nguồn ngừng frame tự dừng và không tự bật lại. Dialog chọn nguồn có preview tạo sẵn, Hủy không gửi request publish. UI chính có nút mic thật và nút dừng share, ảnh share thật từ mailbox remote.
+- AudioControlsTest dùng file quyền riêng, kiểm tra ghi nhớ/từ chối/thử lại và dialog microphone JavaFX thật. DiagnosticsReportTest kiểm tra tách AUDIO/SCREEN và không tự tạo jitter. FxTestRuntime giữ các view/dialog cô lập; catalog media fixture rỗng hoặc nguồn tạo sẵn.
+
+Lỗi trong quá trình bổ sung đã sửa: request ID test mới ngắn hơn hợp đồng; assertion đọc ID sau khi đóng session; Windows khóa tạm go-stderr.txt của fixture lúc JUnit dọn thư mục. Fixture hiện dùng redirect DISCARD như production, vẫn kiểm process kết thúc và exit code, giữ diagnostics có allowlist. Không sửa test cũ để bỏ qua lỗi media.
+
+Cần người dùng nghiệm thu (CHƯA CHẠY): mic/loa thật và vọng âm/AEC/AGC/NS; màn hình/cửa sổ thật, quyền Windows, thu nhỏ/đóng cửa sổ, rút/đổi màn hình; hai máy LAN; 30 phút; 5/10 client; mất mạng/jitter; runtime JDK đúng 21 (máy chạy JDK 22.0.2, compile release 21). Không gọi bộ test nguồn tạo sẵn là nghiệm thu thiết bị hoặc bằng chứng năng lực tải.
+
+Chạy lại từ PowerShell tại repo:
+
+~~~powershell
+. ./scripts/common.ps1
+$taskMaven = Resolve-Maven
+& $taskMaven -B test
+& ./scripts/test-video-call.ps1
+~~~
+
+Giữ cấu hình DB/keystore đang chạy; script test dùng fixture H2/TLS riêng. Build script Go kiểm toolchain checksum và test trước khi tạo binary. Maven clean xóa bằng chứng target; giữ bản sao nếu cần so sánh. Các số đo codec/FPS/bitrate mục tiêu ở tài liệu chạy không là kết quả đã đo.
+
+
+## Các mốc trước bản mở rộng audio/screen
+
+Các kết quả bên dưới được giữ để đối chiếu lịch sử. Bản audio/screen hiện tại được mô tả và kiểm tra ở mục đầu tài liệu; thiết bị vật lý, khả năng tải và cuộc gọi dài vẫn chưa được nghiệm thu.
 
 ## Video tích hợp — cập nhật 15/10/2026
 

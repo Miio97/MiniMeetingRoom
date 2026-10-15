@@ -44,7 +44,8 @@ public final class VideoTestFixture implements AutoCloseable {
         diagnosticDirectory = temporary.resolve("go-diagnostics");
         builder.environment().put("MMR_DIAGNOSTICS_DIR", diagnosticDirectory.toString());
         builder.environment().remove("MMR_DB_URL"); builder.environment().remove("MMR_DB_USER"); builder.environment().remove("MMR_DB_PASSWORD");
-        builder.redirectOutput(temporary.resolve("go-stdout.txt").toFile()); builder.redirectError(temporary.resolve("go-stderr.txt").toFile());
+        // Match production and avoid transient Windows locks on redirected files during JUnit cleanup.
+        builder.redirectOutput(ProcessBuilder.Redirect.DISCARD); builder.redirectError(ProcessBuilder.Redirect.DISCARD);
         process = builder.start();
         VideoEngineClient ready = null; long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (process.isAlive() && ready == null && System.nanoTime() < deadline) {
@@ -73,7 +74,7 @@ public final class VideoTestFixture implements AutoCloseable {
         return new MeetingSession(account.token(), Instant.parse(account.expiresAt()), listener -> new SignalingClient(
                 new SignalingClient.Settings("localhost", signaling.port(), null, SignalWire.DEFAULT_MAX_BYTES), tls.client(), listener),
                 session -> new client.media.VideoCallController(session::videoRequest, session::snapshot, session::selfParticipantId,
-                        new client.media.CameraConsentStore(diagnosticDirectory.getParent().resolve("camera-" + UUID.randomUUID() + ".properties")), List::of));
+                        new client.media.CameraConsentStore(diagnosticDirectory.getParent().resolve("camera-" + UUID.randomUUID() + ".properties")), List::of, true, new client.media.MicrophoneConsentStore(diagnosticDirectory.getParent().resolve("mic-" + UUID.randomUUID() + ".properties"))));
     }
     @Override public void close() throws Exception {
         signaling.close(); collaboration.close(); rooms.close(); coordinator.close(); engine.shutdown(); engine.close();

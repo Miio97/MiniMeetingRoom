@@ -391,7 +391,9 @@ public final class SignalingServer implements AutoCloseable {
     private static String safeAction(String type) {
         return switch (type) {
             case "AUTHENTICATE", "CREATE_ROOM", "REOPEN_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM",
-                    "SET_MEDIA_STATE", "SET_LOCKED", "STOP_PUBLISH", "KICK", "PUBLISH", "UNPUBLISH",
+                    "SET_MEDIA_STATE", "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
+                    "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
+                    "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH",
                     "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE" -> type;
             default -> "OTHER";
         };

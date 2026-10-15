@@ -82,6 +82,23 @@ func (d *diagnostics) sample(e *engine) {
 		}
 	}
 	e.mu.Unlock()
+	for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN"} {
+		e.mu.Lock()
+		packets, size, count := 0, 0, 0
+		for _, peer := range e.peers {
+			if peer.kind == kind {
+				count++
+				if peer.queue != nil {
+					a, b := peer.queue.depth()
+					packets += a
+					size += b
+				}
+			}
+		}
+		e.mu.Unlock()
+		c := e.byKind[kind]
+		d.event("video.engine.sample", map[string]any{"kind": kind, "active_peer_connections": count, "queue_packets": packets, "queue_bytes": size, "queue_drops": c.drops.Load(), "ingress_packets": c.ingress.Load(), "forwarded_packets": c.forwarded.Load(), "ingress_codec_bytes": c.ingressBytes.Load(), "forwarded_codec_bytes": c.forwardedBytes.Load(), "write_errors": c.writeErrors.Load(), "pli_requests": c.pli.Load()})
+	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	d.event("video.engine.sample", map[string]any{"active_peer_connections": peers, "participant_count": leases, "queue_packets": queued, "queue_bytes": queuedBytes, "queue_drops": e.drops.Load(), "ingress_packets": e.ingress.Load(), "forwarded_packets": e.forwarded.Load(), "ingress_codec_bytes": e.ingressBytes.Load(), "forwarded_codec_bytes": e.forwardedBytes.Load(), "write_errors": e.writeErrors.Load(), "pli_requests": e.pli.Load(), "go_heap_bytes": memory.Alloc, "goroutine_count": runtime.NumGoroutine()})

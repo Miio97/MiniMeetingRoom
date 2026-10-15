@@ -17,6 +17,18 @@ class DiagnosticsReportTest {
     private static final Gson JSON = new Gson();
     @TempDir Path directory;
 
+    @Test void audioAndScreenCountersAreSeparatedAndUnknownValuesStayAbsent() throws Exception {
+        Path input=write("kinds.txt",List.of(
+            record("kinds",22,"sfu","video.engine.sample",1,0,Map.of("kind","AUDIO","ingress_packets",100,"queue_drops",2,"pli_requests",0)),
+            record("kinds",22,"sfu","video.engine.sample",2,0,Map.of("kind","SCREEN","ingress_packets",15,"queue_drops",1,"pli_requests",1)),
+            record("kinds",22,"sfu","video.client.operation.failed",3,0,Map.of("kind","AUDIO","phase","audio","total_ms",4)),
+            record("kinds",22,"sfu","video.client.operation.failed",4,0,Map.of("kind","SCREEN","phase","screen","total_ms",5))));
+        String report=DiagnosticsReport.createReport(input,null);
+        assertTrue(report.contains("kind=AUDIO name=ingress_packets n=1 min=100.000"));
+        assertTrue(report.contains("kind=SCREEN name=ingress_packets n=1 min=15.000"));
+        assertTrue(report.contains("phase=audio"));assertTrue(report.contains("phase=screen"));
+        assertFalse(report.contains("name=jitter_ms"));assertFalse(report.contains("other.event"));
+    }
     @Test
     void separatesProcessesFilesAndTracksAndUsesRawNearestRankPercentiles() throws Exception {
         List<String> client = new ArrayList<>();

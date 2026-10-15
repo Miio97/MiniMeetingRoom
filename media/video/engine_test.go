@@ -142,6 +142,11 @@ func negotiateClient(t *testing.T, e *engine, pc *webrtc.PeerConnection, request
 	}
 }
 func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
+	for _, kind := range []string{"VIDEO", "AUDIO", "SCREEN"} {
+		t.Run(kind, func(t *testing.T) { realFanout(t, kind) })
+	}
+}
+func realFanout(t *testing.T, kind string) {
 	e, err := newEngine(testKey)
 	if err != nil {
 		t.Fatal("engine failed")
@@ -156,7 +161,7 @@ func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
 		t.Fatal("client peer failed")
 	}
 	defer pc.Close()
-	track, _ := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, "camera", "stream")
+	track, _ := webrtc.NewTrackLocalStaticRTP(kindCodec(kind), "media", "stream")
 	sender, err := pc.AddTrack(track)
 	if err != nil {
 		t.Fatal("track failed")
@@ -168,7 +173,7 @@ func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
 			}
 		}
 	}()
-	negotiateClient(t, e, pc, controlRequest{Operation: "publish", Room: "room-a", Participant: "publisher", Generation: 1, Transport: "publication-a"})
+	negotiateClient(t, e, pc, controlRequest{Kind: kind, Operation: "publish", Room: "room-a", Participant: "publisher", Generation: 1, Transport: "publication-a"})
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -192,7 +197,7 @@ func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
 	if e.ingress.Load() == 0 {
 		t.Fatal("no publisher RTP reached SFU")
 	}
-	status, _ := control(t, e, controlRequest{Operation: "subscribe", Room: "room-b", Participant: "foreign", Generation: 1, Transport: "cross-room", Source: "publisher", Publication: "publication-a", SDP: "v=0"})
+	status, _ := control(t, e, controlRequest{Kind: kind, Operation: "subscribe", Room: "room-b", Participant: "foreign", Generation: 1, Transport: "cross-room", Source: "publisher", Publication: "publication-a", SDP: "v=0"})
 	if status != 403 {
 		t.Fatal("foreign room subscription accepted")
 	}
@@ -217,11 +222,16 @@ func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
 				}
 			}
 		})
-		_, err = receiver.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+		_, err = receiver.AddTransceiverFromKind(func() webrtc.RTPCodecType {
+			if kind == "AUDIO" {
+				return webrtc.RTPCodecTypeAudio
+			}
+			return webrtc.RTPCodecTypeVideo
+		}(), webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
 		if err != nil {
 			t.Fatal("receiver transceiver failed")
 		}
-		negotiateClient(t, e, receiver, controlRequest{Operation: "subscribe", Room: "room-a", Participant: owner, Generation: 1, Transport: owner + "-transport", Source: "publisher", Publication: "publication-a"})
+		negotiateClient(t, e, receiver, controlRequest{Kind: kind, Operation: "subscribe", Room: "room-a", Participant: owner, Generation: 1, Transport: owner + "-transport", Source: "publisher", Publication: "publication-a"})
 	}
 	for _, frames := range channels {
 		select {
@@ -243,7 +253,7 @@ func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
 	if count != 2 {
 		t.Fatal("revoke removed unrelated publisher/receiver")
 	}
-	control(t, e, controlRequest{Operation: "stop", Room: "room-a", Participant: "publisher", Generation: 1})
+	control(t, e, controlRequest{Kind: kind, Operation: "stop", Room: "room-a", Participant: "publisher", Generation: 1})
 	e.mu.Lock()
 	count = len(e.peers)
 	e.mu.Unlock()

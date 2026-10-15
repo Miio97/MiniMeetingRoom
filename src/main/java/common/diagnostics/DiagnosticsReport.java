@@ -63,7 +63,7 @@ public final class DiagnosticsReport {
             "tcp_connect", "tls_handshake", "response", "request_read", "request_handler",
             "response_write", "connection_close", "configuration", "database_preflight",
             "listener_bind", "listener_run", "create", "connect", "generated_media",
-            "receive_threshold", "stats", "close", "control", "dispatch", "accept", "startup", "capture", "preview", "publish", "subscribe", "camera_formats");
+            "receive_threshold", "stats", "close", "control", "dispatch", "accept", "startup", "capture", "preview", "publish", "subscribe", "camera_formats", "audio", "screen");
     private static final Set<String> ROLES = Set.of("server", "client", "app", "sfu", "signaling",
             "media-smoke", "media-probe", "client-media-probe");
     static final Limits DEFAULT_LIMITS = new Limits(128, 256L * 1024 * 1024, 64 * 1024, 200_000);
@@ -277,7 +277,9 @@ public final class DiagnosticsReport {
                     ? tag(fields, "kind") : "unavailable";
             String action = tagged(fields, "action", Set.of("LOGIN", "REGISTER", "LOGOUT", "AUTHENTICATE",
                     "CREATE_ROOM", "REOPEN_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM", "SET_MEDIA_STATE",
-                    "SET_LOCKED", "STOP_PUBLISH", "KICK", "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE",
+                    "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
+                    "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
+                    "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE",
                     "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE", "OTHER"))
                     ? tag(fields, "action") : "unavailable";
             String phase = tagged(fields, "phase", PHASES) ? tag(fields, "phase") : "unavailable";

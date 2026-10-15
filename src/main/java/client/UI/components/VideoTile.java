@@ -27,7 +27,8 @@ public final class VideoTile extends StackPane {
         cameraState = Ui.label("Camera đang tắt hoặc đang chờ video", "caption");
         cameraState.visibleProperty().bind(image.isNull()); cameraState.managedProperty().bind(cameraState.visibleProperty());
         name = Ui.label(participant.displayName() + (self ? " (Bạn)" : ""), "tile-name");
-        HBox footer = Ui.row(8, name, Ui.spacer(), Ui.label(participant.role() == common.meeting.RoomRole.HOST ? "HOST" : "", "tile-tag"));
+        setMuted(!participant.mediaState().audioPublishing());
+        HBox footer = Ui.row(8, mic, name, Ui.spacer(), Ui.label(participant.role() == common.meeting.RoomRole.HOST ? "HOST" : "", "tile-tag"));
         footer.setMaxHeight(USE_PREF_SIZE); footer.getStyleClass().add("tile-footer"); StackPane.setAlignment(footer, Pos.BOTTOM_CENTER);
         getChildren().addAll(realVideo, cameraState, footer); pulse = new Timeline();
     }

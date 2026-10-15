@@ -198,6 +198,7 @@ public class VideoCallIntegrationTest {
                         var picture = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB); picture.setRGB(0, 0, width, height, pixels, 0, width);
                         javax.imageio.ImageIO.write(picture, "png", Path.of("target/video-prejoin-clean-preview.png").toFile()); return null;
                     });
+                    hostMedia.audio().access(true).get(5, TimeUnit.SECONDS);
                     var beforeMeeting = hostSession.videoRequest("VIDEO_STATE", new com.google.gson.JsonObject(), UUID.randomUUID().toString()).get(8, TimeUnit.SECONDS);
                     assertTrue(beforeMeeting.getAsJsonObject("sources").isEmpty(), "Pre-join camera must stay private until Enter Meeting");
                     FxTestRuntime.call(() -> {
@@ -207,6 +208,27 @@ public class VideoCallIntegrationTest {
                     });
                     String hostId = hostSession.selfParticipantId(), guestId = guestSession.selfParticipantId();
                     FxTestRuntime.await(() -> hostMedia.frames(guestId).receivedFrames() >= 3 && guestMedia.frames(hostId).receivedFrames() >= 3);
+                    FxTestRuntime.await(() -> !find(stages.getFirst().getScene().getRoot(),"audio-microphone-toggle",javafx.scene.control.Button.class).isDisabled());
+                    FxTestRuntime.call(() -> {find(stages.getFirst().getScene().getRoot(),"meeting-mic",javafx.scene.control.Button.class).fire();return null;});
+                    FxTestRuntime.await(() -> hostMedia.audio().requestedProperty().get());
+                    AudioCallIntegrationTest.await(() -> guestMedia.audio().receivedSamples(hostId)>4800);
+                    FxTestRuntime.call(() -> {find(stages.getFirst().getScene().getRoot(),"meeting-mic",javafx.scene.control.Button.class).fire();return null;});
+                    FxTestRuntime.await(() -> !hostMedia.audio().requestedProperty().get());
+                    FxTestRuntime.call(() -> hostMedia.screen().toggleInput(GeneratedScreen::new)).get(20,TimeUnit.SECONDS);
+                    FxTestRuntime.await(() -> nodes(stages.get(1).getScene().getRoot()).anyMatch(n -> "meeting-screen-image".equals(n.getId())));
+                    FxTestRuntime.await(() -> find(stages.get(1).getScene().getRoot(),"meeting-screen-image",javafx.scene.image.ImageView.class).getImage()!=null);
+                    FxTestRuntime.call(() -> {
+                        var root=stages.get(1).getScene().getRoot();root.applyCss();root.layout();
+                        var snapshot=root.snapshot(null,null);int width=(int)snapshot.getWidth(),height=(int)snapshot.getHeight();
+                        int[] pixels=new int[width*height];snapshot.getPixelReader().getPixels(0,0,width,height,javafx.scene.image.PixelFormat.getIntArgbInstance(),pixels,0,width);
+                        var picture=new java.awt.image.BufferedImage(width,height,java.awt.image.BufferedImage.TYPE_INT_ARGB);picture.setRGB(0,0,width,height,pixels,0,width);
+                        javax.imageio.ImageIO.write(picture,"png",Path.of("target/screen-generated-preview.png").toFile());return null;
+                    });
+                    FxTestRuntime.call(() -> {
+                        var share=find(stages.getFirst().getScene().getRoot(),"meeting-share",javafx.scene.control.Button.class);
+                        assertTrue(share.getPseudoClassStates().contains(javafx.css.PseudoClass.getPseudoClass("active")));share.fire();return null;
+                    });
+                    FxTestRuntime.await(() -> !hostMedia.screen().requestedProperty().get());
                     double expandedHeight = FxTestRuntime.call(() -> {
                         var root = stages.get(0).getScene().getRoot(); root.applyCss(); root.layout();
                         assertTrue(nodes(root).noneMatch(node -> "video-camera-list".equals(node.getId())));
@@ -464,7 +486,7 @@ public class VideoCallIntegrationTest {
             ((javafx.scene.control.Button) pane.lookupButton(button)).fire(); return null;
         });
     }
-    private static final class GeneratedCamera implements VideoInput {
+    static final class GeneratedCamera implements VideoInput {
         private final CustomVideoSource source = new CustomVideoSource();
         private final ScheduledExecutorService producer = Executors.newSingleThreadScheduledExecutor();
         private final AtomicBoolean closed = new AtomicBoolean();
