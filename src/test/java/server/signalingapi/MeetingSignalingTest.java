@@ -112,6 +112,35 @@ class MeetingSignalingTest {
         assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
     }
 
+    @Test void onlyHostReopensClosedRoomAndOldPreviewCannotJoinNewMeetingRun() throws Exception {
+        SignalingClient host = login("host", new CopyOnWriteArrayList<>());
+        SignalingClient guest = login("guest", new CopyOnWriteArrayList<>());
+        RoomSnapshot original = create(host, 3, UUID.randomUUID().toString());
+        join(host, original, "", UUID.randomUUID().toString());
+        join(guest, original, "1234", UUID.randomUUID().toString());
+        JsonObject body = new JsonObject(); body.addProperty("joinCode", original.joinCode());
+        rooms.leave(host.connectionId(), "PHONG_DONG");
+        code("HOST_REQUIRED", () -> request(guest, "REOPEN_ROOM", null, body));
+        String requestId = UUID.randomUUID().toString();
+        SignalMessage response = host.request("REOPEN_ROOM", null, body, requestId).get(6, TimeUnit.SECONDS);
+        assertEquals("ROOM_REOPENED", response.type());
+        RoomSnapshot reopened = JSON.fromJson(response.body().get("room"), RoomSnapshot.class);
+        assertNotEquals(original.roomId(), reopened.roomId()); assertEquals(original.joinCode(), reopened.joinCode());
+        assertEquals(original.collaborationRoom().id(), reopened.collaborationRoom().id());
+        assertEquals(common.meeting.RoomStatus.READY, reopened.status()); assertTrue(reopened.participants().isEmpty());
+        RoomSnapshot replay = JSON.fromJson(host.request("REOPEN_ROOM", null, body, requestId)
+                .get(6, TimeUnit.SECONDS).body().get("room"), RoomSnapshot.class);
+        assertEquals(reopened, replay);
+        code("STALE_ROOM", () -> join(guest, original, "1234", UUID.randomUUID().toString()));
+        join(host, reopened, "", UUID.randomUUID().toString());
+        code("STALE_ROOM", () -> join(guest, original, "1234", UUID.randomUUID().toString()));
+        join(guest, reopened, "1234", UUID.randomUUID().toString());
+        assertEquals(2, get(host, reopened.roomId()).participants().size());
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Phong_Hop"));
+        assertEquals(4, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        request(host, "LEAVE_ROOM", reopened.roomId(), new JsonObject());
+    }
+
     @Test void wrongPinCapacityCrossRoomAndHostChecks() throws Exception {
         SignalingClient host = login("host", new CopyOnWriteArrayList<>());
         SignalingClient guest = login("guest", new CopyOnWriteArrayList<>());
@@ -125,6 +154,33 @@ class MeetingSignalingTest {
         JsonObject lock = new JsonObject(); lock.addProperty("locked", true);
         code("HOST_REQUIRED", () -> request(guest, "SET_LOCKED", room.roomId(), lock));
         code("MEDIA_NOT_READY", () -> request(guest, "PUBLISH", room.roomId(), new JsonObject()));
+    }
+
+    @Test void lookupAndJoinRejectRoomIdsAndAcceptOnlyPublicCodeWithPin() throws Exception {
+        SignalingClient host = login("host", new CopyOnWriteArrayList<>());
+        RoomSnapshot room = create(host, 3, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+        List<String> invalid = List.of(Long.toString(room.collaborationRoom().id()), "999999999", room.roomId());
+        for (int index = 0; index < invalid.size(); index++) {
+            SignalingClient attempt = login("invalid" + index, new CopyOnWriteArrayList<>());
+            JsonObject body = new JsonObject(); body.addProperty("joinCode", invalid.get(index)); body.addProperty("pin", "1234");
+            code("ROOM_NOT_FOUND", () -> request(attempt, "LOOKUP_ROOM", null, body));
+            code("ROOM_NOT_FOUND", () -> request(attempt, "JOIN_ROOM", room.roomId(), body));
+            assertEquals(1, rooms.participantCount());
+            assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        }
+        SignalingClient guest = login("guest", new CopyOnWriteArrayList<>());
+        JsonObject body = new JsonObject();
+        body.addProperty("joinCode", "  " + room.joinCode().toLowerCase(java.util.Locale.ROOT) + "  ");
+        body.addProperty("pin", "9999");
+        code("WRONG_PIN", () -> request(guest, "LOOKUP_ROOM", null, body));
+        body.addProperty("pin", "1234");
+        var preview = JSON.fromJson(request(guest, "LOOKUP_ROOM", null, body).body().get("preview"), common.meeting.RoomPreview.class);
+        assertEquals(room.roomId(), preview.roomId()); assertEquals(room.joinCode(), preview.joinCode());
+        request(guest, "JOIN_ROOM", preview.roomId(), body);
+        assertEquals(2, get(host, room.roomId()).participants().size());
+        assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        request(guest, "LEAVE_ROOM", room.roomId(), new JsonObject()); assertEquals(1, rooms.participantCount());
     }
 
     @Test void expiredRevokedInactiveAndInvalidTokensCannotAuthenticate() throws Exception {
@@ -186,6 +242,9 @@ class MeetingSignalingTest {
             SignalWire.write(output, new SignalMessage(1, "CREATE_ROOM", UUID.randomUUID().toString(),
                     welcome.serverEpoch(), welcome.connectionId(), welcome.generation(), null, null, null, new JsonObject()), SignalWire.DEFAULT_MAX_BYTES);
             assertEquals("AUTH_REQUIRED", SignalWire.read(input, SignalWire.DEFAULT_MAX_BYTES).body().get("code").getAsString());
+            SignalWire.write(output, new SignalMessage(1, "REOPEN_ROOM", UUID.randomUUID().toString(),
+                    welcome.serverEpoch(), welcome.connectionId(), welcome.generation(), null, null, null, new JsonObject()), SignalWire.DEFAULT_MAX_BYTES);
+            assertEquals("AUTH_REQUIRED", SignalWire.read(input, SignalWire.DEFAULT_MAX_BYTES).body().get("code").getAsString());
         }
     }
 
@@ -219,6 +278,9 @@ class MeetingSignalingTest {
                 account.token(), new common.room.RoomRequest(null, null,
                 Long.toString(fixture.count("SELECT Ma_Phong FROM MMR_Phong_Van_Hanh")), 0)));
         assertFalse(response.success()); assertEquals(1, rooms.participantCount());
+        var reopen = legacy.handle(new common.auth.AuthRequest("REOPEN_ROOM", null, null, null, null,
+                account.token(), new common.room.RoomRequest(null, null, Long.toString(room.collaborationRoom().id()), 0)));
+        assertFalse(reopen.success()); assertEquals(1, rooms.participantCount());
     }
 
     @Test void twoJavaFxScreensCreateJoinAndRenderServerMembership() throws Exception {

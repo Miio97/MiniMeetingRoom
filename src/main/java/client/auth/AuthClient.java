@@ -39,8 +39,8 @@ public final class AuthClient {
     private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
             "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
             "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
-            "ROOM_FULL", "ROOM_ACCESS_DENIED");
-    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "JOIN_ROOM",
+            "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE");
+    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
             "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
@@ -84,6 +84,10 @@ public final class AuthClient {
         return roomCommand("JOIN_ROOM", token, new RoomRequest(null, pin, identifier, 0));
     }
 
+    public AuthResponse reopenRoom(String token, long roomId) throws IOException {
+        return roomCommand("REOPEN_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
+    }
+
     public AuthResponse listRooms(String token) throws IOException {
         return roomCommand("LIST_ROOMS", token, null);
     }
@@ -113,7 +117,7 @@ public final class AuthClient {
             }
             if (response.success()) {
                 switch (request.action()) {
-                    case "CREATE_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
+                    case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
                         if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
                     }
                     case "LIST_ROOMS" -> {

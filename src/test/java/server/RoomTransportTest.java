@@ -34,7 +34,7 @@ class RoomTransportTest {
     static void certificates() throws Exception { tls = RoomTestFixture.certificates(temporary); }
 
     @Test
-    void twoClientsCreateAndJoinByIdAndCodeWithServerGeneratedMetadata() throws Exception {
+    void twoClientsJoinOnlyByCodeWithServerGeneratedMetadata() throws Exception {
         try (RoomTestFixture fixture = new RoomTestFixture(tls)) {
             AuthClient hostClient = fixture.client(); AuthClient guestClient = fixture.client();
             AuthResponse host = fixture.account("HostUser", "Chủ phòng");
@@ -54,9 +54,10 @@ class RoomTransportTest {
             assertEquals("CHU_PHONG", room.participants().getFirst().role());
 
             AuthResponse joinedById = guestClient.joinRoom(guest.token(), Long.toString(room.id()), "482931");
-            assertTrue(joinedById.success(), joinedById::message); assertEquals(2, joinedById.room().people());
-            assertTrue(guestClient.leaveRoom(guest.token(), room.id()).success());
-            AuthResponse joinedByCode = guestClient.joinRoom(guest.token(), room.code().toLowerCase(), "482931");
+            error("VALIDATION_ERROR", joinedById);
+            assertFalse(joinedById.message().contains("ID"));
+            assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+            AuthResponse joinedByCode = guestClient.joinRoom(guest.token(), "  " + room.code().toLowerCase() + "  ", "482931");
             assertTrue(joinedByCode.success(), joinedByCode::message);
             // Repeating a successful join must not add another active membership.
             assertTrue(guestClient.joinRoom(guest.token(), room.code(), "482931").success());
@@ -91,7 +92,8 @@ class RoomTransportTest {
             AuthResponse extra = fixture.account("ExtraUser", "Khách thứ ba");
             RoomInfo room = client.createRoom(host.token(), "Phòng giới hạn", "7281", 2).room();
             error("INVALID_ROOM_PIN", client.joinRoom(guest.token(), room.code(), "9999"));
-            error("ROOM_NOT_FOUND", client.joinRoom(guest.token(), "999999999", "7281"));
+            error("VALIDATION_ERROR", client.joinRoom(guest.token(), "999999999", "7281"));
+            error("ROOM_NOT_FOUND", client.joinRoom(guest.token(), "MMR-FFFFFFFF", "7281"));
             error("ROOM_ACCESS_DENIED", client.getRoom(guest.token(), room.id()));
             assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
             fixture.execute("UPDATE Phong_Hop SET Da_Khoa = TRUE");
@@ -122,6 +124,7 @@ class RoomTransportTest {
             error("SESSION_EXPIRED", client.listRooms(host.token()));
             error("SESSION_EXPIRED", client.getRoom(host.token(), room.id()));
             error("SESSION_EXPIRED", client.leaveRoom(host.token(), room.id()));
+            error("SESSION_EXPIRED", client.reopenRoom(host.token(), room.id()));
             assertEquals(1, fixture.count("SELECT COUNT(*) FROM Phong_Hop"));
             assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
         }
@@ -143,6 +146,36 @@ class RoomTransportTest {
             error("ROOM_CLOSED", client.joinRoom(guest.token(), room.code(), "6183"));
             assertEquals(1, fixture.count("SELECT COUNT(*) FROM Phong_Hop WHERE Ngay_Dong IS NOT NULL"));
             assertEquals(0, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        }
+    }
+
+    @Test
+    void onlyHostCanReopenEndedRoomAndGuestsMustJoinAgainWithOriginalPin() throws Exception {
+        try (RoomTestFixture fixture = new RoomTestFixture(tls)) {
+            AuthClient client = fixture.client();
+            AuthResponse host = fixture.account("HostUser", "Chủ phòng");
+            AuthResponse guest = fixture.account("GuestUser", "Khách");
+            RoomInfo room = client.createRoom(host.token(), "Cuộc họp tiếp tục", "6183", 10).room();
+            error("ROOM_ALREADY_ACTIVE", client.reopenRoom(host.token(), room.id()));
+            assertTrue(client.joinRoom(guest.token(), room.code(), "6183").success());
+            assertTrue(client.leaveRoom(guest.token(), room.id()).success());
+            assertTrue(client.leaveRoom(host.token(), room.id()).success());
+            error("ROOM_ACCESS_DENIED", client.reopenRoom(guest.token(), room.id()));
+            AuthResponse reopened = client.reopenRoom(host.token(), room.id());
+            assertTrue(reopened.success(), reopened::message);
+            assertPublicRoomResponse(reopened);
+            assertEquals(room.id(), reopened.room().id());
+            assertEquals(room.code(), reopened.room().code());
+            assertEquals(room.createdAt(), reopened.room().createdAt());
+            assertEquals("DANG_HOAT_DONG", reopened.room().status());
+            assertEquals(1, reopened.room().people());
+            assertEquals(host.user().id(), reopened.room().participants().getFirst().userId());
+            assertEquals(1, fixture.count("SELECT COUNT(*) FROM Phong_Hop"));
+            assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
+            error("ROOM_ACCESS_DENIED", client.getRoom(guest.token(), room.id()));
+            error("INVALID_ROOM_PIN", client.joinRoom(guest.token(), room.code(), "9999"));
+            assertTrue(client.joinRoom(guest.token(), room.code(), "6183").success());
+            assertEquals(2, client.getRoom(host.token(), room.id()).room().people());
         }
     }
 

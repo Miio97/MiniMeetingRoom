@@ -111,15 +111,34 @@ public final class RoomService implements AutoCloseable {
         }
     }
 
+    public RoomSnapshot reopen(SessionPrincipal principal, String requestId, String joinCode) throws SQLException {
+        checkPrincipal(principal); requestId(requestId);
+        String identifier = roomIdentifier(joinCode);
+        byte[] hash = fingerprint("REOPEN_ROOM", identifier);
+        synchronized (lock) {
+            available();
+            RoomRepository.CreateResult result = repository.reopen(principal, requestId, hash, instanceId,
+                    epoch, opaque("r_"), identifier, rooms.size() < MAX_ROOMS,
+                    id -> !pendingHistory.containsKey("room:" + id), clock.instant());
+            RoomRepository.StoredRoom stored = result.room();
+            return snapshot(rooms.computeIfAbsent(stored.roomId(), ignored -> new LiveRoom(stored, clock.instant())));
+        }
+    }
+
     public RoomJoinReply join(SessionPrincipal principal, String connectionId, long generation, String requestId,
             String joinCode, String pin, boolean mic, boolean camera) throws SQLException {
+        return join(principal, connectionId, generation, requestId, null, joinCode, pin, mic, camera);
+    }
+    public RoomJoinReply join(SessionPrincipal principal, String connectionId, long generation, String requestId,
+            String expectedRoomId, String joinCode, String pin, boolean mic, boolean camera) throws SQLException {
         checkPrincipal(principal); requestId(requestId); connectionId(connectionId);
         if (generation < 1) throw new RoomException("INVALID_GENERATION");
         RoomRepository.StoredRoom stored = find(joinCode); verifyPin(principal, stored, pin);
-        byte[] hash = fingerprint("JOIN_ROOM", stored.joinCode(), pin, mic, camera);
+        byte[] hash = fingerprint("JOIN_ROOM", stored.roomId(), stored.joinCode(), pin, mic, camera);
         RoomJoinReply reply;
         synchronized (lock) {
             available(); eventBudget();
+            if (expectedRoomId != null && !expectedRoomId.equals(stored.roomId())) throw new RoomException("STALE_ROOM");
             Member current = connections.get(connectionId);
             if (current != null && (!current.roomId.equals(stored.roomId()) || current.generation != generation
                     || current.principal.sessionId() != principal.sessionId())) throw new RoomException("ALREADY_IN_ROOM");
@@ -262,10 +281,10 @@ public final class RoomService implements AutoCloseable {
             for (Member other : room.members.values()) connections.remove(other.connectionId);
             room.members.clear(); room.waiting.clear(); rooms.remove(member.roomId);
             pendingTransfers.remove(room.stored.id());
-            persist(new PendingHistory(true, room.stored.id(), now, "PHONG_DONG"));
+            persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
         } else {
             room.members.remove(member.participantId); connections.remove(member.connectionId);
-            persist(new PendingHistory(false, member.membershipId, now, reason));
+            persist(new PendingHistory(false, member.membershipId, null, now, reason));
             if (member.role == RoomRole.HOST) {
                 Member next = room.members.values().iterator().next();
                 try { repository.transferHost(room.stored.id(), next.principal.userId()); }
@@ -307,7 +326,7 @@ public final class RoomService implements AutoCloseable {
             }
             for (LiveRoom room : new ArrayList<>(rooms.values())) {
                 if (room.stored.status() == RoomStatus.READY && !room.readyDeadline.isAfter(now)) {
-                    rooms.remove(room.stored.roomId()); persist(new PendingHistory(true, room.stored.id(), now, "PHONG_DONG"));
+                    rooms.remove(room.stored.roomId()); persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
                 }
             }
         }
@@ -320,7 +339,7 @@ public final class RoomService implements AutoCloseable {
             if (legacy != null) { try { legacy.close(); } catch (SQLException failure) { throw new IllegalStateException("Legacy room cleanup failed", failure); } }
             for (LiveRoom room : new ArrayList<>(rooms.values())) {
                 room.revision++; broadcast(room, "ROOM_CLOSED", Map.of("reason", "SERVER_SHUTDOWN"));
-                persist(new PendingHistory(true, room.stored.id(), clock.instant(), "PHONG_DONG"));
+                persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), clock.instant(), "PHONG_DONG"));
             }
             connections.clear(); rooms.clear();
         }
@@ -331,17 +350,23 @@ public final class RoomService implements AutoCloseable {
     private RoomRepository.StoredRoom find(String joinCode) throws SQLException {
         if (joinCode == null) throw new RoomException("ROOM_NOT_FOUND");
         String identifier = joinCode.strip().toUpperCase(java.util.Locale.ROOT);
-        if (!identifier.matches("MMR-[A-Z2-9]{16}|[0-9]{1,19}")) throw new RoomException("ROOM_NOT_FOUND");
+        if (!identifier.matches("MMR-[A-HJ-NP-Z2-9]{16}")) throw new RoomException("ROOM_NOT_FOUND");
         // This process owns live rooms; historical rows never authorize a live join.
         // The committing repository still checks membership/capacity/current DB state.
         synchronized (lock) {
             for (LiveRoom room : rooms.values()) {
                 RoomRepository.StoredRoom stored = room.stored;
-                if ((identifier.equals(stored.joinCode()) || identifier.equals(Long.toString(stored.id())))
+                if (identifier.equals(stored.joinCode())
                         && stored.status() != RoomStatus.CLOSED && epoch.equals(stored.epoch())) return stored;
             }
         }
         throw new RoomException("ROOM_NOT_FOUND");
+    }
+    private static String roomIdentifier(String joinCode) {
+        if (joinCode == null) throw new RoomException("ROOM_NOT_FOUND");
+        String identifier = joinCode.strip().toUpperCase(java.util.Locale.ROOT);
+        if (!identifier.matches("MMR-[A-Z2-9]{16}|[0-9]{1,19}")) throw new RoomException("ROOM_NOT_FOUND");
+        return identifier;
     }
     private void verifyPin(SessionPrincipal principal, RoomRepository.StoredRoom room, String pin) {
         if (room.hostId() != principal.userId() && room.pinHash() != null && !pins.verify(pin, room.pinHash())) throw new RoomException("WRONG_PIN");
@@ -570,9 +595,9 @@ public final class RoomService implements AutoCloseable {
             default -> "Thao tác chưa hoàn tất. Vui lòng thử lại.";
         };
     }
-    private record PendingHistory(boolean room, long id, Instant at, String reason) {
+    private record PendingHistory(boolean room, long id, String roomOpaqueId, Instant at, String reason) {
         void run(RoomRepository repository) throws SQLException {
-            if (room) repository.closeRoom(id, at, reason); else repository.leave(id, at, reason);
+            if (room) repository.closeRoom(id, roomOpaqueId, at, reason); else repository.leave(id, at, reason);
         }
     }
 }

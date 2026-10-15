@@ -104,7 +104,10 @@ class RoomFileTransferCompatibilityTest {
         assertDenied(() -> files.listFiles(guest.token(), room.id(), 0));
         assertEquals(1, activeMembers());
 
-        AuthResponse joined = control.joinRoom(guest.token(), Long.toString(room.id()), "543210");
+        AuthResponse deniedId = control.joinRoom(guest.token(), Long.toString(room.id()), "543210");
+        assertFalse(deniedId.success());
+        assertEquals(1, activeMembers(), "A numeric room ID must never grant membership");
+        AuthResponse joined = control.joinRoom(guest.token(), room.code(), "543210");
         assertTrue(joined.success(), joined.message());
         assertEquals(2, joined.room().people());
         assertTrue(control.joinRoom(guest.token(), room.code(), "543210").success());
@@ -148,6 +151,75 @@ class RoomFileTransferCompatibilityTest {
         assertTrue(control.logout(guest.token()).success());
         assertEquals("INVALID_SESSION", assertThrows(TransferException.class,
                 () -> files.listFiles(guest.token(), room.id(), 0)).code(), "Auth logout must revoke tokens on the file listener too");
+    }
+
+    @Test
+    void reopeningKeepsSharedFilesButRequiresFormerMembersToJoinAgain() throws Exception {
+        RoomInfo original = control.createRoom(host.token(), "Mở lại phòng chia sẻ", "543210", 10).room();
+        assertTrue(control.joinRoom(guest.token(), original.code(), "543210").success());
+        Path source = source("kept-after-reopen.bin", 1024);
+        var upload = files.prepareUpload(original.id(), source, UUID.randomUUID(), new Cancellation(), null);
+        FileMetadata metadata = files.upload(host.token(), upload, new Cancellation(), null);
+
+        assertTrue(control.leaveRoom(guest.token(), original.id()).success());
+        assertEquals("DA_DONG", control.leaveRoom(host.token(), original.id()).room().status());
+        assertDenied(() -> files.listFiles(host.token(), original.id(), 0));
+        assertDenied(() -> files.listFiles(guest.token(), original.id(), 0));
+
+        AuthResponse reopened = control.reopenRoom(host.token(), original.id());
+        assertTrue(reopened.success(), reopened.message());
+        assertEquals(original.id(), reopened.room().id());
+        assertEquals(original.code(), reopened.room().code());
+        assertEquals(1, reopened.room().people());
+        assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
+        assertEquals(List.of(metadata), files.listFiles(host.token(), original.id(), 0));
+        assertDenied(() -> files.listFiles(guest.token(), original.id(), 0));
+        assertEquals("INVALID_ROOM_PIN", control.joinRoom(guest.token(), original.code(), "111111").code());
+        assertTrue(control.joinRoom(guest.token(), original.code(), "543210").success());
+        assertEquals(List.of(metadata), files.listFiles(guest.token(), original.id(), 0));
+        Path received = temporary.resolve("after-reopen.bin");
+        files.download(guest.token(), metadata, received, new Cancellation(), null);
+        assertEquals(sha256(source), sha256(received));
+    }
+
+    @Test
+    void signalingReopenAlsoRevokesOldFileMembershipsUntilFreshJoin() throws Exception {
+        String migration = Files.readString(Path.of("database/migrations/001-meeting-runtime.sql"))
+                .replaceAll("(?m)^--[^\\r\\n]*", "")
+                .replace("CHARACTER SET ascii COLLATE ascii_bin", "").replace("ENGINE=InnoDB", "");
+        for (String sql : migration.split(";")) if (!sql.isBlank()) fixture.execute(sql.strip());
+        var clock = java.time.Clock.systemUTC();
+        var validator = new server.auth.SessionValidator(fixture::connection, clock);
+        var hostPrincipal = validator.validate(host.token()).orElseThrow();
+        var guestPrincipal = validator.validate(guest.token()).orElseThrow();
+        try (var rooms = new server.meeting.RoomService(new server.meeting.RoomRepository(fixture::connection),
+                clock, "file-reopen-test", new byte[32], 10, event -> { })) {
+            rooms.start();
+            var original = rooms.create(hostPrincipal, UUID.randomUUID().toString(),
+                    new common.meeting.CreateRoomParams("Phòng video mở lại", "543210", 10, false));
+            rooms.join(hostPrincipal, "file-reopen-host", 1, UUID.randomUUID().toString(), original.joinCode(), "", false, false);
+            rooms.join(guestPrincipal, "file-reopen-guest", 1, UUID.randomUUID().toString(), original.joinCode(), "543210", false, false);
+            long roomId = original.collaborationRoom().id();
+            Path source = source("video-kept-after-reopen.bin", 1024);
+            var upload = files.prepareUpload(roomId, source, UUID.randomUUID(), new Cancellation(), null);
+            FileMetadata metadata = files.upload(host.token(), upload, new Cancellation(), null);
+
+            rooms.leave("file-reopen-host", "PHONG_DONG");
+            assertEquals(0, activeMembers());
+            assertDenied(() -> files.listFiles(host.token(), roomId, 0));
+            assertDenied(() -> files.listFiles(guest.token(), roomId, 0));
+            var reopened = rooms.reopen(hostPrincipal, UUID.randomUUID().toString(), original.joinCode());
+            assertEquals(roomId, reopened.collaborationRoom().id());
+            assertNotEquals(original.roomId(), reopened.roomId());
+            assertEquals(0, activeMembers(), "Opening the room must not revive past attendance");
+            rooms.join(hostPrincipal, "file-reopen-host", 1, UUID.randomUUID().toString(), reopened.joinCode(), "", false, false);
+            assertEquals(List.of(metadata), files.listFiles(host.token(), roomId, 0));
+            assertDenied(() -> files.listFiles(guest.token(), roomId, 0));
+            rooms.join(guestPrincipal, "file-reopen-guest", 1, UUID.randomUUID().toString(), reopened.joinCode(), "543210", false, false);
+            assertEquals(List.of(metadata), files.listFiles(guest.token(), roomId, 0));
+            assertEquals(4, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+            assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
+        }
     }
 
     @Test

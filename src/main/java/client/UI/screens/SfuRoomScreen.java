@@ -55,8 +55,9 @@ public final class SfuRoomScreen extends BorderPane {
         TextField code = new TextField(); code.setPromptText("MMR-…"); code.setId("sfu-join-code");
         PasswordField joinPin = new PasswordField(); joinPin.setPromptText("PIN"); joinPin.setId("sfu-join-pin");
         Button join = Ui.button("Tham gia", "primary", () -> {
-            String validation = RoomValidation.pinError(joinPin.getText());
-            if (code.getText().isBlank() || validation != null) { error.setText(validation == null ? "Nhập mã phòng." : validation); return; }
+            String validation = RoomValidation.codeError(code.getText());
+            if (validation == null) validation = RoomValidation.pinError(joinPin.getText());
+            if (validation != null) { error.setText(validation); return; }
             String enteredCode = code.getText().strip().toUpperCase(java.util.Locale.ROOT), pin = joinPin.getText();
             perform(() -> session.lookup(enteredCode, pin).thenCompose(room -> session.join(false, false)), joinPin::clear);
         }); join.setId("sfu-join-submit");

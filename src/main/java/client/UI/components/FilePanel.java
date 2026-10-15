@@ -1,6 +1,7 @@
 package client.UI.components;
 
 import client.UI.SceneManager;
+import client.UI.VietnamTime;
 import client.filetransfer.FileTransferClient;
 import client.filetransfer.FileTransferClient.Cancellation;
 import client.filetransfer.FileTransferClient.Progress;
@@ -8,8 +9,6 @@ import common.filetransfer.FileMetadata;
 import common.filetransfer.TransferException;
 import java.io.File;
 import java.nio.file.Path;
-import java.time.OffsetDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
 import javafx.application.Platform;
@@ -145,10 +144,6 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
         if (size < 1_000_000_000) return String.format(Locale.ROOT, "%.1f MB", size / 1_000_000.0);
         return String.format(Locale.ROOT, "%.2f GB", size / 1_000_000_000.0);
     }
-    private static String time(String created) {
-        try { return OffsetDateTime.parse(created).atZoneSameInstant(java.time.ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("dd/MM HH:mm")); }
-        catch (RuntimeException unknown) { return created; }
-    }
     @Override public void close() {
         if (disposed) return; disposed = true; eventCancellation.cancel();
         transfers.forEach(row -> { if (row.cancellation != null) row.cancellation.cancel(); });
@@ -178,7 +173,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
             view.getStyleClass().add("file-row"); hideActions();
         }
         void available() {
-            detail.setText(bytes(file.sizeBytes()) + " · " + file.senderName() + " · " + time(file.createdAt()));
+            detail.setText(bytes(file.sizeBytes()) + " · " + file.senderName() + " · " + VietnamTime.formatFileTime(file.createdAt()));
             download.setVisible(true); download.setManaged(true); progress.setVisible(false); progress.setManaged(false); state.setText("Sẵn sàng tải");
         }
         void hideActions() { for (Button button : List.of(pause, retry, cancel)) { button.setVisible(false); button.setManaged(false); button.setDisable(false); } }

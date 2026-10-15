@@ -25,7 +25,7 @@ Giữ cấu hình Railway hiện tại trong file server được Git bỏ qua. 
    powershell -ExecutionPolicy Bypass -File .\scripts\start-client.ps1
    ```
 
-4. Đăng nhập bằng hai tài khoản khác nhau. Từ sảnh dùng **Tạo phòng / Tham gia phòng** có sẵn. Client đầu tạo phòng với PIN; client thứ hai nhập ID hoặc mã và PIN. Hai màn hình thấy cùng thành viên. Chủ phòng có khóa/mở khóa và mời thành viên ra; rời phòng cập nhật màn hình còn lại. Chủ phòng rời thì quyền chủ tự chuyển cho thành viên còn lại; chọn Đóng phòng mới kết thúc cho mọi người. Một tài khoản chỉ có một membership đang sống trong cùng phòng. Chọn camera trên màn hình trước khi vào phòng hoặc trong màn hình họp theo `video-call.md`.
+4. Đăng nhập bằng hai tài khoản khác nhau. Từ sảnh dùng **Tạo phòng / Tham gia phòng** có sẵn. Client đầu tạo phòng với PIN; client thứ hai nhập mã phòng và PIN. Hai màn hình thấy cùng thành viên. Chủ phòng có khóa/mở khóa và mời thành viên ra; rời phòng cập nhật màn hình còn lại. Chủ phòng rời thì quyền chủ tự chuyển cho thành viên còn lại; chọn Đóng phòng mới kết thúc cho mọi người. Một tài khoản chỉ có một membership đang sống trong cùng phòng. Chọn camera trên màn hình trước khi vào phòng hoặc trong màn hình họp theo `video-call.md`.
 
 Chuyển view chỉ gỡ listener của view; `SceneManager` sở hữu `MeetingSession`. Rời phòng đóng signaling; logout/đóng ứng dụng hủy session và các yêu cầu chờ. Mất kết nối không tự bật lại thiết bị. Certificate được kiểm tra trust và hostname, không dùng trust-all.
 

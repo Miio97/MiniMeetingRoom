@@ -276,7 +276,7 @@ public final class DiagnosticsReport {
             String kind = tagged(fields, "kind", Set.of("AUDIO", "VIDEO", "SCREEN"))
                     ? tag(fields, "kind") : "unavailable";
             String action = tagged(fields, "action", Set.of("LOGIN", "REGISTER", "LOGOUT", "AUTHENTICATE",
-                    "CREATE_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM", "SET_MEDIA_STATE",
+                    "CREATE_ROOM", "REOPEN_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM", "SET_MEDIA_STATE",
                     "SET_LOCKED", "STOP_PUBLISH", "KICK", "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE",
                     "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE", "OTHER"))
                     ? tag(fields, "action") : "unavailable";

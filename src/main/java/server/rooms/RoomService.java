@@ -67,7 +67,7 @@ public final class RoomService {
             return AuthResponse.error("INVALID_REQUEST", "Yêu cầu không hợp lệ.");
         }
         String action = request.action().toUpperCase(Locale.ROOT);
-        if (!List.of("CREATE_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM").contains(action)) {
+        if (!List.of("CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM").contains(action)) {
             return AuthResponse.error("INVALID_REQUEST", "Chức năng không được hỗ trợ.");
         }
         String validation = validate(action, request.room());
@@ -93,6 +93,7 @@ public final class RoomService {
                 }
                 AuthResponse response = switch (action) {
                     case "CREATE_ROOM" -> create(connection, userId, request.room());
+                    case "REOPEN_ROOM" -> reopen(connection, userId, request.room());
                     case "JOIN_ROOM" -> join(connection, userId, request.room());
                     case "LIST_ROOMS" -> list(connection, userId);
                     case "GET_ROOM" -> get(connection, userId, request.room());
@@ -153,7 +154,7 @@ public final class RoomService {
     }
 
     private AuthResponse join(Connection connection, long userId, RoomRequest request) throws SQLException {
-        RoomRow room = findRoom(connection, request.identifier());
+        RoomRow room = findRoom(connection, "p.Ma_Phong_Tham_Gia", request.identifier().strip().toUpperCase(Locale.ROOT));
         AuthResponse unavailable = unavailable(room);
         if (unavailable != null) {
             return unavailable;
@@ -191,6 +192,35 @@ public final class RoomService {
         return AuthResponse.roomOk("Tham gia phòng thành công.", snapshot(connection, room, true));
     }
 
+    private AuthResponse reopen(Connection connection, long userId, RoomRequest request) throws SQLException {
+        RoomRow room = findRoom(connection, request.identifier());
+        if (room == null) {
+            return AuthResponse.error("ROOM_NOT_FOUND", "Không tìm thấy phòng theo mã đã nhập.");
+        }
+        if (room.hostId() != userId) {
+            return AuthResponse.error("ROOM_ACCESS_DENIED", "Chỉ chủ phòng mới có thể mở lại phòng.");
+        }
+        if (!"DA_DONG".equals(room.status())) {
+            return AuthResponse.error("ROOM_ALREADY_ACTIVE", "Phòng chưa kết thúc hoặc đã được mở lại.");
+        }
+        Instant now = clock.instant();
+        // Keep every previous attendance record ended, including stale active rows from an older server.
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = ?, Ly_Do_Roi = 'PHONG_DONG' "
+                        + "WHERE Ma_Phong = ? AND Roi_Phong_Luc IS NULL")) {
+            statement.setTimestamp(1, Timestamp.from(now), utc());
+            statement.setLong(2, room.id());
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE Phong_Hop SET Trang_Thai = 'DANG_HOAT_DONG', Ngay_Dong = NULL, Da_Khoa = FALSE WHERE Ma_Phong = ?")) {
+            statement.setLong(1, room.id());
+            statement.executeUpdate();
+        }
+        addMember(connection, room.id(), userId, "CHU_PHONG", now);
+        return AuthResponse.roomOk("Đã mở lại phòng.", snapshot(connection, findRoom(connection, room.id()), true));
+    }
+
     private AuthResponse list(Connection connection, long userId) throws SQLException {
         List<RoomInfo> rooms = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
@@ -225,7 +255,7 @@ public final class RoomService {
     private AuthResponse leave(Connection connection, long userId, RoomRequest request) throws SQLException {
         RoomRow room = findRoom(connection, request.identifier());
         if (room == null) {
-            return AuthResponse.error("ROOM_NOT_FOUND", "Không tìm thấy phòng theo ID hoặc mã đã nhập.");
+            return AuthResponse.error("ROOM_NOT_FOUND", "Không tìm thấy phòng theo mã đã nhập.");
         }
         if (room.hostId() != userId && !hasEverParticipated(connection, room.id(), userId)) {
             return AuthResponse.error("ROOM_ACCESS_DENIED", "Bạn chưa từng tham gia phòng này.");
@@ -278,7 +308,8 @@ public final class RoomService {
             if (error == null) error = RoomValidation.pinError(request.pin());
             if (error == null) error = RoomValidation.capacityError(request.capacity());
         } else {
-            error = RoomValidation.identifierError(request.identifier());
+            error = "JOIN_ROOM".equals(action) ? RoomValidation.codeError(request.identifier())
+                    : RoomValidation.identifierError(request.identifier());
             if (error == null && "JOIN_ROOM".equals(action)) error = RoomValidation.pinError(request.pin());
         }
         return error;
@@ -290,7 +321,7 @@ public final class RoomService {
 
     private static AuthResponse unavailable(RoomRow room) {
         if (room == null) {
-            return AuthResponse.error("ROOM_NOT_FOUND", "Không tìm thấy phòng theo ID hoặc mã đã nhập.");
+            return AuthResponse.error("ROOM_NOT_FOUND", "Không tìm thấy phòng theo mã đã nhập.");
         }
         if (room.closedAt() != null || !("CHO".equals(room.status()) || "DANG_HOAT_DONG".equals(room.status()))) {
             return AuthResponse.error("ROOM_CLOSED", "Phòng đã đóng hoặc không còn hoạt động.");

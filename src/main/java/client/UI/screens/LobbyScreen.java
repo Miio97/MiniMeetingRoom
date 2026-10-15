@@ -1,6 +1,7 @@
 package client.UI.screens;
 
 import client.UI.SceneManager;
+import client.UI.VietnamTime;
 import client.UI.components.*;
 import client.UI.dialogs.CreateRoomDialog;
 import common.room.RoomInfo;
@@ -14,7 +15,6 @@ import javafx.scene.layout.*;
 import javafx.scene.shape.Circle;
 import javafx.util.Duration;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 public final class LobbyScreen extends BorderPane {
@@ -25,14 +25,14 @@ public final class LobbyScreen extends BorderPane {
     private final VBox rooms = new VBox(12);
     private final Label roomStatus = Ui.label("", "caption");
     private final Button refresh;
-    private boolean disposed, loading, joining;
+    private boolean disposed, loading, joining, reopening;
     private Runnable stopWaiting = () -> { };
     public LobbyScreen(SceneManager manager) { this(manager, ""); }
     public LobbyScreen(SceneManager manager, String initialCode) {
         this.manager = manager;
         setLeft(new Sidebar(manager, "lobby"));
         VBox main = new VBox(24); main.setPadding(new Insets(32));
-        LocalDate today = LocalDate.now(ZoneId.of("Asia/Ho_Chi_Minh"));
+        LocalDate today = VietnamTime.today();
         String[] days = {"Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"};
         String[] parts = manager.user().strip().split("\\s+");
         Circle dot = new Circle(4, javafx.scene.paint.Color.web("#1E9E5A"));
@@ -52,9 +52,9 @@ public final class LobbyScreen extends BorderPane {
         StackPane.setAlignment(art, Pos.CENTER_RIGHT); art.setTranslateY(20);
         ((Label) createText.getChildren().get(2)).maxWidthProperty().bind(create.widthProperty().subtract(148));
         VBox join = new VBox(8); join.getStyleClass().add("card");
-        code.setText(initialCode); code.setPromptText("Ví dụ: 42 hoặc MMR-…"); code.setId("join-room-identifier");
+        code.setText(initialCode); code.setPromptText("Ví dụ: MMR-XXXXXXXX"); code.setId("join-room-identifier");
         pin.setPromptText("PIN 4–6 số"); pin.setId("join-room-pin");
-        VBox codeField = Ui.field("ID / Mã phòng", code); codeField.getChildren().add(Ui.label("Nhập ID hoặc mã được chủ phòng chia sẻ", "room-hint"));
+        VBox codeField = Ui.field("Mã phòng", code); codeField.getChildren().add(Ui.label("Nhập mã được chủ phòng chia sẻ", "room-hint"));
         VBox pinField = Ui.field("PIN", pin); codeField.setMinWidth(0); pinField.setMinWidth(0);
         HBox.setHgrow(codeField, Priority.ALWAYS); HBox.setHgrow(pinField, Priority.ALWAYS);
         HBox inputs = Ui.row(12, codeField, pinField); inputs.setAlignment(Pos.TOP_LEFT);
@@ -63,10 +63,18 @@ public final class LobbyScreen extends BorderPane {
         cancelAdmission.setId("cancel-room-admission"); cancelAdmission.setVisible(false); cancelAdmission.setManaged(false);
         Button enter = Ui.button("Tham gia", "primary", () -> {
             error.setManaged(true); error.setVisible(true);
-            String validation = RoomValidation.identifierError(code.getText());
+            String validation = RoomValidation.codeError(code.getText());
             if (validation == null) validation = RoomValidation.pinError(pin.getText());
             if (validation != null) { error.setText(validation); return; }
             String identifier = code.getText(), roomPin = pin.getText();
+            if (!manager.usesSignalingRooms()) {
+                joining = true; error.setText("Đang kiểm tra phòng…"); setDisable(true);
+                manager.requestJoinRoom(identifier, roomPin, room -> {
+                    if (disposed || !joining) return;
+                    joining = false; setDisable(false); pin.clear(); manager.preJoin(room);
+                }, cause -> { if (!disposed) { joining = false; setDisable(false); error.setText(SceneManager.connectionError(cause)); } });
+                return;
+            }
             error.setText("Đang kiểm tra phòng…"); joining = true; if (!manager.usesSignalingRooms()) setDisable(true);
             code.setDisable(true); pin.setDisable(true); actionsPending(true);
             cancelAdmission.setVisible(true); cancelAdmission.setManaged(true);
@@ -79,7 +87,7 @@ public final class LobbyScreen extends BorderPane {
                 pin.clear(); manager.preJoin(room);
             }, cause -> { if (!disposed && joining) { stopWaiting.run(); error.setText(SceneManager.connectionError(cause)); } });
         }); enter.setId("join-room-submit"); enter.setMaxWidth(Double.MAX_VALUE);
-        join.getChildren().addAll(Ui.label("Tham gia phòng", "subtitle"), Ui.label("Nhập ID / mã phòng và PIN được chia sẻ với bạn.", "muted"), inputs, error, enter, cancelAdmission);
+        join.getChildren().addAll(Ui.label("Tham gia phòng", "subtitle"), Ui.label("Nhập mã phòng và PIN được chia sẻ với bạn.", "muted"), inputs, error, enter, cancelAdmission);
         HBox actions = Ui.row(20, create, join); actions.setAlignment(Pos.TOP_LEFT);
         create.setMinWidth(0); join.setMinWidth(0); create.setPrefWidth(350); join.setPrefWidth(420);
         HBox.setHgrow(create, Priority.ALWAYS); HBox.setHgrow(join, Priority.ALWAYS);
@@ -111,15 +119,29 @@ public final class LobbyScreen extends BorderPane {
             roomStatus.setText(recent.isEmpty() ? "Bạn chưa tạo hoặc tham gia phòng nào." : recent.size() + " phòng • Chọn phòng và nhập lại PIN để tham gia.");
             for (RoomInfo room : recent) {
             boolean live = "DANG_HOAT_DONG".equals(room.status()) || "CHO".equals(room.status());
+            boolean canReopen = "DA_DONG".equals(room.status()) && manager.authenticatedUser() != null
+                    && room.hostId() == manager.authenticatedUser().id();
             Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
             Label title = Ui.label(room.name(), "room-title");
-            VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label("ID " + room.id() + "  ·  " + room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + room.createdAt(), "room-meta"));
+            VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label(room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + VietnamTime.formatDateTime(room.createdAt()), "room-meta"));
             text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
-            Button action = Ui.button(live ? "Nhập PIN" : "Đã đóng", live ? "primary" : "secondary", () -> {
+            Button action = Ui.button(canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng", live || canReopen ? "primary" : "secondary", () -> {
+                if (canReopen) { reopen(room); return; }
                 code.setText(room.code()); pin.clear(); pin.requestFocus();
-            }); action.setDisable(!live); action.setMinWidth(90);
+            }); action.setId("room-action-" + room.id()); action.setDisable(!live && !canReopen); action.setMinWidth(90);
             HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); rooms.getChildren().add(item);
             }
+    }
+    private void reopen(RoomInfo room) {
+        if (disposed || reopening) return;
+        reopening = true; setDisable(true); roomStatus.setText("Đang mở lại phòng…");
+        manager.requestReopenRoom(room.id(), reopened -> {
+            if (disposed) return;
+            reopening = false; setDisable(false); pin.clear(); manager.preJoin(reopened);
+        }, cause -> {
+            if (disposed) return;
+            reopening = false; setDisable(false); roomStatus.setText(SceneManager.connectionError(cause));
+        });
     }
     public void dispose() { if (joining) stopWaiting.run(); disposed = true; pin.clear(); pulse.stop(); }
 }

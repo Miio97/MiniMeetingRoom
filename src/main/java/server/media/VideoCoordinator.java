@@ -17,10 +17,15 @@ public final class VideoCoordinator implements AutoCloseable {
     private final VideoEngineClient engine;
     private final ConcurrentHashMap<String, Owner> owners = new ConcurrentHashMap<>();
     private final java.util.Set<String> renewing = ConcurrentHashMap.newKeySet();
-    private final ThreadPoolExecutor controls = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(128),
-            Thread.ofPlatform().daemon().name("video-permission-", 0).factory());
+    private final ThreadPoolExecutor controls;
     private final AtomicBoolean closed = new AtomicBoolean();
-    public VideoCoordinator(RoomService rooms, VideoEngineClient engine) { this.rooms = rooms; this.engine = engine; }
+    public VideoCoordinator(RoomService rooms, VideoEngineClient engine) {
+        this(rooms, engine, new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(128),
+                Thread.ofPlatform().daemon().name("video-permission-", 0).factory()));
+    }
+    VideoCoordinator(RoomService rooms, VideoEngineClient engine, ThreadPoolExecutor controls) {
+        this.rooms = rooms; this.engine = engine; this.controls = controls;
+    }
     private JsonObject envelope(String operation, MemberAuthorization member) {
         JsonObject body = new JsonObject(); body.addProperty("operation", operation); body.addProperty("room", member.roomId());
         body.addProperty("participant", member.participantId()); body.addProperty("generation", member.generation()); return body;
@@ -77,17 +82,19 @@ public final class VideoCoordinator implements AutoCloseable {
     public void validated(SignalingServer.Connection connection) {
         Owner owner = owners.get(connection.id());
         if (owner == null || closed.get() || !renewing.add(connection.id())) return;
-        try { controls.execute(() -> { try { grant(owner); } catch (Exception invalid) { revoke(connection.id()); }
+        try { controls.execute(() -> { try { grant(owner); } catch (Exception invalid) { revoke(owner); }
             finally { renewing.remove(connection.id()); } }); }
-        catch (RejectedExecutionException busy) { renewing.remove(connection.id()); revoke(connection.id()); }
+        catch (RejectedExecutionException busy) { renewing.remove(connection.id()); revoke(owner); }
     }
     public void roomEvent(RoomEvent event) {
         if (!java.util.Set.of("ROOM_LEFT", "ROOM_CLOSED", "PUBLISH_STOPPED").contains(event.type())) return;
+        Owner ended = owners.get(event.recipientConnectionId());
+        if (!event.type().equals("PUBLISH_STOPPED") && (ended == null || !ended.member().roomId().equals(event.roomId()))) return;
         try { controls.execute(() -> {
             if (event.type().equals("PUBLISH_STOPPED")) {
                 if (event.body() instanceof Map<?, ?> body && "VIDEO".equals(body.get("kind")) && body.get("participantId") instanceof String participant)
                     stopParticipant(event.roomId(), participant);
-            } else revoke(event.recipientConnectionId());
+            } else revoke(ended);
         }); } catch (RejectedExecutionException busy) { /* Lease expiry is the bounded fail-closed fallback. */ }
     }
     public void stopParticipant(String roomId, String participant) {
@@ -97,7 +104,12 @@ public final class VideoCoordinator implements AutoCloseable {
         }
     }
     public void revoke(String connectionId) {
-        Owner owner = owners.remove(connectionId); if (owner == null) return;
+        revoke(owners.get(connectionId));
+    }
+    private void revoke(Owner owner) {
+        if (owner == null) return;
+        // Delayed cleanup belongs to this membership, even when the connection has joined another room run.
+        owners.remove(owner.connection().id(), owner);
         long start = System.nanoTime();
         try { engine.control(envelope("revoke", owner.member())); }
         catch (Exception failure) { Diagnostics.current().failure("video.revoke.failed", failure, Map.of("phase", "close")); }

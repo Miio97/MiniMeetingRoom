@@ -23,7 +23,7 @@ public final class ApplicationService {
     public AuthResponse handle(AuthRequest request) throws SQLException {
         if (request == null || request.action() == null) return authentication.handle(request);
         return switch (request.action().toUpperCase(Locale.ROOT)) {
-            case "CREATE_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM" -> rooms.handle(request);
+            case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM" -> rooms.handle(request);
             default -> authentication.handle(request);
         };
     }
