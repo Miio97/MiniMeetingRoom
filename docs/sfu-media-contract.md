@@ -13,6 +13,19 @@ media và router tự viết. Dependency đã kiểm chứng ở Mốc 0:
 đổi engine giữa các bài so sánh. Mốc 0 chạy trên JDK thực tế của máy, chưa tự suy
 ra đã kiểm thử runtime JDK 21 chỉ vì Maven compile release 21.
 
+
+## Âm thanh và SCREEN — hợp đồng triển khai 15/10/2026
+
+Mục này mô tả API đang chạy; các endpoint /v1/leases và envelope bên dưới là thiết kế cũ để đối chiếu, không phải API hiện tại.
+
+Signaling TLS v1: AUDIO_PUBLISH/AUDIO_SUBSCRIBE/AUDIO_STOP/AUDIO_STATE và SCREEN_PUBLISH/SCREEN_SUBSCRIBE/SCREEN_STOP/SCREEN_STATE có cùng body và giới hạn với VIDEO_*. Publish nhận sdp; subscribe nhận source (participant), publication (nonce), sdp. Reply là AUDIO_REPLY/SCREEN_REPLY/VIDEO_REPLY. STATE trả sources (participant → nonce) của đúng kind, chỉ thành viên cùng phòng và loại bản thân. Role/user ID trong client body không cấp quyền.
+
+Java gọi POST /v1/control trên loopback với operation publish/subscribe/stop/state, thêm kind=AUDIO|VIDEO|SCREEN; bỏ kind vẫn mặc định VIDEO tương thích cũ. Renew/revoke giữ lease participant+room+generation tối đa 15 giây, TTL không vượt phiên auth. State/stop/publish/subscribe kiểm lease. Revoke dọn mọi kind và subscription phụ thuộc; stop chỉ dọn kind đã chọn và vô hiệu negotiation đang chạy của kind đó. Pending negotiation giữ phiên bản lease và phiên bản stop của kind; stop audio không hủy camera/screen đang negotiate.
+
+Mỗi participant tối đa một publication/kind, mỗi subscriber tối đa một PC/nguồn/kind. Opus PT111, 48000 Hz, 2 channel, minptime=10;useinbandfec=1; VIDEO và SCREEN dùng VP8 PT96. SCREEN có tối đa một publisher/phòng, kể cả nguồn đang chờ first RTP; người thứ hai nhận SHARE_IN_USE. Mỗi route có queue/writer 256 packet/2 MiB/750 ms riêng. Audio drop không yêu cầu PLI; VIDEO/SCREEN coalesce PLI 250 ms. SFU không decode/encode hoặc chuyển media qua signaling.
+
+RoomService.setMediaRequested chỉ sửa requested của kind đã chọn. confirmAudio/confirmVideo/confirmShare chỉ do adapter engine gọi sau STATE; publishing phải có RTP được engine thấy và requested còn bật. Host STOP_PUBLISH kiểm host và dừng đúng kind trong engine; không có thao tác bật từ xa. Leave/logout/kick/hết phiên thu hồi toàn bộ media.
+
 ## Ranh giới quyền và dữ liệu
 
 Java `SessionValidator` kiểm tra token opaque do auth cấp dựa trên hash, expiry,

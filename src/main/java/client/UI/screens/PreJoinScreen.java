@@ -14,6 +14,7 @@ public final class PreJoinScreen extends BorderPane {
     private final Timeline meter;
     private boolean disposed;
     private CameraControls cameraControls;
+    private AudioControls audioControls;
     private javafx.scene.image.ImageView nativePreview;
     private Label entryError;
     public boolean cameraPermissionGranted() { return cameraControls != null && cameraControls.permissionGrantedProperty().get(); }
@@ -55,6 +56,7 @@ public final class PreJoinScreen extends BorderPane {
         nativePreview.imageProperty().bind(video.frames(session.selfParticipantId()).imageProperty());
         preview.getChildren().add(nativePreview);
         cameraControls = new CameraControls(video, true);
+        audioControls = new AudioControls(video.audio());
         Label error = Ui.label("", "error-text"); error.setId("prejoin-error"); error.setWrapText(true);
         entryError = error;
         error.visibleProperty().bind(error.textProperty().isNotEmpty()); error.managedProperty().bind(error.visibleProperty());
@@ -69,12 +71,13 @@ public final class PreJoinScreen extends BorderPane {
             if (disposed) return; setDisable(true);
             manager.leaveRoom(() -> { if (!disposed) manager.lobby(); }, message -> { if (!disposed) { setDisable(false); error.setText(message); } });
         }); back.setId("cancel-prejoin");
-        VBox body = Ui.column(18, preview, cameraControls, error,
+        VBox body = Ui.column(18, preview, cameraControls, audioControls, error,
                 Ui.row(12, enter, back)); body.setPadding(new Insets(28, 0, 0, 0)); VBox.setVgrow(preview, Priority.ALWAYS); setCenter(body);
     }
     public void dispose() {
         disposed = true; meter.stop();
         if (cameraControls != null) cameraControls.dispose();
+        if (audioControls != null) audioControls.dispose();
         if (nativePreview != null) nativePreview.imageProperty().unbind();
     }
 }

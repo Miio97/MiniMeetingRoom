@@ -21,10 +21,10 @@ public final class MeetingHandler implements SignalingServer.Handler {
         String type;
         try {
             switch (request.type()) {
-                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE" -> {
+                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STOP", "SCREEN_STATE" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     if (video == null) throw new SignalException("MEDIA_NOT_READY");
-                    response = video.handle(connection, request); type = "VIDEO_REPLY";
+                    response = video.handle(connection, request); type = request.type().substring(0, request.type().indexOf('_')) + "_REPLY";
                 }
                 case "CREATE_ROOM" -> {
                     var params = new CreateRoomParams(text(body, "name", 100), text(body, "pin", 6),
@@ -68,7 +68,7 @@ public final class MeetingHandler implements SignalingServer.Handler {
                 case "STOP_PUBLISH" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     response.add("room", JSON.toJsonTree(rooms.stopPublish(connection.id(), text(body, "targetParticipantId", 96), text(body, "kind", 12))));
-                    if (video != null && "VIDEO".equals(text(body, "kind", 12))) video.stopParticipant(request.roomId(), text(body, "targetParticipantId", 96));
+                    if (video != null) video.stopParticipant(request.roomId(), text(body, "targetParticipantId", 96), text(body, "kind", 12));
                     type = "ROOM_SNAPSHOT";
                 }
                 case "KICK" -> {

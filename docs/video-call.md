@@ -1,6 +1,6 @@
 # Video call qua WebRTC/SFU
 
-Video đã được tích hợp vào các nút **Tạo phòng / Tham gia phòng** có sẵn trong sảnh, màn hình **PreJoinScreen** và **MeetingScreen**. Nút Mở phòng SFU riêng đã được bỏ khỏi sảnh. JavaFX/auth/phòng/signaling giữ ở Java; Go/Pion chỉ xử lý transport và chuyển tiếp VP8. Không dùng mesh, video Base64, WebView hoặc SFU hoàn chỉnh của bên thứ ba. Voice chat và screenshare chưa triển khai theo phạm vi người dùng yêu cầu.
+Video đã được tích hợp vào các nút **Tạo phòng / Tham gia phòng** có sẵn trong sảnh, màn hình **PreJoinScreen** và **MeetingScreen**. Nút Mở phòng SFU riêng đã được bỏ khỏi sảnh. JavaFX/auth/phòng/signaling giữ ở Java; Go/Pion chỉ xử lý transport và chuyển tiếp VP8. Không dùng mesh, video Base64, WebView hoặc SFU hoàn chỉnh của bên thứ ba. Voice chat đã có luồng riêng Opus; screenshare đã có nguồn VP8 riêng cùng owner.
 
 ## Database
 
@@ -98,3 +98,34 @@ Hồi quy sau bản sửa camera/nhận video: 189 tests, không failure/error, 
 Bằng chứng local được Git bỏ qua: `target/video-engine-tests.txt`, `target/unified-video-integration.txt`, `target/unified-room-regression.txt` và `target/video-diagnostics/`. Maven clean xóa các file trong target; cần giữ bản sao trước khi clean nếu muốn so sánh nhiều lần thử.
 
 Go ghi `.txt` riêng, mẫu mỗi 5 giây, giới hạn 10 MiB; Java tiếp tục một diagnostics owner. `video.engine.sample` chứa counter codec bytes/packets, queue/drop/PLI và Go heap/goroutine; Go heap không phải RSS. `video.integration.received` ghi frame callback và cập nhật ảnh của bài thử. Không log frame, SDP/ICE, PIN/token, secret, tên người dùng hoặc địa chỉ mạng. Dùng chung `MMR_DIAGNOSTICS_RUN_ID` khi so các process. Reporter nhận các event video; giá trị chưa đo vẫn unavailable.
+
+## Voice chat — cập nhật 15/10/2026
+
+Nút mic trong phòng mới dùng audio Opus qua SFU. Nhấn Bật mic lần đầu để cho phép; quyết định và microphone đã chọn được ghi cục bộ tại %LOCALAPPDATA%/MiniMeetingRoom/microphone-preferences.properties. Không mở mic khi chỉ xem danh sách hoặc vào phòng chờ. Ở phòng chờ, chỉ hành động Bật mic mới mở nguồn thu; vào họp mới publish. Tắt mic đóng PC và toàn bộ owner thu âm, không gửi silence thay mute. Mất kết nối không tự bật lại mic.
+
+Cài đặt có danh sách Microphone/Loa từ MediaDevices v0.19.0. Tắt mic trước khi đổi microphone; đổi loa dựng lại các PC nhận âm thanh. Mức mic hiện Chưa có dữ liệu. Windows Settings → Privacy & security → Microphone → cho phép desktop apps vẫn là điều kiện của hệ điều hành. Nên dùng tai nghe để giảm vọng. Capture dùng noise suppression và high-pass filter; tắt tự tăng gain. Từ bản sửa 16/10/2026, tắt echo cancellation trong factory chỉ gửi: AEC tích hợp của Windows yêu cầu playout trước recording và làm mic không gửi RTP trong kiến trúc tách factory hiện tại. Không mở loa rỗng để đáp ứng AEC. Chưa có khử vọng âm học giữa hai factory; dùng tai nghe khi nghiệm thu hai máy.
+
+AudioCallController được VideoCallController sở hữu qua PreJoin→Meeting; có worker riêng và closeComplete. NativeAudioSession tách factory nhận và thu để không trộn CUSTOM input của anchor nhận với DEVICE input. Mỗi nguồn khác có một subscriber PC. Chính sách phòng tối đa 10 người chưa là năng lực mở rộng đã đo. Phòng cũ tiếp tục dùng thiết bị demo có nhãn mô phỏng.
+
+Kiểm tra A đã chạy: AudioCallIntegrationTest (1) và VideoCallIntegrationTest (5), 6 test PASS, 0 skip, bằng H2/TLS, HeadlessAudioDeviceModule + PCM tạo sẵn. Ba client nhận âm thanh từng nguồn khác; host stop AUDIO giữ camera, kick và đóng client giữ audio giữa những client còn lại; 100 thao tác mic kết thúc ở trạng thái tắt. Chứng cứ target/audio-native-tests.txt. Thiết bị mic/loa thật cần người dùng nghiệm thu.
+
+## Chia sẻ màn hình/cửa sổ — cập nhật 15/10/2026
+
+Trong phòng mới, nhấn Chia sẻ để mở dialog. Danh sách nguồn gồm ScreenCapturer/WindowCapturer → DesktopSource của SDK 0.19.0; tên/ID chỉ ở bộ chọn cục bộ. Chọn một nguồn là hành động bắt đầu preview cục bộ, chưa publish. Sau khi có frame, nhấn Chia sẻ để phát; Hủy đóng nguồn preview. SDK VideoDesktopSource thực hiện capture theo ID đã chọn. Không tự ghi nhớ/khôi phục nguồn sau reconnect.
+
+Screen là publication SCREEN VP8 riêng; camera vẫn hoạt động. Mỗi phòng chỉ một người share, nguồn thứ hai nhận SHARE_IN_USE. Người vào muộn nhận share đang chạy và yêu cầu keyframe qua PLI. Người nhận xem share lớn cùng dải thumbnail camera, vẫn dùng phân trang/pin khi trở về lưới. Người phát xem thông báo Bạn đang chia sẻ màn hình và nút Dừng chia sẻ; preview của nguồn nằm ở dialog trước khi phát, không subscribe lại chính mình hoặc hiển thị ảnh toàn màn hình lồng nhau. Host dùng Dừng chia sẻ ở Thành viên; không bật nguồn từ xa.
+
+Nguồn mất khỏi danh sách màn hình/cửa sổ hoặc không trả frame trong 8 giây sẽ dừng. Khi thu nhỏ/đóng cửa sổ hoặc đổi màn hình, hãy khôi phục rồi chọn lại nguồn. SDK không cung cấp lý do Windows chi tiết qua VideoDesktopSource; hành vi cửa sổ thu nhỏ, multi-monitor, quyền chụp màn hình và driver trả ảnh cũ vẫn cần nghiệm thu thiết bị thật. Thông báo lỗi hướng dẫn kiểm tra quyền Windows/khôi phục cửa sổ; không ghi title/ID nguồn hoặc lỗi native nguyên văn vào diagnostics.
+
+Cấu hình qua VM Options của client (NetBeans Properties → Run → VM Options):
+
+| JVM property | Mặc định | Phạm vi |
+|---|---:|---|
+| mmr.screen.width | 1280 | 320–1280 px |
+| mmr.screen.height | 720 | 240–720 px |
+| mmr.screen.fps | 10 | 1–15 |
+| mmr.screen.bitrate | 1800000 | 200000–5000000 bit/s |
+
+Xem config/media-client.vmoptions.example. Các giá trị là mục tiêu cấu hình, không phải FPS/bitrate đã đo. Giữ giới hạn 1280×720 của VideoFrameMailbox, một ảnh mới nhất và throttle ảnh 10 lần/giây; chưa hỗ trợ mailbox 1080p. Screen có worker/capture/PC riêng nên không xếp việc capture vào FX thread hay đóng camera.
+
+Nguồn API đã đối chiếu với sources.jar chính thức webrtc-java:0.19.0 từ Maven Central và tag [v0.19.0](https://github.com/devopvoid/webrtc-java/tree/v0.19.0): media/MediaDevices, media/audio/AudioDeviceModuleBase, AudioOptions, PeerConnectionFactory (DEVICE/CUSTOM input guard), media/video/VideoDesktopSource và media/video/desktop/{ScreenCapturer,WindowCapturer,DesktopSource}. Không suy đoán API từ phiên bản khác.

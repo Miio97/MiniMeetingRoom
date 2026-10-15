@@ -8,9 +8,9 @@ public final class ControlBar extends HBox {
     public ControlBar(boolean micOn, boolean cameraOn, Runnable onMic, Runnable onCamera, Runnable onShare, Runnable onChat, Runnable onUsers, Runnable onSettings, Runnable onLeave) {
         super(12); setAlignment(Pos.CENTER); getStyleClass().add("control-bar"); setMaxWidth(USE_PREF_SIZE);
         mic = add("mic", "Mic", onMic); camera = add("camera", "Camera", onCamera);
-        camera.setId("meeting-camera");
+        camera.setId("meeting-camera"); mic.setId("meeting-mic");
         Region divider = new Region(); divider.getStyleClass().add("control-divider"); getChildren().add(divider);
-        share = add("share", "Chia sẻ", onShare); chat = add("chat", "Chat", onChat); users = add("users", "Thành viên", onUsers);
+        share = add("share", "Chia sẻ", onShare); share.setId("meeting-share"); chat = add("chat", "Chat", onChat); users = add("users", "Thành viên", onUsers);
         add("settings", "Cài đặt", onSettings).setId("meeting-settings");
         IconButton leave = add("phone", "Rời phòng", onLeave); leave.setId("leave-meeting"); leave.getStyleClass().add("danger-icon");
         mic(micOn); camera(cameraOn);

@@ -199,7 +199,8 @@ public final class RoomService implements AutoCloseable {
         RoomSnapshot reply;
         synchronized (lock) {
             available(); eventBudget(); Member member = member(connectionId); LiveRoom room = requireRoom(member.roomId);
-            MediaState state = new MediaState(mic, camera, share, false, false, false);
+            MediaState old = member.media;
+            MediaState state = new MediaState(mic, camera, share, mic && old.audioPublishing(), camera && old.videoPublishing(), share && old.sharePublishing());
             if (!state.equals(member.media)) { member.media = state; room.revision++; broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", state)); }
             reply = snapshot(room);
         }
@@ -214,6 +215,33 @@ public final class RoomService implements AutoCloseable {
             if (old.videoPublishing() == active) return;
             member.media = new MediaState(old.micRequested(), old.cameraRequested(), old.shareRequested(), old.audioPublishing(), active, old.sharePublishing());
             room.revision++; broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", member.media));
+        }
+        drainEvents();
+    }
+    public void setMediaRequested(String connectionId, String kind, boolean requested) {
+        synchronized (lock) {
+            available(); eventBudget(); Member member = member(connectionId); LiveRoom room = requireRoom(member.roomId);
+            MediaState o = member.media;
+            member.media = switch (kind) {
+                case "AUDIO" -> new MediaState(requested, o.cameraRequested(), o.shareRequested(), requested && o.audioPublishing(), o.videoPublishing(), o.sharePublishing());
+                case "VIDEO" -> new MediaState(o.micRequested(), requested, o.shareRequested(), o.audioPublishing(), requested && o.videoPublishing(), o.sharePublishing());
+                case "SCREEN" -> new MediaState(o.micRequested(), o.cameraRequested(), requested, o.audioPublishing(), o.videoPublishing(), requested && o.sharePublishing());
+                default -> throw new RoomException("INVALID_MEDIA_KIND");
+            };
+            if (!o.equals(member.media)) { room.revision++; broadcast(room,"PARTICIPANT_STATE",Map.of("participantId",member.participantId,"mediaState",member.media)); }
+        }
+        drainEvents();
+    }
+    public void confirmAudio(String connectionId, boolean publishing) { confirmKind(connectionId, "AUDIO", publishing); }
+    public void confirmShare(String connectionId, boolean publishing) { confirmKind(connectionId, "SCREEN", publishing); }
+    private void confirmKind(String connectionId, String kind, boolean publishing) {
+        synchronized (lock) {
+            available(); Member member = member(connectionId); LiveRoom room = requireRoom(member.roomId); MediaState o = member.media;
+            MediaState state = kind.equals("AUDIO")
+                ? new MediaState(o.micRequested(),o.cameraRequested(),o.shareRequested(),publishing && o.micRequested(),o.videoPublishing(),o.sharePublishing())
+                : new MediaState(o.micRequested(),o.cameraRequested(),o.shareRequested(),o.audioPublishing(),o.videoPublishing(),publishing && o.shareRequested());
+            if (state.equals(o)) return;
+            member.media=state; room.revision++; broadcast(room,"PARTICIPANT_STATE",Map.of("participantId",member.participantId,"mediaState",state));
         }
         drainEvents();
     }

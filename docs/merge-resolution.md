@@ -54,3 +54,22 @@ Kết quả tổng hợp báo cáo JUnit mới nhất theo từng lớp: **290 c
 Log lượt toàn bộ: `target/merge-final-regression.txt`; log kiểm tra lại 5 ca mở lại và 5 ca native cuối cùng (BUILD SUCCESS): `target/merge-native-final.txt`. Tổng hợp trên lấy kết quả mới nhất của từng lớp, không phải tổng số lượt chạy lặp. Hai ca bỏ qua vẫn là benchmark tệp và symbolic link Windows như phần xác minh trước. Thử nghiệm nhiều máy LAN và webcam thật chưa chạy.
 
 Trên máy Windows này, Maven Surefire dùng `-DargLine="-Djava.io.tmpdir=D:\MiniMeetingRoom\target\reopen-tmp -Djdk.net.unixdomain.tmpdir=D:\MiniMeetingRoom\target\reopen-tmp"` để tránh đường dẫn TEMP có tên rút gọn. Lượt native đặt TEMP/TMP của tiến trình kiểm thử về cùng thư mục để JVM nhận video riêng dùng được đường dẫn chuẩn. Đây là tham số kiểm thử cục bộ, không sửa cấu hình chạy server/client.
+
+## Ghép audio/screen cục bộ với main — 16/10/2026
+
+Tại `D:/LTMMT/MiniMeeting/MiniMeetingRoom`, nhánh `Miio` được cập nhật fast-forward từ `057bf0e` lên `019bdef` (`origin/main` đã fetch). Sau đó ghép lại toàn bộ thay đổi chưa commit về audio, screen và bản sửa voice Windows. Không cần bỏ chức năng của bên nào. Các giới hạn microphone/screenshare chưa triển khai trong các báo cáo ghép cũ bên trên không còn mô tả bản hiện tại.
+
+Giữ chat realtime và lịch sử, duyệt thành viên, khóa/đóng phòng, mời ra, chuyển chủ, tự chuyển chủ khi rời, mở lại phòng, mã phòng/PIN, giờ Việt Nam, thống kê mạng và truyền tệp từ main. Đồng thời giữ voice Opus, screen/cửa sổ VP8 độc lập camera, quyền và lựa chọn thiết bị, preview và cách dọn media cục bộ. Menu quản lý thành viên có thêm Dừng chia sẻ bên cạnh dừng mic/camera, chuyển chủ và mời ra; dùng quyền host do server xác minh. Không tự bật lại thiết bị.
+
+Năm file cần giải quyết xung đột trực tiếp: `README.md`, `MeetingScreen.java`, `DiagnosticsReport.java`, `VideoCoordinator.java`, `SignalingServer.java`. Allowlist chẩn đoán giữ cả `REOPEN_ROOM` và các thao tác AUDIO/VIDEO/SCREEN. Cleanup media giữ ràng buộc theo lượt phòng: tác vụ dọn hoặc dừng cũ không được thu hồi owner của phòng vừa mở lại.
+
+Bản sao 54 file cục bộ trước khi ghép nằm trong `.tools/merge-backup-20261016/`, kèm manifest SHA-256 và patch. Git stash `Safety backup before integrating origin/main 2026-10-16` vẫn được giữ. Những file cục bộ mới chưa track vẫn còn trong working tree; các thay đổi được để chưa stage, chưa commit/push để xem lại.
+
+Kết quả kiểm chứng bản ghép:
+
+- Hồi quy Java: **309 ca, 0 thất bại, 0 lỗi, 2 bỏ qua có điều kiện**, BUILD SUCCESS (`target/merge-audio-regression.txt`). Hai ca bỏ qua là benchmark truyền tệp cần opt-in và symbolic link Windows.
+- Media native: **10 ca, 0 thất bại/lỗi/bỏ qua**, BUILD SUCCESS (`target/merge-audio-native.txt`): 3 audio, 2 screen, 5 video. Kiểm tra audio hai chiều giữa JVM, screen cùng camera, host stop/kick, chat/tệp trong cùng phòng và mở lại phòng. Nguồn PCM/I420 tạo sẵn; không bật thiết bị thật.
+- Có 9 ca hồi quy mới theo AUDIO/VIDEO/SCREEN cho quyền dừng, publication được chủ động bật lại và tác vụ dừng cũ khi phòng mở lại. Thêm kiểm thử menu host giữ đủ dừng mic/camera/screen, chuyển chủ và mời ra. Các ca này đã nằm trong bộ 309, không cộng lại lần nữa.
+- Go: 7 bài top-level cùng các subtest đạt, binary được build lại (`target/merge-audio-go.txt`). Maven đã tạo lại `target/MiniMeetingRoom-1.0-SNAPSHOT.jar`.
+
+Tổng hai lượt Java: **319 ca, 317 đạt, 2 bỏ qua có điều kiện**. Dùng JDK 22.0.1, compile release 21; chưa nghiệm thu lại thiết bị vật lý, nhiều máy LAN hoặc cuộc gọi dài. Test dùng H2/TLS cục bộ, không sửa dữ liệu MySQL hay cấu hình riêng. Các file được giải quyết không còn conflict marker và Git không còn unmerged path.

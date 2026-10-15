@@ -2,7 +2,7 @@
 
 Ngày khảo sát: 14/10/2026. Base commit: `30039612adb101b07858cf808f7cc008aeb26adf`.
 
-**Quyết định runtime: JavaFX và backend Java giữ auth/room/signaling; Go/Pion chịu transport media và router SFU tự viết.** Người dùng đã giao quyền chọn phương án phù hợp. Mốc 0 và phòng/signaling Mốc 1 đã có bằng chứng thực thi. Theo yêu cầu mới nhất, bước tiếp theo chỉ triển khai video; voice chat và screenshare để sau. Dependency `webrtc-java:0.19.0` đã nằm trong runtime client. Ba client native trao đổi nguồn video tạo sẵn qua engine thật và render JavaFX; chưa nghiệm thu camera vật lý hay mạng LAN/Internet. Xem [video-call.md](video-call.md) và [sfu-testing.md](sfu-testing.md).
+**Quyết định runtime: JavaFX và backend Java giữ auth/room/signaling; Go/Pion chịu transport media và router SFU tự viết.** Người dùng đã giao quyền chọn phương án phù hợp. Mốc 0 và phòng/signaling Mốc 1 đã có bằng chứng thực thi. Bản mở rộng 15/10/2026 thêm audio Opus và SCREEN VP8 độc lập camera, không đổi schema. Dependency `webrtc-java:0.19.0` đã nằm trong runtime client. Ba client native trao đổi nguồn video tạo sẵn qua engine thật và render JavaFX; chưa nghiệm thu camera vật lý hay mạng LAN/Internet. Xem [video-call.md](video-call.md) và [sfu-testing.md](sfu-testing.md).
 
 ## Mốc 1 sau khi ghép code
 
@@ -15,7 +15,7 @@ flowchart LR
     C[JavaFX + webrtc-java] -->|TCP TLS: auth và signaling| S[Java backend]
     S -->|phiên, phòng, lịch sử| DB[(MySQL Railway)]
     S -->|loopback HTTP + secret: lease và SDP| G[Go/Pion + router tự viết]
-    C <-->|ICE + DTLS SRTP: VP8| G
+    C <-->|ICE + DTLS SRTP: Opus và VP8| G
 ```
 
 MeetingSession sở hữu VideoCallController; view chỉ mượn mailbox/binding. Pre-join có track xem trước cục bộ; vào MeetingScreen mới dựng PC publish nếu người dùng đã bật camera. Chuyển view chỉ gỡ binding, giữ capture owner. Client có một PC gửi camera và một PC nhận cho mỗi nguồn khác; full ICE gathering, client offer owner, không renegotiate cùng PC. Go giữ publication/lease/route trong RAM, forward codec payload với queue riêng từng receiver, RTCP keyframe qua worker riêng. Java quản lý child process và shutdown. Callback native giữ/release frame đúng vòng đời, chuyển I420 sang RGB ngoài FX thread; mailbox hữu hạn cập nhật ảnh tối đa 10 lần/giây. Thiết bị chỉ mở sau thao tác bật camera. Logout/leave/kick thu hồi quyền; mất kết nối không tự bật camera lại. Chi tiết giới hạn trong [video-call.md](video-call.md).
@@ -98,3 +98,11 @@ flowchart LR
 Giữ `mmr.diagnostics.v1` và một logger owner/tiến trình. Adapter chỉ gửi metric/code cố định, dùng ID số cục bộ, không dump stats/SDP/ICE/địa chỉ/identity. Bộ lọc logger không thay thế kiểm soát đầu vào adapter. `MediaSample` cần delta, RTP payload byte và RTT/jitter ms; bỏ cửa sổ reset/loss bị hiệu chỉnh, giữ `null` khi không đo được. SFU không decode nên không có FPS decode/freeze server.
 
 `MMR_DIAGNOSTICS_ENABLED=false` tắt logger; routing tương lai không phụ thuộc logger. Có thể tháo adapter bằng no-op sink. Probe và công cụ đọc log không sửa logger schema hoặc nới string allowlist. Xem [diagnostics.md](diagnostics.md).
+
+## Owner âm thanh và màn hình (15/10/2026)
+
+MeetingSession → VideoCallController sở hữu AudioCallController và ScreenCallController qua các view. Mỗi controller có worker riêng, queue thao tác hữu hạn, coalesced switch cho lựa chọn cuối và closeComplete; view dispose chỉ gỡ listener/binding/dialog. Audio receiver dùng ADM platform default khi vào họp; factory nhận có anchor CUSTOM không thu thiết bị. Factory thu riêng chỉ tạo sau Bật mic và đóng hoàn toàn khi tắt. Nguồn tạo sẵn test dùng HeadlessAudioDeviceModule. Thiết bị âm thanh được lấy qua MediaDevices, không dùng MockData trong phòng mới.
+
+SCREEN dùng ScreenCapturer/WindowCapturer để liệt kê DesktopSource và VideoDesktopSource để capture nguồn được chọn. Dialog yêu cầu chọn nguồn rồi preview cục bộ trước khi xác nhận publish. Hủy đóng preview, không publish. Nguồn bị mất hoặc không trả frame được dừng; không khôi phục share tự động. Người phát không subscribe chính mình; màn hình họp của người phát chỉ hiện thông báo đang share để tránh vòng lặp hình. Người nhận dùng mailbox ảnh hữu hạn cùng cơ chế throttle hiện có.
+
+libwebrtc chịu capture, xử lý audio tùy AudioOptions và codec; Pion chịu ICE/DTLS-SRTP/RTP và interceptors; dự án chịu lease, publication theo kind, queue, fanout và lifecycle. Không hứa adaptive bitrate, simulcast hoặc AEC/NS tương đương sản phẩm hội nghị thương mại. Form mặc định 10 người; chính sách server mặc định cho phép tối đa 16 người (`meeting.maxParticipants`). Mỗi nguồn/kind một PC nhận nên tài nguyên tăng theo số nguồn, chưa đo tải 5/10/16 người.

@@ -17,6 +17,10 @@ public final class VideoCallController implements AutoCloseable {
     @FunctionalInterface public interface Signaling { CompletableFuture<JsonObject> request(String type, JsonObject body, String requestId); }
     private record Subscription(String publication, NativeVideoSession.Peer peer) { }
     private final Signaling signaling;
+    private final AudioCallController audio;
+    private final ScreenCallController screen;
+    public ScreenCallController screen() { return screen; }
+    public AudioCallController audio() { return audio; }
     private final Supplier<RoomSnapshot> room;
     private final Supplier<String> self;
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(16),
@@ -30,7 +34,7 @@ public final class VideoCallController implements AutoCloseable {
     private final Set<CompletableFuture<?>> jobs = ConcurrentHashMap.newKeySet();
     private final Map<String, VideoFrameMailbox> frames = new ConcurrentHashMap<>();
     private final Map<String, Subscription> subscriptions = new HashMap<>();
-    private final ReadOnlyStringWrapper status = new ReadOnlyStringWrapper("Camera đang tắt. Âm thanh và chia sẻ màn hình chưa được bật.");
+    private final ReadOnlyStringWrapper status = new ReadOnlyStringWrapper("Camera đang tắt.");
     private final ReadOnlyBooleanWrapper publishing = new ReadOnlyBooleanWrapper();
     private final ReadOnlyBooleanWrapper cameraRequested = new ReadOnlyBooleanWrapper(), cameraPending = new ReadOnlyBooleanWrapper();
     private final CameraSwitch cameraSwitch = new CameraSwitch(this::updateCameraUi);
@@ -53,7 +57,13 @@ public final class VideoCallController implements AutoCloseable {
     }
     public VideoCallController(Signaling signaling, Supplier<RoomSnapshot> room, Supplier<String> self,
             CameraConsentStore cameraConsent, Supplier<List<VideoDevice>> deviceProvider) {
+        this(signaling,room,self,cameraConsent,deviceProvider,false,MicrophoneConsentStore.local());
+    }
+    public VideoCallController(Signaling signaling, Supplier<RoomSnapshot> room, Supplier<String> self,
+            CameraConsentStore cameraConsent, Supplier<List<VideoDevice>> deviceProvider, boolean headless, MicrophoneConsentStore microphoneConsent) {
         this.signaling = signaling; this.room = room; this.self = self;
+        this.audio = new AudioCallController(signaling,room,self,headless,microphoneConsent);
+        this.screen = new ScreenCallController(signaling,room,self,headless);
         this.cameraConsent = Objects.requireNonNull(cameraConsent); this.deviceProvider = Objects.requireNonNull(deviceProvider);
         timer.scheduleWithFixedDelay(() -> {
             if (closed.get() || room.get() == null || !polling.compareAndSet(false, true)) return;
@@ -138,7 +148,7 @@ public final class VideoCallController implements AutoCloseable {
         });
     }
     public CompletableFuture<Void> publishPreparedCamera() {
-        inMeeting = true;
+        inMeeting = true; audio.enter(); screen.enter();
         return submit(() -> { if (preview != null && input != null && (!cameraSwitch.pending() || cameraSwitch.wanted())) publishInput(() -> !cameraSwitch.pending() || cameraSwitch.wanted()); return null; });
     }
     public CompletableFuture<Void> startInput(Supplier<VideoInput> source) {
@@ -243,7 +253,7 @@ public final class VideoCallController implements AutoCloseable {
         for (String participant : new ArrayList<>(frames.keySet())) if (current.participants().stream().noneMatch(p -> p.participantId().equals(participant))) {
             VideoFrameMailbox old = frames.remove(participant); if (old != null) old.close();
         }
-        if (preview == null && (activeCamera || !subscriptions.isEmpty())) show("Video qua WebRTC/SFU • " + subscriptions.size() + " luồng nhận • Âm thanh chưa bật.");
+        if (preview == null && (activeCamera || !subscriptions.isEmpty())) show("Video qua WebRTC/SFU • " + subscriptions.size() + " luồng camera nhận.");
     }
     private JsonObject command(String type, JsonObject body) throws Exception {
         if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
@@ -274,7 +284,7 @@ public final class VideoCallController implements AutoCloseable {
     }
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        cameraSwitch.close(); formatCache.clear(); knownCameras = List.of();
+        cameraSwitch.close(); audio.close(); screen.close(); formatCache.clear(); knownCameras = List.of();
         timer.shutdownNow(); worker.shutdownNow(); preferences.shutdownNow(); discovery.shutdownNow(); frames.values().forEach(VideoFrameMailbox::close);
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
         Thread.ofVirtual().name("video-client-close").start(() -> {
@@ -283,7 +293,7 @@ public final class VideoCallController implements AutoCloseable {
             try { while (!worker.awaitTermination(2, TimeUnit.SECONDS)) { /* Do not dispose a factory still used by a native call. */ } }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
             stopLocalCamera(); subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
-            if (nativeSession != null) nativeSession.close(); show("Video đã đóng.");
+            if (nativeSession != null) nativeSession.close(); audio.closeComplete().get(20, TimeUnit.SECONDS); screen.closeComplete().get(20, TimeUnit.SECONDS); show("Video đã đóng.");
             common.diagnostics.Diagnostics.current().event("video.client.closed", Map.of("shutdown_ms", (System.nanoTime() - started) / 1_000_000.0));
             closeComplete.complete(null);
             } catch (Exception | LinkageError failure) {

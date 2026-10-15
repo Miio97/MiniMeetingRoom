@@ -166,6 +166,49 @@ class VideoCoordinatorTest {
                 new CreateRoomParams("Cuộc họp tiếp tục", "1234", 3, false));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"AUDIO", "VIDEO", "SCREEN"})
+    void hostStopReachesEngineForEachMediaKind(String kind) throws Exception {
+        MemberAuthorization member = joinAndGrant(create());
+        rooms.setMediaRequested(connection.id(), kind, true);
+        rooms.stopPublish(connection.id(), member.participantId(), kind);
+        drainControls();
+        assertEquals(1, fake.stops(member, kind));
+        for (String other : List.of("AUDIO", "VIDEO", "SCREEN"))
+            if (!other.equals(kind)) assertEquals(0, fake.stops(member, other));
+        assertTrue(fake.has(member), "Stopping one media kind must preserve membership");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AUDIO", "VIDEO", "SCREEN"})
+    void queuedStopDoesNotStopAnExplicitlyRestartedPublication(String kind) throws Exception {
+        MemberAuthorization member = joinAndGrant(create());
+        rooms.setMediaRequested(connection.id(), kind, true);
+        CountDownLatch release = blockControls();
+        rooms.stopPublish(connection.id(), member.participantId(), kind);
+        rooms.setMediaRequested(connection.id(), kind, true);
+        release.countDown(); drainControls();
+        assertEquals(0, fake.stops(member, kind));
+        assertTrue(fake.has(member));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AUDIO", "VIDEO", "SCREEN"})
+    void queuedMediaStopCannotRevokeReopenedRoomOwner(String kind) throws Exception {
+        RoomSnapshot original = create();
+        MemberAuthorization old = joinAndGrant(original);
+        rooms.setMediaRequested(connection.id(), kind, true);
+        CountDownLatch release = blockControls();
+        rooms.stopPublish(connection.id(), old.participantId(), kind);
+        rooms.leave(connection.id(), "TU_ROI");
+        MemberAuthorization fresh = joinAndGrant(reopen(original));
+        rooms.setMediaRequested(connection.id(), kind, true);
+        release.countDown(); drainControls();
+        assertEquals(0, fake.stops(fresh, kind));
+        assertTrue(fake.has(fresh));
+        assertOwnerStillRenews(fresh);
+    }
+
     private RoomSnapshot reopen(RoomSnapshot original) throws Exception {
         return rooms.reopen(connection.principal(), UUID.randomUUID().toString(), original.joinCode());
     }
@@ -204,6 +247,7 @@ class VideoCoordinatorTest {
         private final java.util.concurrent.ExecutorService requests = Executors.newVirtualThreadPerTaskExecutor();
         private final Set<String> leases = ConcurrentHashMap.newKeySet();
         private final ConcurrentHashMap<String, AtomicInteger> renewals = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<String, AtomicInteger> stops = new ConcurrentHashMap<>();
 
         FakeEngine() throws Exception {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 16);
@@ -226,6 +270,7 @@ class VideoCoordinatorTest {
                     case "renew" -> { leases.add(key); renewals.computeIfAbsent(key, ignored -> new AtomicInteger()).incrementAndGet(); }
                     case "revoke" -> leases.remove(key);
                     case "state" -> response.add("sources", new JsonObject());
+                    case "stop" -> stops.computeIfAbsent(key + "/" + body.get("kind").getAsString(), ignored -> new AtomicInteger()).incrementAndGet();
                     default -> throw new IllegalStateException("Unexpected test control operation: " + operation);
                 }
                 byte[] bytes = response.toString().getBytes(StandardCharsets.UTF_8);
@@ -238,6 +283,7 @@ class VideoCoordinatorTest {
         int port() { return server.getAddress().getPort(); }
         boolean has(MemberAuthorization member) { return leases.contains(key(member)); }
         int renewals(MemberAuthorization member) { return renewals.getOrDefault(key(member), new AtomicInteger()).get(); }
+        int stops(MemberAuthorization member, String kind) { return stops.getOrDefault(key(member) + "/" + kind, new AtomicInteger()).get(); }
         private static String key(MemberAuthorization member) {
             return member.roomId() + "/" + member.participantId() + "/" + member.generation();
         }

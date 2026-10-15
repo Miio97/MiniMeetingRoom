@@ -69,7 +69,7 @@
                 <version>3.5.2</version>
                 <configuration>
                     <!-- Also isolates a normal test run after a probe left compiled classes. -->
-                    <excludes><exclude>**/WebRtcClientProbeTest.java</exclude><exclude>**/VideoCallIntegrationTest.java</exclude></excludes>
+                    <excludes><exclude>**/WebRtcClientProbeTest.java</exclude><exclude>**/VideoCallIntegrationTest.java</exclude><exclude>**/AudioCallIntegrationTest.java</exclude><exclude>**/ScreenCallIntegrationTest.java</exclude></excludes>
                 </configuration>
             </plugin>
             <plugin>

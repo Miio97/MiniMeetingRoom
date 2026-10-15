@@ -15,6 +15,10 @@ public final class ParticipantPanel extends BorderPane {
     private final Label status = Ui.label("", "caption");
     private boolean host;
     public ParticipantPanel(ObservableList<Participant> people, long selfId, Runnable invite, BiConsumer<String, Long> command) {
+        this(people, selfId, invite, command, person -> false, userId -> { });
+    }
+    public ParticipantPanel(ObservableList<Participant> people, long selfId, Runnable invite, BiConsumer<String, Long> command,
+                            java.util.function.Predicate<Participant> sharing, java.util.function.LongConsumer stopShare) {
         ListView<Participant> list = new ListView<>(people); list.setId("room-members"); list.getStyleClass().add("participant-list");
         Button invitation = Ui.button("Mời người dùng", "secondary", invite); invitation.setGraphic(IconButton.icon("users")); invitation.setMaxWidth(Double.MAX_VALUE);
         invitation.setId("room-invite");
@@ -31,8 +35,9 @@ public final class ParticipantPanel extends BorderPane {
                 if (person.host()) row.getChildren().add(Ui.label("Host", "host-badge"));
                 if (host && person.userId() != selfId) {
                     IconButton menu = new IconButton("settings", "Quản lý " + person.name());
-                    menu.setOnAction(event -> new HostMenuPopup(person.microphone(), person.camera(),
+                    menu.setOnAction(event -> new HostMenuPopup(person.microphone(), person.camera(), sharing.test(person),
                             () -> command.accept("ROOM_MIC_OFF", person.userId()), () -> command.accept("ROOM_CAMERA_OFF", person.userId()),
+                            () -> stopShare.accept(person.userId()),
                             () -> command.accept("ROOM_KICK", person.userId()), () -> command.accept("ROOM_TRANSFER", person.userId())).show(menu, javafx.geometry.Side.BOTTOM, 0, 0));
                     row.getChildren().add(menu);
                 }

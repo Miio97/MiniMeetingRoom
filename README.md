@@ -1,6 +1,6 @@
 # MiniMeetingRoom
 
-Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên, video call và chia sẻ tệp đã kết nối backend. Form tạo/tham gia có sẵn dùng signaling TCP/TLS cho phòng mới; dữ liệu tệp dùng dịch vụ TCP/TLS riêng với cùng membership. Chat văn bản thời gian thực, duyệt thành viên, khóa phòng, mời ra và chuyển chủ dùng cùng phòng với video và tệp. Khi chủ phòng rời đi, quyền chủ phòng tự chuyển cho người còn lại. Voice chat và chia sẻ màn hình chưa triển khai.
+Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên, video call và chia sẻ tệp đã kết nối backend. Form tạo/tham gia có sẵn dùng signaling TCP/TLS cho phòng mới; dữ liệu tệp dùng dịch vụ TCP/TLS riêng với cùng membership. Chat văn bản thời gian thực, duyệt thành viên, khóa phòng, mời ra và chuyển chủ dùng cùng phòng với video và tệp. Khi chủ phòng rời đi, quyền chủ phòng tự chuyển cho người còn lại. Phòng mới có voice chat Opus và chia sẻ màn hình/cửa sổ VP8 độc lập camera.
 
 ## Truyền tệp qua TCP/TLS
 
@@ -8,7 +8,7 @@ Tab **Tệp** hỗ trợ chọn tệp, tải lên/tải xuống theo luồng, ki
 
 Với database đã tồn tại, áp dụng **một lần** [migration 001](database/migrations/001_file_transfer.sql) trước khi bật dịch vụ tệp; server không tự sửa database. Database mới dùng [schema.sql](database/schema.sql), không chạy thêm migration này. Xem [báo cáo, cấu hình, hướng dẫn hai client và giới hạn hiện tại](docs/file-transfer.md). Phần hướng dẫn auth bên dưới vẫn áp dụng; khi dùng tệp qua LAN cần mở thêm cổng TCP 9001 và cấu hình `file.transfer.bind`.
 
-Video qua WebRTC/Pion chạy ngay từ **Tạo phòng / Tham gia phòng → trước khi vào phòng → màn hình họp**, không cần nút SFU riêng. Camera xem trước chỉ hiển thị cục bộ; vào phòng mới gửi video nếu bạn đã bật. Năm bài native integration đã kiểm thử 2/3 client với nguồn hình tạo sẵn, gồm hai JVM cùng máy, giao diện chính và gửi/tải tệp trong cùng phòng; camera thật cần người dùng chủ động nghiệm thu. Xem [cách chạy video call](docs/video-call.md), [kiến trúc](docs/sfu-architecture.md) và [kiểm thử](docs/sfu-testing.md).
+Video qua WebRTC/Pion chạy ngay từ **Tạo phòng / Tham gia phòng → trước khi vào phòng → màn hình họp**, không cần nút SFU riêng. Camera xem trước chỉ hiển thị cục bộ; vào phòng mới gửi video nếu bạn đã bật. Các bài native integration đã kiểm thử 2/3 client với nguồn hình tạo sẵn, gồm hai JVM cùng máy, giao diện chính và gửi/tải tệp trong cùng phòng; camera thật cần người dùng chủ động nghiệm thu. Xem [cách chạy video call](docs/video-call.md), [kiến trúc](docs/sfu-architecture.md) và [kiểm thử](docs/sfu-testing.md).
 
 Camera chỉ hỏi quyền khi nhấn **Bật camera** nếu chưa được cho phép; quyền đã chấp nhận được ghi nhớ trên máy. Từ chối hoặc đóng hộp thoại sẽ không cho vào giao diện họp; có thể nhấn Bật camera để thử lại. Không còn nút Quyền camera/Tìm camera. Phòng chờ bỏ các dòng đếm camera, mô tả kỹ thuật và thông báo tính năng chưa triển khai; chỉ hiện lỗi khi cần. Nút **Ẩn/Hiện thanh công cụ** trong cuộc họp giúp tăng vùng video mà không dừng media. Quyền camera của Windows vẫn cần cho phép ứng dụng desktop truy cập.
 
@@ -48,7 +48,7 @@ Sau khi đăng nhập, chọn **Tạo phòng**, nhập tên phòng 1–100 ký t
 
 Chia sẻ **mã phòng cùng PIN** cho người khác. Tại sảnh, nhập mã phòng và PIN rồi chọn **Tham gia**. Server kiểm tra phiên đăng nhập, phòng có tồn tại, PIN, trạng thái phòng, khóa phòng và số chỗ còn lại. Chỉ khi thành công client mới chuyển sang màn hình trước khi vào phòng. Mã phòng không phân biệt hoa/thường; PIN được kiểm tra nguyên vẹn, kể cả chữ số 0 ở đầu. Giao diện không hiển thị ID phòng và server từ chối dùng ID để tham gia.
 
-Danh sách **Phòng gần đây của bạn** lấy từ database, tối đa 20 phòng đã tạo hoặc tham gia. Nút **Nhập PIN** điền lại mã phòng, vẫn yêu cầu PIN và xác nhận từ server. Màn hình họp nhận thay đổi thành viên qua signaling và cập nhật danh sách chờ khoảng 1 giây một lần. Tab **Tệp** truyền dữ liệu thật qua TCP/TLS; tab **Chat** nhận tin nhắn đẩy qua TLS, lưu lịch sử trong database. Video dùng camera thật khi được người dùng cho phép. Nút **Quản lý phòng** dành cho chủ phòng có khóa/mở khóa, bật/tắt duyệt thành viên và đóng phòng cho mọi người. Menu thành viên hỗ trợ chuyển chủ, mời ra và yêu cầu tắt thiết bị; microphone và chia sẻ màn hình chưa có media thật.
+Danh sách **Phòng gần đây của bạn** lấy từ database, tối đa 20 phòng đã tạo hoặc tham gia. Nút **Nhập PIN** điền lại mã phòng, vẫn yêu cầu PIN và xác nhận từ server. Màn hình họp nhận thay đổi thành viên qua signaling và cập nhật danh sách chờ khoảng 1 giây một lần. Tab **Tệp** truyền dữ liệu thật qua TCP/TLS; tab **Chat** nhận tin nhắn đẩy qua TLS, lưu lịch sử trong database. Video dùng camera thật khi được người dùng cho phép. Nút **Quản lý phòng** dành cho chủ phòng có khóa/mở khóa, bật/tắt duyệt thành viên và đóng phòng cho mọi người. Menu thành viên hỗ trợ chuyển chủ, mời ra, dừng mic/camera/chia sẻ màn hình. Trong phòng cũ từ luồng auth, camera/microphone/share vẫn là demo có nhãn mô phỏng; tạo phòng mới qua signaling để dùng WebRTC.
 
 Quay về sảnh từ màn hình trước khi vào phòng hoặc chọn rời cuộc họp sẽ cập nhật `Thanh_Vien_Phong`. Chủ phòng rời sẽ tự chuyển quyền cho thành viên còn lại; chọn Đóng phòng trong quản lý phòng mới kết thúc cho tất cả. Khi người cuối cùng rời hoặc chủ phòng kết thúc, server đổi trạng thái thành `DA_DONG`. Chủ phòng hiện tại có thể mở lại phòng đã đóng từ sảnh hoặc màn hình kết thúc, giữ nguyên mã, PIN và lịch sử; thành viên phải tham gia lại. Đăng xuất hoặc đóng ứng dụng cố gắng gửi thao tác rời phòng trước khi thu hồi phiên. Phòng video dùng heartbeat của kết nối signaling để dọn thành viên mất kết nối và chuyển chủ nếu cần; phòng auth cũ vẫn có hạn chế dọn thành viên khi tiến trình bị tắt đột ngột.
 
@@ -108,3 +108,11 @@ mvn test
 ```
 
 Các test dùng H2 in-memory, TLS server cục bộ và cửa sổ JavaFX ẩn để kiểm tra xác thực, tạo phòng, mã phòng, từ chối tham gia bằng ID, PIN, phòng đóng/khóa/đầy, quyền truy cập, phiên hết hạn, nhiều người tranh chỗ cuối, rời phòng, framing, xác minh chứng chỉ và streaming upload/download. Test không ghi dữ liệu lên MySQL đang dùng.
+
+## Voice chat và chia sẻ màn hình
+
+Trong phòng mới, Bật mic hỏi quyền lần đầu và ghi nhớ trên máy; Tắt mic dừng publication và nguồn thu. Chọn microphone/loa thật trong Cài đặt. Vào phòng chờ không tự mở mic; vào họp cho phép phát âm thanh từ người khác. Kiểm tra Windows Settings → Privacy & security → Microphone nếu thiết bị bị chặn; nên dùng tai nghe.
+
+Nhấn Chia sẻ, chọn màn hình/cửa sổ và kiểm tra preview rồi xác nhận. Camera và screen chạy độc lập. Mỗi phòng chỉ một người chia sẻ; host có thể Dừng mic/Dừng chia sẻ. Không tự bật lại sau mất kết nối. Cấu hình mục tiêu screen mặc định 1280×720, 10 fps, 1.8 Mbit/s; đây không phải số đo đạt được. Xem config/media-client.vmoptions.example và docs/video-call.md.
+
+Giữ cách chạy NetBeans: Run File server/Main.java rồi client/Main.java. Không thêm schema/migration cho hai tính năng này. Test tự động dùng H2/TLS + PCM/I420 tạo sẵn; thiết bị mic/loa/màn hình thật, LAN và tải dài hạn cần người dùng nghiệm thu. Chạy scripts/test-video-call.ps1 cho cả audio/video/screen, mvn -B test cho hồi quy. Bằng chứng và phần chưa chạy ở docs/sfu-testing.md.

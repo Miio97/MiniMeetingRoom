@@ -160,3 +160,9 @@ Giữ schema `mmr.diagnostics.v1` và filter bí mật hiện tại. `signaling.
 Report reader nhận những event/metric này và nhóm latency theo action; p50/p95/p99 lấy từ mẫu thời gian gốc. Unknown media vẫn là `null`, Mốc 1 không tự tạo thống kê media. Cả auth, signaling và file service trong `MeetingServerMain` dùng một diagnostics owner; tắt bằng cấu hình logger hiện có.
 
 `signaling.connection.closed` ghi `reason` được ánh xạ theo allowlist (`SESSION_CHECK_TIMEOUT`, `SESSION_CHECK_FAILED`, `SESSION_EXPIRED`, `SESSION_INVALID`, `SESSION_REVOKED`, `AUTH_TIMEOUT`, `SERVER_BUSY`, `REQUEST_TIMEOUT`, `OUTPUT_BACKPRESSURE`, `FRAME_LIMIT`, `SERVER_SHUTDOWN`, `MAT_KET_NOI`, còn lại `OTHER`). Không ghi token/hash phiên hay exception message. Phân biệt việc timeout kiểm tra DB với việc token đã hết hạn.
+
+## Audio/screen — 15/10/2026
+
+video.engine.sample giữ mẫu tổng hợp hiện có và thêm ba mẫu kind=AUDIO/VIDEO/SCREEN mỗi chu kỳ. Mẫu theo kind gồm active_peer_connections, ingress_packets, ingress_codec_bytes, forwarded_packets, forwarded_codec_bytes, queue_packets, queue_bytes, queue_drops, write_errors, pli_requests. Counter tích lũy từ lúc process khởi động, queue/active PC là snapshot; byte chỉ tính codec payload. Không cộng mẫu tổng với mẫu theo kind. go_heap_bytes/goroutine_count ở mẫu tổng là process Go, không phải heap JVM hoặc RSS.
+
+video.client.operation.failed nhận phase=audio/screen và kind cố định; lỗi chỉ ghi code allowlist và loại exception. Reporter tách kind/phase và nhận các action AUDIO_*/SCREEN_* cùng VIDEO_*; test DiagnosticsReportTest xác minh không trộn AUDIO/SCREEN hoặc bịa jitter chưa đo. Không nới STRING_FIELDS: kind/phase/code đã có sẵn; không log tên thiết bị, descriptor, title nguồn, SDP/ICE, nội dung media hoặc từng packet/frame.
