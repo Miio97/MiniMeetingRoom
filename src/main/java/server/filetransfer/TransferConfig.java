@@ -25,7 +25,7 @@ public record TransferConfig(boolean enabled, String bind, int port, int chunkSi
                 ServerConfig.get("file.transfer.bind", ServerConfig.get("auth.bind", "127.0.0.1")),
                 ServerConfig.getInt("file.transfer.port", 9001), ServerConfig.getInt("file.transfer.chunk-size", 65536),
                 ServerConfig.getInt("file.transfer.max-concurrent-transfers", 8),
-                ServerConfig.getInt("file.transfer.max-transfers-per-user", 2),
+                ServerConfig.getInt("file.transfer.max-transfers-per-user", 3),
                 ServerConfig.getInt("file.transfer.socket-timeout-ms", 30000),
                 Path.of(ServerConfig.get("file.transfer.storage-path", "storage")),
                 mb("file.transfer.max-file-size-mb", 1024), mb("file.transfer.storage-quota-mb", 10240),

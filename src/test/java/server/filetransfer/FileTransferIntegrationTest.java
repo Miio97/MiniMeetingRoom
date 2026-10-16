@@ -17,6 +17,9 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.sql.*;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.Clock;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.*;
 import javax.net.ssl.SSLContext;
@@ -68,11 +71,41 @@ class FileTransferIntegrationTest {
         try (Connection connection = db(); Statement statement = connection.createStatement()) { statement.execute("DROP ALL OBJECTS"); }
     }
     void start() throws Exception {
-        var config = new TransferConfig(true, "127.0.0.1", 0, 65536, 12, 4, 10000,
+        start(4);
+    }
+    void start(int maxPerUser) throws Exception {
+        var config = new TransferConfig(true, "127.0.0.1", 0, 65536, 12, maxPerUser, 10000,
                 temporary.resolve("storage"), 2L << 30, 8L << 30, 10, Duration.ofHours(24), true);
         storage = new FileStorageService(config.storagePath(), config.quotaBytes(), config.maxFileBytes(), 10, config.expiry(), true);
         server = new FileTransferServer(serverTls, config, repository, storage); server.start();
         client = new FileTransferClient("localhost", server.port(), clientTls, 10000);
+    }
+
+    @Test void threeUploadsForOneAccountAreAcceptedAndFourthIsBusy() throws Exception {
+        server.close(); server = null; start(3);
+        Path source = file("three-concurrent.bin", 1000);
+        List<Raw> connections = new ArrayList<>();
+        try {
+            for (int index = 0; index < 3; index++) {
+                Raw connection = raw(); connections.add(connection);
+                var upload = prepare(source);
+                connection.send(Type.UPLOAD_INIT, upload.transferId(), uploadHeader(upload, token(1)), new byte[0]);
+                assertEquals(Type.UPLOAD_ACCEPT, connection.read().type());
+            }
+            var extra = prepare(source);
+            try (Raw fourth = raw()) {
+                fourth.send(Type.UPLOAD_INIT, extra.transferId(), uploadHeader(extra, token(1)), new byte[0]);
+                Frame rejected = fourth.read();
+                assertEquals(Type.UPLOAD_FAILED, rejected.type());
+                assertEquals("USER_BUSY", rejected.header().get("code").getAsString());
+            }
+            try (Raw otherUser = raw()) {
+                var independent = prepare(source);
+                otherUser.send(Type.UPLOAD_INIT, independent.transferId(), uploadHeader(independent, token(2)), new byte[0]);
+                assertEquals(Type.UPLOAD_ACCEPT, otherUser.read().type());
+            }
+            assertEquals(0, count("Tep_Dinh_Kem"));
+        } finally { for (Raw connection : connections) connection.close(); }
     }
 
     @Test void arbitraryTypesUnicodeAndEmptyArePublishedOnceAndDownloadedByRoomPeer() throws Exception {
@@ -264,11 +297,141 @@ class FileTransferIntegrationTest {
         var cutoff = java.time.Instant.now().minus(Duration.ofDays(30));
         new FileRetentionService(repository, failedDisk).sweep(cutoff);
         assertEquals(2, count("Tep_Dinh_Kem")); assertTrue(Files.exists(storage.resolve(key)));
-        assertCode("FILE_NOT_FOUND", () -> repository.find(1, old.id()));
+        assertCode("PERMISSION_DENIED", () -> repository.find(1, old.id()));
         new FileRetentionService(repository, storage).sweep(cutoff);
         assertEquals(1, count("Tep_Dinh_Kem")); assertFalse(Files.exists(storage.resolve(key)));
         assertEquals(kept.id(), repository.find(2, kept.id()).id());
         assertEquals(200, storage.accountedBytes());
+    }
+
+    @Test void retentionWaitsTwentyMinutesAndReopeningRestartsTheDeadline() throws Exception {
+        var file = client.upload(token(1), prepare(file("meeting.txt", 300)), new Cancellation(), null);
+        String key = repository.storageKey(file.id());
+        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
+        closeRoomAt(closed);
+        var retention = new FileRetentionService(repository, storage);
+        retention.sweep(closed.minusSeconds(1)); // 19:59 after close, with a 20-minute policy.
+        assertTrue(Files.exists(storage.resolve(key)));
+        assertEquals(1, count("Tep_Dinh_Kem"));
+
+        roomCommand("REOPEN_ROOM", closed.plusSeconds(19 * 60));
+        retention.sweep(closed.plusSeconds(10 * 60)); // Old deadline has passed, but room is open.
+        assertEquals(file.id(), repository.find(1, file.id()).id());
+        assertTrue(Files.exists(storage.resolve(key)));
+
+        Instant closedAgain = closed.plusSeconds(31 * 60);
+        roomCommand("LEAVE_ROOM", closedAgain);
+        retention.sweep(closedAgain.minusSeconds(1));
+        assertTrue(Files.exists(storage.resolve(key)));
+        retention.sweep(closedAgain); // Exactly 20 minutes since the most recent close.
+        assertFalse(Files.exists(storage.resolve(key)));
+        assertEquals(0, count("Tep_Dinh_Kem"));
+        assertEquals(0, storage.accountedBytes());
+    }
+
+    @Test void staleRetentionCandidateCannotDeleteAfterReopenOrANewClose() throws Exception {
+        var file = client.upload(token(1), prepare(file("race.txt", 300)), new Cancellation(), null);
+        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
+        closeRoomAt(closed);
+        var candidate = repository.retirementCandidates(closed, 0).getFirst();
+        roomCommand("REOPEN_ROOM", closed.plusSeconds(60));
+        assertFalse(repository.retireFile(candidate, closed, connection -> fail("Reopened room must retain files")));
+        roomCommand("LEAVE_ROOM", closed.plusSeconds(120));
+        assertFalse(repository.retireFile(candidate, closed, connection -> fail("New close must reset the deadline")));
+        assertEquals(1, count("Tep_Dinh_Kem"));
+        assertTrue(Files.exists(storage.resolve(candidate.storageKey())));
+    }
+
+    @Test void retentionDefersOpenDownloadsAndPreservesFailedDeletesWhenReopened() throws Exception {
+        var file = client.upload(token(1), prepare(file("reading.txt", 300)), new Cancellation(), null);
+        String key = repository.storageKey(file.id());
+        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
+        var retention = new FileRetentionService(repository, storage);
+        try (InputStream reading = storage.open(key)) {
+            closeRoomAt(closed);
+            retention.sweep(closed);
+            assertEquals(1, count("Tep_Dinh_Kem"));
+            assertEquals(300, reading.readAllBytes().length);
+        }
+        roomCommand("REOPEN_ROOM", closed.plusSeconds(60));
+        retention.sweep(closed.plusSeconds(3600));
+        assertEquals(file.id(), repository.find(1, file.id()).id());
+        assertEquals(1, client.listFiles(token(1), room.id(), 0).size());
+        roomCommand("LEAVE_ROOM", closed.plusSeconds(120));
+        retention.sweep(closed.plusSeconds(120));
+        assertFalse(Files.exists(storage.resolve(key)));
+    }
+
+    @Test void retentionRemovesPartialAndUnpublishedPromotedUploadsAfterRestart() throws Exception {
+        byte[] bytes = "unpublished meeting file".getBytes(StandardCharsets.UTF_8);
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        var partial = storage.begin(UUID.randomUUID(), 1, room.id(), "partial.txt", MIME, bytes.length, checksum);
+        try (var output = storage.append(partial)) { output.write(bytes, 0, 5); }
+        var promoted = storage.begin(UUID.randomUUID(), 1, room.id(), "promoted.txt", MIME, bytes.length, checksum);
+        try (var output = storage.append(promoted)) { output.write(bytes); }
+        String key = storage.verifyAndPromote(promoted);
+        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
+        closeRoomAt(closed);
+        server.close(); server = null; start();
+        var retention = new FileRetentionService(repository, storage);
+        retention.sweep(closed.minusSeconds(1));
+        assertEquals(2, storage.pendingSessions().size());
+        retention.sweep(closed);
+        assertTrue(storage.pendingSessions().isEmpty());
+        assertFalse(Files.exists(storage.resolve(key)));
+        try (var paths = Files.list(temporary.resolve("storage/temporary"))) { assertEquals(0, paths.count()); }
+        assertEquals(0, storage.accountedBytes());
+    }
+
+    @Test void retentionSkipsActiveUploadsUntilTheirSessionLockIsReleased() throws Exception {
+        var pending = storage.begin(UUID.randomUUID(), 1, room.id(), "active.txt", MIME, 100, "a".repeat(64));
+        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
+        closeRoomAt(closed);
+        var retention = new FileRetentionService(repository, storage);
+        pending.lock().lock();
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            executor.submit(() -> { retention.sweep(closed); return null; }).get(5, TimeUnit.SECONDS);
+            assertEquals(1, storage.pendingSessions().size());
+        } finally { pending.lock().unlock(); }
+        retention.sweep(closed);
+        assertTrue(storage.pendingSessions().isEmpty());
+        assertEquals(0, storage.accountedBytes());
+    }
+
+    @Test void retentionSweepsAllPagesAndReconcilesCommittedUploadManifests() throws Exception {
+        byte[] bytes = new byte[]{42};
+        String checksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        for (int index = 0; index < 101; index++) {
+            var upload = storage.begin(UUID.randomUUID(), 1, room.id(), "file" + index, MIME, 1, checksum);
+            try (var output = storage.append(upload)) { output.write(bytes); }
+            String key = storage.verifyAndPromote(upload);
+            repository.complete(upload.id(), 1, room.id(), upload.originalName(), MIME, 1, checksum, key);
+            if (index != 100) storage.completed(upload); // Last committed manifest simulates interrupted acknowledgement.
+        }
+        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
+        closeRoomAt(closed);
+        new FileRetentionService(repository, storage).sweep(closed);
+        assertEquals(0, count("Tep_Dinh_Kem"));
+        assertTrue(storage.pendingSessions().isEmpty());
+        assertEquals(0, storage.accountedBytes());
+        try (var paths = Files.walk(temporary.resolve("storage/rooms"))) {
+            assertEquals(0, paths.filter(Files::isRegularFile).count());
+        }
+    }
+
+    private void closeRoomAt(Instant instant) throws SQLException {
+        try (Connection connection = db(); PreparedStatement statement = connection.prepareStatement(
+                "UPDATE Phong_Hop SET Trang_Thai='DA_DONG', Ngay_Dong=? WHERE Ma_Phong=?")) {
+            statement.setTimestamp(1, Timestamp.from(instant), Calendar.getInstance(TimeZone.getTimeZone("UTC")));
+            statement.setLong(2, room.id()); statement.executeUpdate();
+        }
+    }
+
+    private void roomCommand(String action, Instant instant) throws SQLException {
+        var rooms = new server.rooms.RoomService(this::db, new server.auth.PasswordHasher(), Clock.fixed(instant, ZoneOffset.UTC));
+        var response = rooms.handle(new common.auth.AuthRequest(action, null, null, null, null, token(1),
+                new common.room.RoomRequest(null, null, Long.toString(room.id()), 0)));
+        assertTrue(response.success(), response::message);
     }
 
     @Test @Timeout(600) void measuredStreamingSizes() throws Exception {

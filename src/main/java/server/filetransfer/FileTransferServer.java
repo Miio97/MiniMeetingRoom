@@ -13,7 +13,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketException;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -38,7 +38,7 @@ public final class FileTransferServer implements AutoCloseable {
     private final TransferStorage storage;
     private final TransferConfig config;
     private final FileRetentionService retention;
-    private final int retentionDays;
+    private final Duration retentionPeriod;
     private final int connectionsPerMinute;
     private final ThreadPoolExecutor admission = new ThreadPoolExecutor(4, 4, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(16), Thread.ofPlatform().daemon().name("file-control-", 0).factory());
@@ -53,9 +53,9 @@ public final class FileTransferServer implements AutoCloseable {
     public FileTransferServer(SSLContext tls, TransferConfig config, FileMetadataRepository repository,
             TransferStorage storage) throws IOException {
         this.config = config; this.storage = storage;
-        retentionDays = ServerConfig.getInt("file.transfer.retention-days", 0);
+        retentionPeriod = retentionPeriod(ServerConfig.get("file.transfer.retention-minutes", null),
+                ServerConfig.get("file.transfer.retention-days", null));
         connectionsPerMinute = ServerConfig.getInt("file.transfer.connections-per-ip-minute", 600);
-        if (retentionDays < 0 || retentionDays > 36500) throw new IllegalArgumentException("Invalid file retention days");
         if (connectionsPerMinute < 20 || connectionsPerMinute > 100000) throw new IllegalArgumentException("Invalid connection admission limit");
         retention = new FileRetentionService(repository, storage);
         service = new FileTransferService(repository, storage, config);
@@ -78,11 +78,29 @@ public final class FileTransferServer implements AutoCloseable {
         maintenance.scheduleWithFixedDelay(() -> {
             try {
                 service.reconcile(); storage.cleanup();
-                if (retentionDays > 0) retention.sweep(Instant.now().minus(retentionDays, ChronoUnit.DAYS));
+                if (!retentionPeriod.isZero()) retention.sweep(Instant.now().minus(retentionPeriod));
             }
             catch (Exception e) { LOG.warning("STORAGE_ERROR cleanup=" + e.getClass().getSimpleName()); }
         }, 60, 60, TimeUnit.SECONDS);
         acceptThread = Thread.ofPlatform().daemon().name("file-accept").start(this::accept);
+    }
+    /** Minutes take precedence; retain compatibility with an explicitly configured legacy day policy. */
+    static Duration retentionPeriod(String minutes, String days) {
+        try {
+            if (minutes != null) {
+                long value = Long.parseLong(minutes.trim());
+                if (value < 0 || value > 36500L * 24 * 60) throw new IllegalArgumentException();
+                return Duration.ofMinutes(value);
+            }
+            if (days != null) {
+                long value = Long.parseLong(days.trim());
+                if (value < 0 || value > 36500) throw new IllegalArgumentException();
+                return Duration.ofDays(value);
+            }
+            return Duration.ofMinutes(20);
+        } catch (IllegalArgumentException invalid) {
+            throw new IllegalArgumentException("Invalid file retention period", invalid);
+        }
     }
     private void accept() {
         while (!closed) {

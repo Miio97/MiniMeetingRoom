@@ -27,7 +27,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
     private final Label status = Ui.label("Đang lấy danh sách tệp…", "caption");
     private final Map<Long, TransferRow> files = new HashMap<>();
     private final Set<TransferRow> transfers = new HashSet<>();
-    private final ThreadPoolExecutor workers = new ThreadPoolExecutor(2, 2, 0, TimeUnit.MILLISECONDS,
+    private final ThreadPoolExecutor workers = new ThreadPoolExecutor(3, 3, 0, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(8), runnable -> daemon(runnable, "mini-meeting-files"), new ThreadPoolExecutor.AbortPolicy());
     private final ScheduledExecutorService events = Executors.newSingleThreadScheduledExecutor(runnable -> daemon(runnable, "mini-meeting-file-events"));
     private final Cancellation eventCancellation = new Cancellation();

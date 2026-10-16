@@ -77,7 +77,7 @@ Manifest chứa metadata và thời điểm tạo, không chứa token. Offset r
 
 Nếu đã chuyển file sang object nhưng DB lỗi, object cùng manifest được giữ lại để retry. Không tự xóa object này khi cancel/cleanup vì DB có thể đã commit nhưng phản hồi bị mất. `TRANSFER_STATUS`, retry upload và tác vụ đối chiếu định kỳ mỗi 60 giây có thể dọn manifest cho transfer đã có metadata commit. Upload `.part` chưa được công bố sẽ được dọn sau thời hạn mặc định 24 giờ; transfer đang được giữ khóa không bị cleanup chen vào.
 
-Chính sách `file.transfer.retention-days=0` mặc định giữ file đã công bố. Khi quản trị cấu hình số ngày dương, tác vụ mỗi 60 giây xử lý tối đa 100 file thuộc phòng đã có trạng thái `DA_DONG` và `Ngay_Dong` cũ hơn thời hạn. `FileRetentionService` đánh dấu message đã xóa trước, xóa object rồi xóa metadata attachment; lỗi xóa đĩa được thử lại từ metadata còn giữ. Message đánh dấu xóa vẫn giữ làm lịch sử. Không có endpoint xóa file cho client; rời phòng không kích hoạt xóa. Object đã promote nhưng không có metadata, nếu người dùng không retry, được giữ để xử lý quản trị; không được xem là file đã công bố. Cần đối chiếu DB và storage khi bảo trì, không xóa theo tên file đơn thuần.
+Chính sách `file.transfer.retention-minutes=20` tự động xóa file khi phòng ở trạng thái `DA_DONG` liên tục ít nhất 20 phút, tính từ `Ngay_Dong`. Tác vụ chạy mỗi 60 giây và quét theo trang 100 file cho đến hết; thời điểm xóa thường nằm trong khoảng 20–21 phút nếu server đang chạy và storage/DB hoạt động bình thường. Mở lại phòng đặt `Ngay_Dong=NULL`, hủy mốc cũ; khi phòng đóng lần nữa, 20 phút được tính lại từ lần đóng mới. File đã xóa trước khi mở lại không thể khôi phục. Đặt `retention-minutes=0` để tắt chính sách. Khóa cũ `retention-days` vẫn được hỗ trợ nếu không cấu hình khóa phút; khóa phút luôn được ưu tiên.
 
 Trên UI, **Tạm dừng** đóng socket nhưng giữ dữ liệu để **Tiếp tục**. **Hủy** yêu cầu xóa upload chưa công bố hoặc xóa download tạm. Nếu upload đã commit trước yêu cầu hủy, UI giữ thông tin đã thành công. Nếu kết nối không đủ để dọn tệp, UI báo việc dọn chưa thành công.
 
@@ -113,13 +113,13 @@ Các giá trị mặc định trong `TransferConfig`:
 | `file.transfer.max-file-size-mb` | `1024` | Đơn vị MiB, tối đa một file |
 | `file.transfer.storage-quota-mb` | `10240` | Đơn vị MiB, gồm dung lượng dự trữ upload |
 | `file.transfer.max-concurrent-transfers` | `8` | Tổng upload/download đang chạy |
-| `file.transfer.max-transfers-per-user` | `2` | Transfer đang chạy của một user |
+| `file.transfer.max-transfers-per-user` | `3` | Upload/download đang chạy của một user, tính chung |
 | `file.transfer.max-pending-per-user` | `4` | Upload chưa hoàn tất của một user |
 | `file.transfer.socket-timeout-ms` | `30000` | Timeout không tiến triển |
 | `file.transfer.storage-path` | `storage` | Tính từ thư mục làm việc nếu là đường dẫn tương đối |
 | `file.transfer.resume-enabled` | `true` | Cho phép giữ và tiếp tục dữ liệu dở |
 | `file.transfer.expiry-hours` | `24` | Hạn upload dở tính từ lúc tạo |
-| `file.transfer.retention-days` | `0` | 0 giữ file; số ngày dương dọn file của phòng đã đóng quá hạn |
+| `file.transfer.retention-minutes` | `20` | Xóa file sau 20 phút đóng phòng; mở lại hủy mốc cũ; 0 tắt tự xóa |
 | `file.transfer.connections-per-ip-minute` | `600` | Gồm cả polling; điều chỉnh khi nhiều client dùng chung IP/NAT |
 
 Biến server đổi dấu `.`/`-` thành `_` và thêm `MMR_`, ví dụ `MMR_FILE_TRANSFER_PORT`, `MMR_FILE_TRANSFER_STORAGE_PATH`. Riêng client dùng `MMR_FILE_HOST`, `MMR_FILE_PORT`, `MMR_FILE_TIMEOUT_MILLIS`. Client lấy host từ `file.transfer.host` nếu đặt, nếu không dùng `auth.host`; dùng `auth.certificate` cho TLS. Cổng file client và server phải khớp, kể cả khi dùng biến môi trường.
@@ -155,7 +155,7 @@ Trong cấu hình hiện tại, máy local chạy Java mở listener và lưu t�
 4. So sánh SHA-256 nguồn/đích bằng `Get-FileHash -Algorithm SHA256`. UI báo thành công chỉ sau xác minh.
 5. Dùng tài khoản C ở phòng khác: danh sách không có file của A; API tải fileId phòng A phải trả `PERMISSION_DENIED`.
 6. Thử tạm dừng/tiếp tục; ngắt socket hoặc restart server giữa upload rồi tiếp tục tác vụ còn mở ở client. Thử download dở và chọn lại đích; sửa dữ liệu `.part` sẽ gây `PREFIX_MISMATCH`/checksum lỗi.
-7. Chạy nhiều client với tài khoản riêng để kiểm tra tải lên/tải xuống đồng thời trong quota. Mỗi tài khoản mặc định chỉ có hai transfer chạy cùng lúc.
+7. Chạy nhiều client với tài khoản riêng để kiểm tra tải lên/tải xuống đồng thời trong quota. Mỗi tài khoản mặc định có tối đa ba lượt upload/download chạy cùng lúc (tính chung). Giới hạn bốn upload chưa hoàn tất bao gồm cả lượt đang chạy và đang tạm dừng; ví dụ ba lượt đang gửi cộng một lượt tạm dừng đã chiếm đủ bốn phiên. File gửi thành công không còn chiếm phiên upload dở, nên đây không phải giới hạn tổng số file được gửi trong ngày hay trong phòng.
 
 ## 8. Kiểm thử và số liệu đo
 
@@ -242,6 +242,16 @@ Số liệu dưới đây lấy từ `target/file-transfer-performance.csv`, t�
 - Chưa có heartbeat/lease thành viên. Nếu ứng dụng bị kill hoặc mất mạng trước khi leave thành công, membership DB có thể còn active, giữ chỗ trong phòng và quyền cho lần đăng nhập hợp lệ sau. Rời phòng bình thường qua `AuthClient` thu hồi membership; người cuối cùng rời sẽ đóng phòng và trạng thái đóng chặn truy cập tệp. Chưa có luồng host khóa/kick đồng bộ đầy đủ qua server.
 - Room membership hiện gắn user, không gắn từng phiên/thiết bị. Hai client cùng tài khoản chia sẻ membership; một client leave ảnh hưởng client còn lại. Dùng tài khoản riêng cho kiểm thử nhiều người.
 - Chưa lưu bền vững danh sách upload ở client, chưa tự khôi phục UI tác vụ upload khi client restart. Đã có resume server và API cần giữ UUID/metadata nguồn.
-- Chính sách retention mặc định tắt; khi bật chỉ áp dụng cho phòng đã đóng trong DB. Object promote nhưng chưa commit phải được retry hoặc xử lý có đối chiếu. Không tự dọn dữ liệu đang ở trạng thái commit chưa rõ.
+- Retention mặc định 20 phút sau khi phòng đóng; dựa vào mốc DB nên tiếp tục hoạt động sau khi server khởi động lại. Các phòng đã đóng quá hạn từ trước cũng được dọn. Phòng phải có trạng thái `DA_DONG` và `Ngay_Dong` hợp lệ; đóng ứng dụng mà chưa cập nhật được DB không tạo mốc đóng giả.
 - Chưa áp dụng migration lên MySQL/Railway thật, chưa kiểm thử hai máy qua LAN/WAN, ổ đĩa vật lý thật sự đầy, hoặc crash mất điện. Test quota và lỗi metadata là mô phỏng có kiểm soát.
 - Chưa chạy soak test kéo dài để khẳng định không rò rỉ tài nguyên dưới mọi tình huống. Socket/stream được đóng theo scope, pool/hàng đợi có giới hạn; cần theo dõi thêm khi vận hành thật.
+
+### Dọn file theo vòng đời phòng
+
+`FileRetentionService` kiểm tra lại trạng thái và `Ngay_Dong` dưới khóa dòng `Phong_Hop` trước mỗi lần xóa; cả hai luồng mở lại phòng dùng cùng dòng này. Một danh sách ứng viên đọc trước khi mở lại không đủ quyền xóa file. Khóa được giữ qua thao tác xóa object và metadata để lượt mở lại không chen ngang một lần xóa đang thực hiện.
+
+File đang có stream đọc hoặc upload đang giữ khóa phiên được bỏ qua và thử lại ở lượt sau. Lỗi xóa đĩa rollback thay đổi metadata để file chưa xóa vẫn còn khi mở lại phòng. Xóa object là idempotent: nếu DB lỗi sau khi object đã bị xóa, lượt sau tiếp tục dọn metadata. Message được đánh dấu xóa để giữ lịch sử; metadata attachment và nội dung file bị xóa, quota được giải phóng.
+
+Upload dở (`.part`, manifest) và object đã promote nhưng chưa công bố cũng được dọn sau cùng thời hạn, khi không còn worker sử dụng. Trước đó đối chiếu `Transfer_Id` với DB để giữ đúng file đã commit nhưng chưa dọn manifest. Đây là thao tác quản trị nội bộ, không thay đổi giới hạn hủy upload của client. File thuộc phòng đang mở và bản đã tải về máy người dùng không bị xóa bởi chính sách này.
+
+Kiểm chứng retention 16/10/2026: chạy các nhóm test file transfer/storage/metadata/config và cả hai RoomService — 91 test, 0 failure, 0 error, 2 skip (benchmark opt-in và symlink Windows). Bao phủ ranh giới 20 phút, mở lại/đóng lại, ứng viên xóa cũ, stream đang đọc, upload đang giữ khóa, upload dở và promote chưa công bố sau restart, hơn 100 file và retry lỗi đĩa. Log: logs/retention-check.log.

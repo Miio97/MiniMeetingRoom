@@ -51,12 +51,16 @@ public interface TransferStorage extends AutoCloseable {
     /** Cancel an unfinished upload; never delete an object awaiting metadata reconciliation. */
     void cancel(UploadSession session) throws IOException;
 
+    /** Admin only: caller holds the session lock and the expired closed room's DB lock.
+     * Must establish that no committed metadata references this upload before calling. */
+    void discardExpiredRoomUpload(UploadSession session) throws IOException;
+
     /** Stream an existing immutable object. Caller owns and closes the stream. */
     InputStream open(String storageKey) throws IOException;
 
     long size(String storageKey) throws IOException;
 
-    /** Authorized room-retention hook, called after references are removed from metadata. */
+    /** Authorized room-retention hook. Refuse deletion while an object stream is open. */
     void deleteStoredFile(String storageKey) throws IOException;
 
     void cleanup() throws IOException;
