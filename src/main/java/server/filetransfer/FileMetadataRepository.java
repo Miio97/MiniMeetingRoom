@@ -3,6 +3,7 @@ package server.filetransfer;
 import common.filetransfer.FileMetadata;
 import common.filetransfer.RoomInfo;
 import common.filetransfer.TransferException;
+import java.io.IOException;
 import java.security.SecureRandom;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -214,48 +215,78 @@ public final class FileMetadataRepository {
         }
     }
 
-    /** Server-admin retention policy only: tombstone first so failed disk cleanup is retryable. */
-    public List<RetiredFile> retireClosedRoomFiles(Instant cutoff) throws SQLException {
-        try (Connection connection = connections.getConnection()) {
-            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            connection.setAutoCommit(false);
-            try {
-                List<RetiredFile> files = new ArrayList<>();
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        SELECT f.Ma_Tep, f.Duong_Dan_Luu_Tru, t.Ma_Tin_Nhan
-                        FROM Tep_Dinh_Kem f JOIN Tin_Nhan t ON t.Ma_Tin_Nhan = f.Ma_Tin_Nhan
-                        JOIN Phong_Hop p ON p.Ma_Phong = t.Ma_Phong
-                        WHERE t.Ngay_Xoa IS NOT NULL OR (p.Trang_Thai = 'DA_DONG' AND p.Ngay_Dong <= ?)
-                        ORDER BY f.Ma_Tep LIMIT 100 FOR UPDATE
-                        """)) {
-                    statement.setTimestamp(1, Timestamp.from(cutoff), utc());
-                    try (ResultSet result = statement.executeQuery()) {
-                        while (result.next()) files.add(new RetiredFile(result.getLong(1), result.getString(2), result.getLong(3)));
-                    }
-                }
-                try (PreparedStatement statement = connection.prepareStatement(
-                        "UPDATE Tin_Nhan SET Ngay_Xoa = ? WHERE Ma_Tin_Nhan = ? AND Ngay_Xoa IS NULL")) {
-                    for (RetiredFile file : files) {
-                        statement.setTimestamp(1, now(), utc()); statement.setLong(2, file.messageId()); statement.addBatch();
-                    }
-                    statement.executeBatch();
-                }
-                connection.commit(); return List.copyOf(files);
-            } catch (SQLException | RuntimeException e) { rollback(connection, e); throw e; }
-        }
-    }
-
-    /** Called after idempotent object deletion; tombstone remains as message audit history. */
-    public void finishRetirement(long fileId) throws SQLException {
+    /** Bounded cursor scan; every candidate is rechecked under the room lock before deletion. */
+    public List<RetiredFile> retirementCandidates(Instant cutoff, long afterId) throws SQLException {
         try (Connection connection = connections.getConnection(); PreparedStatement statement = connection.prepareStatement("""
-                DELETE FROM Tep_Dinh_Kem WHERE Ma_Tep = ? AND Ma_Tin_Nhan IN
-                    (SELECT Ma_Tin_Nhan FROM Tin_Nhan WHERE Ngay_Xoa IS NOT NULL)
+                SELECT f.Ma_Tep, f.Duong_Dan_Luu_Tru, t.Ma_Tin_Nhan, t.Ma_Phong
+                FROM Tep_Dinh_Kem f JOIN Tin_Nhan t ON t.Ma_Tin_Nhan = f.Ma_Tin_Nhan
+                JOIN Phong_Hop p ON p.Ma_Phong = t.Ma_Phong
+                WHERE p.Trang_Thai = 'DA_DONG' AND p.Ngay_Dong <= ? AND f.Ma_Tep > ?
+                ORDER BY f.Ma_Tep LIMIT 100
                 """)) {
-            statement.setLong(1, fileId); statement.executeUpdate();
+            statement.setTimestamp(1, Timestamp.from(cutoff), utc());
+            statement.setLong(2, afterId);
+            List<RetiredFile> files = new ArrayList<>();
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) files.add(new RetiredFile(rows.getLong(1), rows.getString(2), rows.getLong(3), rows.getLong(4)));
+            }
+            return List.copyOf(files);
         }
     }
 
-    public record RetiredFile(long fileId, String storageKey, long messageId) { }
+    /** Lock the same room row as both reopen implementations, including during object deletion. */
+    public boolean inExpiredRoom(long roomId, Instant cutoff, RetirementAction action) throws SQLException, IOException {
+        try (Connection connection = connections.getConnection()) {
+            beginMutation(connection);
+            try {
+                boolean expired;
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT Trang_Thai, Ngay_Dong FROM Phong_Hop WHERE Ma_Phong = ? FOR UPDATE")) {
+                    statement.setLong(1, roomId);
+                    try (ResultSet rows = statement.executeQuery()) {
+                        expired = false;
+                        if (rows.next()) {
+                            Timestamp closedAt = rows.getTimestamp(2, utc());
+                            expired = "DA_DONG".equals(rows.getString(1)) && closedAt != null
+                                    && !closedAt.toInstant().isAfter(cutoff);
+                        }
+                    }
+                }
+                if (expired) action.run(connection);
+                connection.commit();
+                return expired;
+            } catch (SQLException | IOException | RuntimeException error) {
+                rollback(connection, error);
+                throw error;
+            }
+        }
+    }
+
+    /** Disk errors roll back metadata so reopening preserves files that could not yet be removed. */
+    public boolean retireFile(RetiredFile file, Instant cutoff, RetirementAction deleteObject) throws SQLException, IOException {
+        return inExpiredRoom(file.roomId(), cutoff, connection -> {
+            // Revalidate the attachment after acquiring the room lock; the scan may be stale.
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT Duong_Dan_Luu_Tru FROM Tep_Dinh_Kem WHERE Ma_Tep = ? AND Ma_Tin_Nhan = ? FOR UPDATE")) {
+                statement.setLong(1, file.fileId()); statement.setLong(2, file.messageId());
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next() || !file.storageKey().equals(rows.getString(1))) return;
+                }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE Tin_Nhan SET Ngay_Xoa = ? WHERE Ma_Tin_Nhan = ? AND Ngay_Xoa IS NULL")) {
+                statement.setTimestamp(1, now(), utc()); statement.setLong(2, file.messageId()); statement.executeUpdate();
+            }
+            deleteObject.run(connection);
+            try (PreparedStatement statement = connection.prepareStatement("DELETE FROM Tep_Dinh_Kem WHERE Ma_Tep = ?")) {
+                statement.setLong(1, file.fileId()); statement.executeUpdate();
+            }
+        });
+    }
+
+    @FunctionalInterface
+    public interface RetirementAction { void run(Connection connection) throws SQLException, IOException; }
+    public record RetiredFile(long fileId, String storageKey, long messageId, long roomId) { }
 
     /** Publishes one verified file and its TEP message together, exactly once per transfer. */
     public FileMetadata complete(UUID transferId, long userId, long roomId, String originalName,
