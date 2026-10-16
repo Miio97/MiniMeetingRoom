@@ -520,6 +520,8 @@ public final class SceneManager {
         if (Boolean.parseBoolean(preference("muteCamera", "false"))) camera = false;
         PreJoinScreen view = new PreJoinScreen(this);
         show(view, 1100, 700, true, view::dispose);
+        // Pre-join can stack its panels and scroll independently of its pinned footer.
+        stage.setMinWidth(560); stage.setMinHeight(480);
     }
     public void meeting() {
         if (legacyMeetingUi && meetingState != null) { LegacyMeetingScreen view = new LegacyMeetingScreen(this); show(view, 1280, 800, true, view::dispose); return; }

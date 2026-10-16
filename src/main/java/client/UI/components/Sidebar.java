@@ -37,7 +37,16 @@ public final class Sidebar extends VBox {
         logout.textProperty().bind(Bindings.when(manager.logoutPendingProperty()).then("Đang đăng xuất…").otherwise("Đăng xuất"));
         logout.setOnAction(e -> confirmLogout(manager)); menu.getItems().addAll(account, logout);
         menu.getStyleClass().add("profile-menu");
-        profile.setOnMouseClicked(e -> menu.show(profile, Side.TOP, 0, -8));
+        profile.setOnMouseClicked(e -> {
+            if (menu.isShowing()) menu.hide();
+            else {
+                var anchor = profile.getParent();
+                menu.show(anchor, Side.TOP, 0, -12);
+                // The first show measures the skin with CSS/shadow; position using its actual height.
+                var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
+                if (bounds != null) menu.setY(bounds.getMinY() - menu.getHeight() - 10);
+            }
+        });
         IconButton exit = new IconButton("close", "Đăng xuất");
         exit.setGraphic(Icons.icon("logout", 16)); exit.getStyleClass().add("logout-button");
         exit.disableProperty().bind(manager.logoutPendingProperty());

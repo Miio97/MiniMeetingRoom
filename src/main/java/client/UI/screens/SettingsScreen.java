@@ -54,6 +54,7 @@ public final class SettingsScreen extends BorderPane {
                 Ui.row(12, speakerTest, speakerTestStatus), audioStatus);
         loadAudioDevices();
         VBox notifications = card();
+        notifications.getChildren().add(Ui.field("Giao diện", client.UI.ThemeManager.selector()));
         notifications.getChildren().addAll(toggle(manager, "notification", "Âm thanh thông báo", true), toggle(manager, "muteMic", "Tự tắt mic khi vào phòng", false),
             toggle(manager, "muteCamera", "Tự tắt camera khi vào phòng", false), Ui.field("Chất lượng video tối đa", device(manager, "quality", List.of("360p", "720p", "Tự động"))));
         VBox profile = card();

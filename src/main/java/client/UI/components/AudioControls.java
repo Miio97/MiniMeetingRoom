@@ -26,6 +26,7 @@ public final class AudioControls extends VBox {
     public AudioControls(AudioCallController audio, Function<Window,CompletableFuture<Boolean>> prompt, boolean devices) {
         super(8); this.audio=audio; this.prompt=prompt==null ? this::ask : prompt;
         toggle=Ui.button("Bật mic", "primary", this::toggle); toggle.setId("audio-microphone-toggle"); error.setWrapText(true);
+        error.visibleProperty().bind(error.textProperty().isNotEmpty()); error.managedProperty().bind(error.visibleProperty());
         getChildren().addAll(toggle,Ui.label("Mức mic: Chưa có dữ liệu", "caption"),error);
         audio.requestedProperty().addListener(changed); audio.statusProperty().addListener(statusChanged); update();
         audio.choice().whenComplete((choice,failure) -> Platform.runLater(() -> {
@@ -35,6 +36,8 @@ public final class AudioControls extends VBox {
     }
     private void addDevices(boolean input) {
         ComboBox<AudioDevice> choices=new ComboBox<>(); choices.setPrefWidth(320); choices.setId(input ? "audio-input-device" : "audio-output-device");
+        DeviceChoiceStyle.apply(choices, AudioDevice::getName);
+        choices.setPlaceholder(Ui.label(input ? "Không có microphone" : "Không có loa", "caption"));
         choices.setPromptText(input ? "Microphone mặc định Windows" : "Loa mặc định Windows");
         choices.setConverter(new javafx.util.StringConverter<>() {
             public String toString(AudioDevice device) { return device==null ? "" : device.getName(); }
@@ -78,10 +81,20 @@ public final class AudioControls extends VBox {
         }));
     }
     private void apply() {
-        CompletableFuture<Void> next=audio.toggle(); if(operation==next) return; operation=next;
-        next.whenComplete((value,failure) -> Platform.runLater(() -> { if(!disposed && operation==next) error.setText(failure==null ? "" : CameraErrors.audioMessage(failure)); }));
+        CompletableFuture<Void> next=audio.toggle(); if(operation==next) return; operation=next; update();
+        next.whenComplete((value,failure) -> Platform.runLater(() -> { if(!disposed && operation==next) { error.setText(failure==null ? "" : CameraErrors.audioMessage(failure)); update(); } }));
     }
-    private void update() { toggle.setText(audio.requestedProperty().get() ? "Tắt mic" : "Bật mic"); toggle.setDisable(!loaded || prompting); }
+    /** Move only the existing button; permission/device ownership stays with this component. */
+    public Button separatePreviewToggle() {
+        getChildren().remove(toggle);
+        // Fields first, then the honest unavailable-level message and any error.
+        var level = getChildren().removeFirst();
+        getChildren().remove(error);
+        getChildren().add(1, level);
+        getChildren().add(error);
+        return toggle;
+    }
+    private void update() { toggle.setText(prompting ? "Đang xin quyền…" : operation != null && !operation.isDone() ? "Đang xử lý…" : audio.requestedProperty().get() ? "Tắt mic" : "Bật mic"); toggle.setDisable(!loaded || prompting || operation != null && !operation.isDone()); }
     public javafx.beans.property.ReadOnlyStringProperty errorProperty() { return error.textProperty(); }
     public void dispose() { disposed=true; audio.requestedProperty().removeListener(changed); audio.statusProperty().removeListener(statusChanged); if(permissionDialog!=null) permissionDialog.close(); }
 }

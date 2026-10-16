@@ -10,12 +10,36 @@ import javafx.scene.Parent;
 import javafx.scene.control.Button;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
+import javafx.collections.ListChangeListener;
+import javafx.stage.PopupWindow;
+import javafx.stage.Window;
 import java.util.WeakHashMap;
 
 /** Theme dùng chung trong phiên chạy; đổi màu tại chỗ, giữ nguyên dữ liệu và control. */
 public final class ThemeManager {
     private static final BooleanProperty LIGHT = new SimpleBooleanProperty(true);
+    // Value is true only for PopupControl CSS bridges that need an explicit dark palette.
     private static final WeakHashMap<Parent, Boolean> ROOTS = new WeakHashMap<>();
+    static {
+        // Popup windows need the shared stylesheet/palette on their own Scene root as well as owner CSS.
+        // Covers ContextMenu, Tooltip and ComboBox skins, including controls created after a switch.
+        Window.getWindows().addListener((ListChangeListener<Window>) change -> {
+            while (change.next()) if (change.wasAdded()) {
+                for (Window window : change.getAddedSubList()) if (window instanceof PopupWindow) {
+                    Parent root = window.getScene().getRoot();
+                    String css = ThemeManager.class.getResource("/styles/app.css").toExternalForm();
+                    if (!root.getStylesheets().contains(css)) root.getStylesheets().add(css);
+                    if (!root.getStyleClass().contains("theme-popup-root")) root.getStyleClass().add("theme-popup-root");
+                    attach(root);
+                    // PopupControl's CSSBridge uses an owner-based styleable parent, bypassing the
+                    // popup Scene root. Give that surface an explicit palette as well.
+                    for (javafx.scene.Node child : root.getChildrenUnmodifiable()) if (child instanceof Parent surface) {
+                        ROOTS.put(surface, Boolean.TRUE); apply(surface);
+                    }
+                }
+            }
+        });
+    }
     private ThemeManager() { }
     public static boolean isLight() { return LIGHT.get(); }
     public static void setLight(boolean value) {
@@ -26,9 +50,14 @@ public final class ThemeManager {
     public static void attach(Parent root) {
         // Old meeting roots used a forced class; actual windows follow the shared preference.
         if (root.getScene() != null && root.getScene().getRoot() == root) root.getStyleClass().remove("theme-dark");
-        ROOTS.put(root, Boolean.TRUE); apply(root);
+        ROOTS.put(root, Boolean.FALSE); apply(root);
     }
     private static void apply(Parent root) {
+        if (Boolean.TRUE.equals(ROOTS.get(root))) {
+            root.getStyleClass().removeAll("light-mode", "theme-dark");
+            root.getStyleClass().add(isLight() ? "light-mode" : "theme-dark");
+            return;
+        }
         root.getStyleClass().removeAll("light-mode");
         if (!root.getStyleClass().contains("theme-dark") && isLight()) root.getStyleClass().add("light-mode");
     }

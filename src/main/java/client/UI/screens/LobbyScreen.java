@@ -41,16 +41,17 @@ public final class LobbyScreen extends BorderPane {
         main.getChildren().add(Ui.row(12, Ui.column(8, Ui.label(days[today.getDayOfWeek().getValue() - 1] + ", " + today.format(DateTimeFormatter.ofPattern("dd/MM")), "date-label"),
             Ui.label("Xin chào, " + parts[parts.length - 1], "title"), Ui.label("Hôm nay bạn muốn kết nối với ai?", "muted")), Ui.spacer(), status));
         Runnable createRoom = () -> { if (joining) return; new CreateRoomDialog(manager).showAndWait().ifPresent(result -> { if (!disposed) manager.preJoin(result); }); };
-        VBox createText = Ui.column(14, Icons.icon("video", 28), Ui.label("Tạo phòng mới", "subtitle"),
-            Ui.label("Một không gian riêng cho nhóm của bạn.\nMời mọi người và bắt đầu trò chuyện.", "muted"), Ui.button("Tạo phòng", "primary", createRoom));
-        createText.setMaxWidth(Double.MAX_VALUE);
-        StackPane art = new StackPane(); art.setMouseTransparent(true); art.setMinSize(92, 120); art.setMaxSize(92, 120);
-        StackPane video = Icons.icon("video", 82); video.setOpacity(.12); video.setTranslateY(-20);
+        StackPane art = new StackPane(); art.getStyleClass().add("create-art"); art.setMouseTransparent(true); art.setMinSize(92, 82); art.setMaxSize(92, 82);
+        StackPane video = Icons.icon("video", 64); video.getStyleClass().add("create-art-camera"); video.setTranslateY(-12);
         HBox avatars = Ui.row(-12, Ui.avatar("Hoàng Nam", 36), Ui.avatar("Thảo Linh", 36), Ui.avatar("Ngọc Mai", 36));
-        avatars.setTranslateY(36); avatars.setAlignment(Pos.CENTER); art.getChildren().addAll(video, avatars);
-        StackPane create = new StackPane(createText, art); create.getStyleClass().addAll("card", "create-card");
-        StackPane.setAlignment(art, Pos.CENTER_RIGHT); art.setTranslateY(20);
-        ((Label) createText.getChildren().get(2)).maxWidthProperty().bind(create.widthProperty().subtract(148));
+        avatars.setTranslateY(24); avatars.setAlignment(Pos.CENTER); art.getChildren().addAll(video, avatars);
+        VBox heading = Ui.column(14, Icons.icon("video", 28), Ui.label("Tạo phòng mới", "subtitle"));
+        heading.setMinWidth(0); HBox.setHgrow(heading, Priority.ALWAYS);
+        Label description = Ui.label("Một không gian riêng cho nhóm của bạn. Mời mọi người và bắt đầu trò chuyện.", "muted");
+        // A readable line length avoids leaving just the last word on a second line at desktop widths.
+        description.setMinWidth(0); description.setMaxWidth(320);
+        VBox create = Ui.column(14, Ui.row(12, heading, art), description, Ui.button("Tạo phòng", "primary", createRoom));
+        create.getStyleClass().addAll("card", "create-card");
         VBox join = new VBox(8); join.getStyleClass().add("card");
         code.setText(initialCode); code.setPromptText("Ví dụ: MMR-XXXXXXXX"); code.setId("join-room-identifier");
         pin.setPromptText("PIN 4–6 số"); pin.setId("join-room-pin");
@@ -123,6 +124,8 @@ public final class LobbyScreen extends BorderPane {
                     && room.hostId() == manager.authenticatedUser().id();
             Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
             Label title = Ui.label(room.name(), "room-title");
+            title.setMinWidth(0); title.setMaxWidth(Double.MAX_VALUE); HBox.setHgrow(title, Priority.ALWAYS);
+            badge.setMinWidth(Region.USE_PREF_SIZE); badge.setWrapText(false);
             VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label(room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + VietnamTime.formatDateTime(room.createdAt()), "room-meta"));
             text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
             Button action = Ui.button(canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng", live || canReopen ? "primary" : "secondary", () -> {
