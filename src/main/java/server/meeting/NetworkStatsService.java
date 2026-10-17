@@ -46,9 +46,12 @@ public final class NetworkStatsService implements AutoCloseable {
             Instant sampledAt
     ) { }
 
+    public static final int DEFAULT_FLUSH_INTERVAL_SECONDS = 10;
+
     private final ConnectionProvider connections;
     private final Clock clock;
     private final int sampleIntervalMs;
+    private final int flushIntervalSeconds;
     private final int cleanupIntervalSeconds;
     private final int retentionSeconds;
 
@@ -64,15 +67,22 @@ public final class NetworkStatsService implements AutoCloseable {
     public NetworkStatsService(ConnectionProvider connections, Clock clock) {
         this(connections, clock,
                 ServerConfig.getInt("stats.sample-interval-ms", 1000),
+                ServerConfig.getInt("stats.flush-interval-seconds", DEFAULT_FLUSH_INTERVAL_SECONDS),
                 ServerConfig.getInt("stats.cleanup-interval-seconds", 30),
-                ServerConfig.getInt("stats.retention-seconds", 30));
+                ServerConfig.getInt("stats.retention-seconds", 60));
     }
 
     public NetworkStatsService(ConnectionProvider connections, Clock clock,
                                int sampleIntervalMs, int cleanupIntervalSeconds, int retentionSeconds) {
+        this(connections, clock, sampleIntervalMs, DEFAULT_FLUSH_INTERVAL_SECONDS, cleanupIntervalSeconds, retentionSeconds);
+    }
+
+    public NetworkStatsService(ConnectionProvider connections, Clock clock,
+                               int sampleIntervalMs, int flushIntervalSeconds, int cleanupIntervalSeconds, int retentionSeconds) {
         this.connections = Objects.requireNonNull(connections);
         this.clock = Objects.requireNonNull(clock);
         this.sampleIntervalMs = Math.max(100, sampleIntervalMs);
+        this.flushIntervalSeconds = Math.max(1, flushIntervalSeconds);
         this.cleanupIntervalSeconds = Math.max(1, cleanupIntervalSeconds);
         this.retentionSeconds = Math.max(0, retentionSeconds);
     }
@@ -80,6 +90,7 @@ public final class NetworkStatsService implements AutoCloseable {
     public boolean isEnabled() { return enabled.get(); }
     public long droppedSamples() { return droppedSamples.get(); }
     public int queuedCount() { return queue.size(); }
+    public int flushIntervalSeconds() { return flushIntervalSeconds; }
     public int retentionSeconds() { return retentionSeconds; }
 
     public static String calculateQuality(Double rtt, Double jitter, Double loss) {
@@ -113,8 +124,8 @@ public final class NetworkStatsService implements AutoCloseable {
         if (closed.get() || !started.compareAndSet(false, true)) return;
         if (!preflight()) return;
 
-        // Schedule periodic batch insert (every 1 second)
-        scheduler.scheduleWithFixedDelay(this::flushBatch, 1, 1, TimeUnit.SECONDS);
+        // Schedule periodic batch insert (every flushIntervalSeconds, e.g. 10 seconds, writing 10 samples per participant)
+        scheduler.scheduleWithFixedDelay(this::flushBatch, flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
 
         // Schedule periodic cleanup (every cleanupIntervalSeconds)
         scheduler.scheduleWithFixedDelay(this::cleanup, cleanupIntervalSeconds, cleanupIntervalSeconds, TimeUnit.SECONDS);

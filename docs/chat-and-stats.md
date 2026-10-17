@@ -68,15 +68,16 @@ Tài liệu này ghi lại kiến trúc, các quyết định kỹ thuật và c
   - `KEM`: Các trường hợp còn lại.
 - **Ghi Batch & Hàng đợi giới hạn**:
   - Hàng đợi giới hạn 1024 mẫu (`NetworkStatsService`). Khi hàng đợi đầy, tự động bỏ mẫu cũ nhất và tăng bộ đếm `dropped`.
-  - Worker định kỳ 1 giây gom batch thực hiện `INSERT INTO Thong_Ke_Ket_Noi` trong một transaction duy nhất.
+  - Worker định kỳ 10 giây gom batch (10 dòng cho mỗi người tham gia trong 10 giây) thực hiện `INSERT INTO Thong_Ke_Ket_Noi` trong một transaction duy nhất.
 - **Xóa định kỳ (Cleanup)**:
   - Scheduler chạy mỗi 30 giây: `DELETE FROM Thong_Ke_Ket_Noi WHERE Thoi_Diem_Lay_Mau < NOW() - retention`.
   - Chạy theo batch $\le 5000$ dòng đến khi hết.
   - Cấu hình mặc định:
     ```properties
     stats.sample-interval-ms=1000
+    stats.flush-interval-seconds=10
     stats.cleanup-interval-seconds=30
-    stats.retention-seconds=30
+    stats.retention-seconds=60
     ```
   - *Lưu ý*: Nếu muốn xóa sạch toàn bộ sau mỗi 30 giây, đặt `stats.retention-seconds=0`.
 - **Preflight Check**:

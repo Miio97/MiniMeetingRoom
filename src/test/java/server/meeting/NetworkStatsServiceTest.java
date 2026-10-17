@@ -172,4 +172,25 @@ class NetworkStatsServiceTest {
         assertEquals(1024, service.queuedCount(), "Queue should be capped at 1024");
         assertEquals(1, service.droppedSamples(), "Exactly 1 oldest sample should be dropped");
     }
+
+    @Test
+    void test10SecondBatchFlushWith10Records() throws SQLException {
+        NetworkStatsService tenSecService = new NetworkStatsService(this::connection, clock, 1000, 10, 30, 60);
+        assertEquals(10, tenSecService.flushIntervalSeconds());
+        tenSecService.start();
+
+        // Simulate 10 samples (1 per second over 10 seconds)
+        for (int i = 0; i < 10; i++) {
+            tenSecService.record(new NetworkStatsService.StatsRecord(
+                    10, 1, 40.0 + i, 10.0, 0.1, 1000, 30, 1280, 720, "TOT", T0.plusSeconds(i)
+            ));
+        }
+
+        assertEquals(10, tenSecService.queuedCount());
+        int inserted = tenSecService.flushBatch();
+        assertEquals(10, inserted);
+        assertEquals(0, tenSecService.queuedCount());
+        assertEquals(10, count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi"));
+        tenSecService.close();
+    }
 }
