@@ -37,6 +37,9 @@ public final class VideoCallController implements AutoCloseable {
     private final ScheduledExecutorService statsSampler = Executors.newSingleThreadScheduledExecutor(
             Thread.ofPlatform().daemon().name("video-stats-sampler").factory());
     private final NetworkStatsCalculator statsCalculator = new NetworkStatsCalculator();
+    private final ReadOnlyObjectWrapper<NetworkStatsCalculator.CalculatedSample> latestStats = new ReadOnlyObjectWrapper<>();
+    public ReadOnlyObjectProperty<NetworkStatsCalculator.CalculatedSample> statsProperty() { return latestStats.getReadOnlyProperty(); }
+    public NetworkStatsCalculator.CalculatedSample latestStats() { return latestStats.get(); }
     private final ReadOnlyStringWrapper status = new ReadOnlyStringWrapper("Camera đang tắt.");
     private final ReadOnlyBooleanWrapper publishing = new ReadOnlyBooleanWrapper();
     private final ReadOnlyBooleanWrapper cameraRequested = new ReadOnlyBooleanWrapper(), cameraPending = new ReadOnlyBooleanWrapper();
@@ -373,6 +376,13 @@ public final class VideoCallController implements AutoCloseable {
                     packetsLost, packetsReceived, bytesSent, framesSent, width, height
             );
             NetworkStatsCalculator.CalculatedSample sample = statsCalculator.process(raw);
+            if (!closed.get()) {
+                try {
+                    Platform.runLater(() -> latestStats.set(sample));
+                } catch (IllegalStateException ignored) {
+                    latestStats.set(sample);
+                }
+            }
             if (sample.isEmpty() || closed.get()) return;
 
             JsonObject body = new JsonObject();
@@ -392,6 +402,11 @@ public final class VideoCallController implements AutoCloseable {
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         statsSampler.shutdownNow();
+        try {
+            Platform.runLater(() -> latestStats.set(null));
+        } catch (IllegalStateException ignored) {
+            latestStats.set(null);
+        }
         cameraSwitch.close(); audio.close(); screen.close(); formatCache.clear(); knownCameras = List.of();
         timer.shutdownNow(); worker.shutdownNow(); preferences.shutdownNow(); discovery.shutdownNow(); frames.values().forEach(VideoFrameMailbox::close);
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();

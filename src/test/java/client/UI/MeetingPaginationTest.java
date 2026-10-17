@@ -153,4 +153,37 @@ class MeetingPaginationTest {
         }
         return null;
     }
+
+    @Test void meetingScreenBottomBarContainsNetworkSignalWidget() throws Exception {
+        FxTestRuntime.call(() -> {
+            Stage stage = new Stage();
+            SceneManager manager = new SceneManager(stage, new AuthClient(), new FileTransferClient());
+            manager.acceptSession(AuthResponse.ok("token", new AuthUser(1, "host", "Host", "host@test.invalid"),
+                    "hash", Instant.now().plusSeconds(3600).toString()));
+            RoomView view = new RoomView(101L, "Phòng test signal", "MMR-SIGNAL01", 10, false, false, false);
+            RoomResponse response = new RoomResponse(true, "OK", "Thành công", view, "ticket", List.of(), List.of(), false);
+            manager.enterRoom(response, "1234");
+
+            MeetingScreen screen = new MeetingScreen(manager);
+            Scene scene = new Scene(screen, 1280, 720);
+            stage.setScene(scene);
+            screen.layout();
+
+            Node signalNode = screen.lookup("#network-signal");
+            assertNotNull(signalNode, "Expected #network-signal in MeetingScreen");
+            assertTrue(signalNode instanceof client.UI.components.NetworkSignalWidget, "Expected NetworkSignalWidget");
+            client.UI.components.NetworkSignalWidget widget = (client.UI.components.NetworkSignalWidget) signalNode;
+            assertEquals(widget, screen.networkSignal());
+            assertEquals("Chưa có dữ liệu", widget.qualityBadgeLabel().getText());
+
+            widget.update(new client.media.NetworkStatsCalculator.CalculatedSample(45.0, 10.0, 0.2, 2000, 30, 1280, 720));
+            assertEquals("TOT", widget.currentQuality());
+            assertEquals("Tốt", widget.qualityBadgeLabel().getText());
+            assertEquals("45.0 ms", widget.rttValueLabel().getText());
+
+            screen.dispose();
+            stage.close();
+            return null;
+        });
+    }
 }

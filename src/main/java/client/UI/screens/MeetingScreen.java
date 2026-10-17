@@ -61,6 +61,9 @@ public final class MeetingScreen extends BorderPane {
     private final boolean videoRoom;
     private final client.meeting.MeetingSession mediaSession;
     private final client.media.VideoCallController mediaController;
+    private final NetworkSignalWidget networkSignal;
+    private javafx.beans.value.ChangeListener<client.media.NetworkStatsCalculator.CalculatedSample> statsListener;
+    public NetworkSignalWidget networkSignal() { return networkSignal; }
     private Label nativeStatus;
     private CameraSettingsDialog cameraSettings;
     private DeviceSettingsDialog managementSettings;
@@ -113,24 +116,32 @@ public final class MeetingScreen extends BorderPane {
         Label demo = Ui.label(videoRoom ? "Video, âm thanh, chat, tệp và chia sẻ màn hình dùng cùng phòng."
                 : "Thành viên và tệp đồng bộ từ máy chủ • Camera, mic, chia sẻ và chat đang mô phỏng.", "caption"); demo.setWrapText(true);
         roomError.setWrapText(true); roomError.setId("meeting-room-error");
-        MeetingToolbar bottom = new MeetingToolbar(controls, demo, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
+        networkSignal = new NetworkSignalWidget();
+        HBox statusLine = Ui.row(8, networkSignal, demo); statusLine.setAlignment(Pos.CENTER);
+        MeetingToolbar bottom = new MeetingToolbar(controls, statusLine, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
         if (videoRoom) {
             var video = manager.sfuSession().video();
             nativeStatus = Ui.label("", "caption");
             nativeStatus.textProperty().bind(video.statusProperty());
+            statusLine.getChildren().setAll(networkSignal, nativeStatus);
             Button management = Ui.button("Quản lý phòng", "secondary", this::roomSettings); management.setId("room-management");
             management.setVisible(manager.sfuSession().isHost()); management.setManaged(management.isVisible());
             managementListener = (observable, before, after) -> {
                 if (!disposed) { management.setVisible(manager.sfuSession().isHost()); management.setManaged(management.isVisible()); }
             };
             manager.sfuSession().roomProperty().addListener(managementListener);
-            bottom.content().getChildren().addAll(nativeStatus, management);
+            bottom.content().getChildren().addAll(management);
             audioControls = new AudioControls(video.audio(), null, false);
             video.audio().requestedProperty().addListener(micListener); controls.mic(video.audio().requestedProperty().get());
             audioControls.setManaged(false);audioControls.setVisible(false);bottom.content().getChildren().add(audioControls);
             audioControls.errorProperty().addListener(audioErrorListener); video.screen().statusProperty().addListener(audioErrorListener);
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
             video.cameraRequestedProperty().addListener(cameraListener);
+            statsListener = (observable, before, after) -> {
+                if (!disposed) networkSignal.update(after);
+            };
+            video.statsProperty().addListener(statsListener);
+            if (video.latestStats() != null) networkSignal.update(video.latestStats());
             manager.sfuSession().roomProperty().addListener(videoRoomListener); renderNativeParticipants();
         }
         people.addListener((ListChangeListener<MockData.Participant>) change -> {
@@ -380,9 +391,11 @@ public final class MeetingScreen extends BorderPane {
         if (cameraSettings != null) { cameraSettings.close(); cameraSettings = null; }
         if (managementSettings != null) { managementSettings.close(); managementSettings = null; }
         disposed = true; filePanel.close(); clock.stop(); roomPoll.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose);
+        networkSignal.dispose();
         if (nativeStatus != null) nativeStatus.textProperty().unbind();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.
+            if (statsListener != null) mediaController.statsProperty().removeListener(statsListener);
             mediaSession.roomProperty().removeListener(videoRoomListener);
             if (managementListener != null) mediaSession.roomProperty().removeListener(managementListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);
