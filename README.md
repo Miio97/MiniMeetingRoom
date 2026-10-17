@@ -43,10 +43,12 @@ Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy tr�
 
    Trong NetBeans, **Run Project** vẫn chạy `client.Main`. Hãy khởi động server trước.
 
-4. Chọn **Đăng ký**, nhập tên đăng nhập không chứa khoảng trắng, tên hiển thị, mật khẩu từ 8 đến 128 ký tự có chữ thường, chữ hoa, chữ số và ký tự đặc biệt, rồi xác nhận. Email có thể bỏ trống. Khi tạo thành công, màn hình chuyển về đăng nhập và điền sẵn tên tài khoản. Đăng nhập phải nhập đúng chữ hoa/thường của tên đã đăng ký: `TranKhoa` khác `trankhoa`. Đăng nhập đúng sẽ mở Lobby với tên hiển thị lấy từ database.
+4. Chọn **Đăng ký**, nhập tên đăng nhập không chứa khoảng trắng, tên hiển thị, **email bắt buộc**, mật khẩu từ 8 đến 128 ký tự có chữ thường, chữ hoa, chữ số và ký tự đặc biệt, rồi xác nhận. Nhập OTP 6 số được gửi tới email; chỉ khi xác minh đúng server mới tạo tài khoản. Khi tạo thành công, màn hình chuyển về đăng nhập và điền sẵn tên tài khoản. Đăng nhập phải nhập đúng chữ hoa/thường của tên đã đăng ký: `TranKhoa` khác `trankhoa`. Đăng nhập đúng sẽ mở Lobby với tên hiển thị lấy từ database.
 5. **Đăng xuất** thu hồi phiên trên server trước khi trở lại màn hình đăng nhập. Nếu mất kết nối, giao diện báo lỗi để thử lại. Khi đóng ứng dụng, client cố gắng thu hồi phiên trong thời gian giới hạn; phiên không thu hồi được sẽ hết hạn theo cấu hình server.
 
-Thông tin tài khoản hiện chỉ đọc; chỉnh sửa tên và đổi mật khẩu sẽ được triển khai ở bước riêng.
+Tại đăng nhập, chọn **Quên mật khẩu?** để nhận OTP qua email đã đăng ký, nhập mã và mật khẩu mới. Đặt lại thành công thu hồi các phiên đăng nhập cũ. OTP hết hạn sau 5 phút, tối đa 5 lần nhập sai; gửi lại cách nhau 60 giây, tối đa 5 lần mỗi giờ cho một email/mục đích.
+
+Trước khi dùng OTP, chạy [script MySQL 002-email-otp.sql](database/migrations/002-email-otp.sql) trên database hiện có; script chỉ thêm hai bảng OTP, không sửa tài khoản/phòng. Database mới cũng cần migration này sau `schema.sql`. SMTP chỉ cấu hình trên server trong `config/mail.private.properties` (Git bỏ qua), theo [hướng dẫn email OTP](docs/email-otp.md). Thông tin tài khoản trong Cài đặt vẫn chỉ đọc; đổi tên và đổi mật khẩu trực tiếp trong Cài đặt chưa được thêm.
 
 ## Tạo và tham gia phòng
 

@@ -451,7 +451,7 @@ public final class Diagnostics implements AutoCloseable {
     }
 
     private static boolean sensitive(String key) {
-        return key.contains("password") || key.contains("secret") || key.contains("token")
+        return key.contains("password") || key.contains("secret") || key.contains("token") || key.contains("otp") || key.contains("challenge")
                 || key.contains("credential") || key.contains("email") || key.contains("username")
                 || key.contains("user_id") || key.contains("session_id") || key.contains("address")
                 || key.contains("host") || key.contains("path") || key.contains("message")

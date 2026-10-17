@@ -39,9 +39,11 @@ public final class AuthClient {
     private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
             "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
             "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
-            "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE");
+            "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE", "OTP_REQUIRED", "OTP_INVALID",
+            "OTP_EXPIRED", "OTP_LOCKED", "OTP_COOLDOWN", "OTP_RATE_LIMIT", "OTP_UNAVAILABLE", "MAIL_UNAVAILABLE", "DB_MIGRATION_REQUIRED");
     private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
-            "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
+            "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM", "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP",
+            "REQUEST_PASSWORD_RESET", "RESET_PASSWORD");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
     private final AtomicReference<NetworkMonitor> networkMonitor = new AtomicReference<>();
@@ -74,6 +76,30 @@ public final class AuthClient {
 
     public AuthResponse logout(String token) throws IOException {
         return send(new AuthRequest("LOGOUT", null, null, null, null, token));
+    }
+
+    public AuthResponse verifyRegistration(String email, String otp) throws IOException {
+        return verifyRegistration(email, otp, null);
+    }
+
+    public AuthResponse verifyRegistration(String email, String otp, String registrationChallenge) throws IOException {
+        return send(new AuthRequest("VERIFY_REGISTRATION", null, null, null, email, null, null, otp, registrationChallenge));
+    }
+
+    public AuthResponse resendRegistrationOtp(String email) throws IOException {
+        return resendRegistrationOtp(email, null);
+    }
+
+    public AuthResponse resendRegistrationOtp(String email, String registrationChallenge) throws IOException {
+        return send(new AuthRequest("RESEND_REGISTRATION_OTP", null, null, null, email, null, null, null, registrationChallenge));
+    }
+
+    public AuthResponse requestPasswordReset(String email) throws IOException {
+        return send(new AuthRequest("REQUEST_PASSWORD_RESET", null, null, null, email, null));
+    }
+
+    public AuthResponse resetPassword(String email, String otp, String newPassword) throws IOException {
+        return send(new AuthRequest("RESET_PASSWORD", null, newPassword, null, email, null, null, otp));
     }
 
     public AuthResponse createRoom(String token, String name, String pin, int capacity) throws IOException {
@@ -154,6 +180,9 @@ public final class AuthClient {
         boolean poll = request instanceof common.meeting.RoomRequest room && "ROOM_POLL".equals(room.action());
         T response;
         try (SSLSocket socket = connect(timing)) {
+            // Email delivery has bounded SMTP work after TLS; keep the UI asynchronous while allowing it to finish.
+            if (request instanceof AuthRequest auth && Set.of("REGISTER", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET").contains(auth.action()))
+                socket.setSoTimeout(Math.max(socket.getSoTimeout(), 60000));
             timing.next("response");
             var output = socket.getOutputStream(); var input = socket.getInputStream();
             if (monitor != null) { output = monitor.output(output); input = monitor.input(input); }

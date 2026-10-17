@@ -4,9 +4,15 @@ import common.room.RoomInfo;
 import java.util.List;
 
 public record AuthResponse(boolean success, String code, String message,
-                           AuthUser user, String token, String expiresAt, RoomInfo room, List<RoomInfo> rooms) {
+                           AuthUser user, String token, String expiresAt, RoomInfo room, List<RoomInfo> rooms,
+                           String registrationChallenge) {
     public AuthResponse {
         rooms = rooms == null ? List.of() : List.copyOf(rooms);
+    }
+
+    public AuthResponse(boolean success, String code, String message,
+                        AuthUser user, String token, String expiresAt, RoomInfo room, List<RoomInfo> rooms) {
+        this(success, code, message, user, token, expiresAt, room, rooms, null);
     }
 
     public AuthResponse(boolean success, String code, String message,

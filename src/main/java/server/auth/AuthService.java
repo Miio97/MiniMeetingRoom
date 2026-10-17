@@ -34,6 +34,7 @@ public final class AuthService {
     private final Clock clock;
     private final Duration sessionLifetime;
     private final SessionRevocationListener revocations;
+    private final EmailOtpService emailOtp;
     private final SecureRandom random = new SecureRandom();
     private final String dummyHash;
 
@@ -43,7 +44,9 @@ public final class AuthService {
 
     public AuthService(SessionRevocationListener revocations) {
         this(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC(),
-                Duration.ofHours(ServerConfig.getInt("auth.sessionHours", 24)), revocations);
+                Duration.ofHours(ServerConfig.getInt("auth.sessionHours", 24)), revocations,
+                new EmailOtpService(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC(),
+                        new JakartaOtpMailSender(), revocations));
     }
 
     public AuthService(ConnectionProvider connections, PasswordHasher passwords, Clock clock,
@@ -53,11 +56,18 @@ public final class AuthService {
 
     public AuthService(ConnectionProvider connections, PasswordHasher passwords, Clock clock,
             Duration sessionLifetime, SessionRevocationListener revocations) {
+        this(connections, passwords, clock, sessionLifetime, revocations, null);
+    }
+
+    /** Inject OTP explicitly for alternative production wiring; null preserves historical test fixtures only. */
+    public AuthService(ConnectionProvider connections, PasswordHasher passwords, Clock clock,
+            Duration sessionLifetime, SessionRevocationListener revocations, EmailOtpService emailOtp) {
         this.connections = Objects.requireNonNull(connections);
         this.passwords = Objects.requireNonNull(passwords);
         this.clock = Objects.requireNonNull(clock);
         this.sessionLifetime = Objects.requireNonNull(sessionLifetime);
         this.revocations = Objects.requireNonNull(revocations);
+        this.emailOtp = emailOtp;
         if (sessionLifetime.isNegative() || sessionLifetime.isZero()
                 || sessionLifetime.compareTo(Duration.ofDays(365)) > 0) {
             throw new IllegalArgumentException("Session lifetime must be between 1 second and 365 days.");
@@ -69,15 +79,33 @@ public final class AuthService {
         if (request == null || request.action() == null) {
             return AuthResponse.error("INVALID_REQUEST", "Yêu cầu không hợp lệ.");
         }
-        return switch (request.action().toUpperCase(Locale.ROOT)) {
-            case "REGISTER" -> register(request);
-            case "LOGIN" -> login(request);
-            case "LOGOUT" -> logout(request.token());
-            default -> AuthResponse.error("INVALID_REQUEST", "Chức năng không được hỗ trợ.");
-        };
+        try {
+            return switch (request.action().toUpperCase(Locale.ROOT)) {
+                case "REGISTER" -> register(request);
+                case "VERIFY_REGISTRATION" -> emailOtp == null ? otpUnavailable()
+                        : emailOtp.verifyRegistration(request.email(), request.otp(), request.registrationChallenge());
+                case "RESEND_REGISTRATION_OTP" -> emailOtp == null ? otpUnavailable()
+                        : emailOtp.resendRegistration(request.email(), request.registrationChallenge());
+                case "REQUEST_PASSWORD_RESET" -> emailOtp == null ? otpUnavailable()
+                        : emailOtp.requestReset(request.email());
+                case "RESET_PASSWORD" -> emailOtp == null ? otpUnavailable()
+                        : emailOtp.resetPassword(request.email(), request.otp(), request.password());
+                case "LOGIN" -> login(request);
+                case "LOGOUT" -> logout(request.token());
+                default -> AuthResponse.error("INVALID_REQUEST", "Chức năng không được hỗ trợ.");
+            };
+        } catch (SQLException failure) {
+            String detail = failure.getMessage();
+            if (detail != null && detail.toLowerCase(Locale.ROOT).contains("auth_email_otp")
+                    && failure.getSQLState() != null && failure.getSQLState().startsWith("42")) {
+                return AuthResponse.error("DB_MIGRATION_REQUIRED", "Máy chủ cần chạy script database/migrations/002-email-otp.sql trước khi sử dụng OTP.");
+            }
+            throw failure;
+        }
     }
 
     private AuthResponse register(AuthRequest request) throws SQLException {
+        if (emailOtp != null) return emailOtp.beginRegistration(request);
         String username = request.username();
         String displayName = clean(request.displayName());
         String email = clean(request.email());
@@ -191,7 +219,7 @@ public final class AuthService {
         return AuthResponse.ok("Đã đăng xuất.", null, null, null);
     }
 
-    private static AuthResponse validateRegistration(String username, String password, String displayName, String email) {
+    static AuthResponse validateRegistration(String username, String password, String displayName, String email) {
         String usernameError = AuthValidation.registrationUsernameError(username);
         if (usernameError != null) {
             return AuthResponse.error("VALIDATION_ERROR", usernameError);
@@ -209,7 +237,7 @@ public final class AuthService {
         return null;
     }
 
-    private static AuthResponse duplicateAccount(Connection connection, String username, String email) throws SQLException {
+    static AuthResponse duplicateAccount(Connection connection, String username, String email) throws SQLException {
         if (exists(connection, "SELECT 1 FROM Nguoi_Dung WHERE Ten_Dang_Nhap = ?", username)) {
             return AuthResponse.error("USERNAME_TAKEN", "Tên đăng nhập đã được sử dụng.");
         }
@@ -260,6 +288,10 @@ public final class AuthService {
 
     private static String clean(String value) {
         return value == null ? "" : value.strip();
+    }
+
+    private static AuthResponse otpUnavailable() {
+        return AuthResponse.error("OTP_UNAVAILABLE", "Xác thực email chưa được cấu hình trên máy chủ.");
     }
 
     private static Calendar utc() {

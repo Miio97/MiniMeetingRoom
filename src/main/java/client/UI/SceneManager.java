@@ -422,7 +422,7 @@ public final class SceneManager {
         stage.setMinWidth(0); stage.setMinHeight(0);
         stage.setFullScreen(false); stage.setMaximized(false);
         AuthScreen view = new AuthScreen(this); view.setPrefSize(960, 600);
-        show(view, 960, 600, false, () -> { });
+        show(view, 960, 600, false, view::dispose);
         if (restoreWindow) stage.show();
         // Window manager khôi phục cửa sổ sau khi thoát fullscreen/maximized.
         // Đặt lại kích thước theo form khi sự kiện đó đã được xử lý.
