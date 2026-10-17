@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,6 +91,8 @@ type engine struct {
 	pending        map[string]bool
 	stopVersions   map[string]uint64
 	slots          chan struct{}
+	maxPeers       int
+	maxLeases      int
 	stopped        atomic.Bool
 	ingress        atomic.Uint64
 	forwarded      atomic.Uint64
@@ -122,12 +125,68 @@ func newEngine(secret string) (*engine, error) {
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	settings.SetIncludeLoopbackCandidate(true)
 	settings.SetICETimeouts(5*time.Second, 8*time.Second, time.Second)
+
+	portMin, _ := strconv.Atoi(os.Getenv("MMR_MEDIA_PORT_MIN"))
+	portMax, _ := strconv.Atoi(os.Getenv("MMR_MEDIA_PORT_MAX"))
+	if portMin > 0 && portMax > portMin && portMax <= 65535 {
+		_ = settings.SetEphemeralUDPPortRange(uint16(portMin), uint16(portMax))
+	}
+
+	maxParticipants := 20
+	if val, err := strconv.Atoi(os.Getenv("MINIMEETING_MAX_PEERS")); err == nil && val > 0 {
+		maxParticipants = val
+	} else if val, err := strconv.Atoi(os.Getenv("MMR_MAX_PEERS")); err == nil && val > 0 {
+		maxParticipants = val
+	} else if val, err := strconv.Atoi(os.Getenv("MMR_MAX_PARTICIPANTS")); err == nil && val > 0 {
+		maxParticipants = val
+	}
+
+	maxPeers := 512
+	if maxParticipants <= 100 {
+		computed := maxParticipants * maxParticipants * 2
+		if computed > maxPeers {
+			maxPeers = computed
+		}
+	} else {
+		maxPeers = maxParticipants
+	}
+	if envPeers, err := strconv.Atoi(os.Getenv("MMR_MEDIA_MAX_PEER_CONNECTIONS")); err == nil && envPeers > 0 {
+		maxPeers = envPeers
+	}
+
+	maxLeases := 128
+	if maxParticipants*4 > maxLeases {
+		maxLeases = maxParticipants * 4
+	}
+	if envLeases, err := strconv.Atoi(os.Getenv("MMR_MEDIA_MAX_LEASES")); err == nil && envLeases > 0 {
+		maxLeases = envLeases
+	}
+
+	slotsCount := 64
+	if maxParticipants*2 > slotsCount {
+		slotsCount = maxParticipants * 2
+	}
+	if envSlots, err := strconv.Atoi(os.Getenv("MMR_MEDIA_SLOTS")); err == nil && envSlots > 0 {
+		slotsCount = envSlots
+	}
+
 	instanceBytes := make([]byte, 16)
 	if _, err := rand.Read(instanceBytes); err != nil {
 		return nil, err
 	}
-	return &engine{byKind: map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}}, api: webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
-		secret: sha256.Sum256([]byte(secret)), instance: hex.EncodeToString(instanceBytes), peers: map[string]*mediaPeer{}, leases: map[string]mediaLease{}, pending: map[string]bool{}, stopVersions: map[string]uint64{}, slots: make(chan struct{}, 16)}, nil
+	return &engine{
+		byKind: map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}},
+		api: webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
+		secret: sha256.Sum256([]byte(secret)),
+		instance: hex.EncodeToString(instanceBytes),
+		peers: map[string]*mediaPeer{},
+		leases: map[string]mediaLease{},
+		pending: map[string]bool{},
+		stopVersions: map[string]uint64{},
+		slots: make(chan struct{}, slotsCount),
+		maxPeers: maxPeers,
+		maxLeases: maxLeases,
+	}, nil
 }
 func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -215,7 +274,7 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(w, 409, map[string]any{"code": "STALE_MEDIA"})
 			return
 		}
-		if !exists && len(e.leases) >= 128 {
+		if !exists && len(e.leases) >= e.maxLeases {
 			e.mu.Unlock()
 			reply(w, 429, map[string]any{"code": "MEDIA_BUSY"})
 			return
@@ -291,7 +350,7 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		return
 	}
 	source := e.publisherLocked(request.Source, request.Kind)
-	if len(e.peers)+len(e.pending) >= 512 || e.pending[request.Transport] {
+	if len(e.peers)+len(e.pending) >= e.maxPeers || e.pending[request.Transport] {
 		e.mu.Unlock()
 		reply(w, 429, map[string]any{"code": "MEDIA_BUSY"})
 		return

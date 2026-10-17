@@ -55,6 +55,10 @@ public final class MeetingSession implements AutoCloseable {
         if (video == null) video = mediaFactory.apply(this);
         return video;
     }
+    public int maxRoomCapacity() {
+        SignalingClient c = client;
+        return c != null ? c.serverMaxParticipants() : 20;
+    }
     private synchronized void closeVideo() { if (video != null) { video.close(); video = null; } }
     private volatile RoomPreview preview;
     private volatile String pin = "";

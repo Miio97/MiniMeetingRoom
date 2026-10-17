@@ -28,8 +28,9 @@ public final class MeetingServerMain {
                 AtomicReference<SignalingServer> signalingReference = new AtomicReference<>();
                 AtomicReference<server.media.VideoCoordinator> videoReference = new AtomicReference<>();
                 Gson json = new Gson();
+                int maxParticipants = Math.min(50, Math.max(2, ServerConfig.getInt("meeting.maxParticipants", 20)));
                 try (RoomService rooms = new RoomService(new RoomRepository(), Clock.systemUTC(), secrets.instanceId(),
-                        secrets.receiptKey(), ServerConfig.getInt("meeting.maxParticipants", 16), event -> {
+                        secrets.receiptKey(), maxParticipants, event -> {
                             SignalingServer server = signalingReference.get();
                             var video = videoReference.get(); if (video != null) video.roomEvent(event);
                             if (server != null) server.event(event.recipientConnectionId(), event.type(), event.roomId(),
@@ -56,9 +57,10 @@ public final class MeetingServerMain {
                             SignalingServer signaling = new SignalingServer(tls,
                             new InetSocketAddress(ServerConfig.get("signaling.bind", "127.0.0.1"), ServerConfig.getInt("signaling.port", 8444)),
                             new SessionValidator(), new MeetingHandler(rooms, video, networkStats), rooms.serverEpoch(),
-                            new SignalingServer.Options(ServerConfig.getInt("signaling.maxConnections", 64),
+                            new SignalingServer.Options(ServerConfig.getInt("signaling.maxConnections", 256),
                                     ServerConfig.getInt("signaling.maxBytes", common.signaling.SignalWire.DEFAULT_MAX_BYTES),
-                                    ServerConfig.getInt("signaling.requestsPerSecond", 20)))) {
+                                    ServerConfig.getInt("signaling.requestsPerSecond", 50),
+                                    maxParticipants))) {
                         signalingReference.set(signaling);
                         videoReference.set(video);
                         AuthService auth = new AuthService(hash -> { signaling.revokeSession(hash); rooms.revokeSession(hash); });

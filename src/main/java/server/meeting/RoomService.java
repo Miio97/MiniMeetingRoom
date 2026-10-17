@@ -44,20 +44,26 @@ public final class RoomService implements AutoCloseable {
     private final ArrayDeque<List<RoomEvent>> outbound = new ArrayDeque<>();
     private LegacyRoomService legacy;
     private final Map<Long, Long> pendingTransfers = new LinkedHashMap<>();
+    public static final int DEFAULT_MAX_PARTICIPANTS = 20;
+    public static final int HARD_CAP_PARTICIPANTS = 50;
     public RoomService() { this(server.database.DatabaseConnection::getConnection, Clock.systemUTC()); }
     public RoomService(server.auth.ConnectionProvider connections, Clock clock) {
-        this(new RoomRepository(connections), clock, "legacy", new byte[32], 16, event -> { });
+        this(new RoomRepository(connections), clock, "legacy", new byte[32], DEFAULT_MAX_PARTICIPANTS, event -> { });
         legacy = new LegacyRoomService(connections, clock);
     }
     private ScheduledExecutorService cleanup;
     private boolean started, closed;
+
+    public RoomService(RoomRepository repository, Clock clock, String instanceId, byte[] receiptKey, Consumer<RoomEvent> listener) {
+        this(repository, clock, instanceId, receiptKey, DEFAULT_MAX_PARTICIPANTS, listener);
+    }
 
     public RoomService(RoomRepository repository, Clock clock, String instanceId, byte[] receiptKey,
             int maxParticipants, Consumer<RoomEvent> listener) {
         this.repository = Objects.requireNonNull(repository); this.clock = Objects.requireNonNull(clock);
         if (instanceId == null || !instanceId.matches("[A-Za-z0-9_-]{1,64}")) throw new IllegalArgumentException("Invalid instance identifier");
         if (receiptKey == null || receiptKey.length < 32) throw new IllegalArgumentException("Receipt key must contain at least 32 bytes");
-        if (maxParticipants < 2 || maxParticipants > 250) throw new IllegalArgumentException("Invalid participant policy");
+        if (maxParticipants < 2 || maxParticipants > HARD_CAP_PARTICIPANTS) throw new IllegalArgumentException("Invalid participant policy");
         this.instanceId = instanceId; this.receiptKey = receiptKey.clone(); this.maxParticipants = maxParticipants;
         this.listener = Objects.requireNonNull(listener); this.epoch = opaque("e_");
     }

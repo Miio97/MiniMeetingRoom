@@ -65,7 +65,7 @@ public final class LegacyRoomService implements AutoCloseable {
     private RoomResponse create(Connection connection, RoomRequest request, User user) throws SQLException {
         String name = request.name() == null ? "" : request.name().strip();
         if (name.isBlank() || name.length() > 100 || request.pin() == null || !request.pin().matches("\\d{4,6}")
-                || request.capacity() < 2 || request.capacity() > 16) return error("VALIDATION_ERROR", "Nhập tên phòng, PIN 4–6 số và sức chứa 2–16 người.");
+                || request.capacity() < 2 || request.capacity() > 50) return error("VALIDATION_ERROR", "Nhập tên phòng, PIN 4–6 số và sức chứa 2–50 người.");
         if (present(user.id())) return error("ALREADY_IN_ROOM", "Tài khoản đang ở trong một phòng khác.");
         Room room = new Room(); room.name = name; room.code = "MMR-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase(Locale.ROOT);
         room.pin = pins.hash(request.pin()); room.capacity = request.capacity(); room.host = user.id();

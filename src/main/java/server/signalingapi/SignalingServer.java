@@ -38,13 +38,17 @@ public final class SignalingServer implements AutoCloseable {
         default void bindServer(SignalingServer server) { }
     }
 
-    public record Options(int maxConnections, int maxFrameBytes, int requestsPerSecond) {
+    public record Options(int maxConnections, int maxFrameBytes, int requestsPerSecond, int maxParticipants) {
+        public Options(int maxConnections, int maxFrameBytes, int requestsPerSecond) {
+            this(maxConnections, maxFrameBytes, requestsPerSecond, 20);
+        }
         public Options {
             if (maxConnections < 1 || maxConnections > 512 || maxFrameBytes < 16384
-                    || maxFrameBytes > 1048576 || requestsPerSecond < 1 || requestsPerSecond > 100)
+                    || maxFrameBytes > 1048576 || requestsPerSecond < 1 || requestsPerSecond > 100
+                    || maxParticipants < 2 || maxParticipants > 50)
                 throw new IllegalArgumentException("SIGNALING_LIMITS");
         }
-        public static Options defaults() { return new Options(64, SignalWire.DEFAULT_MAX_BYTES, 20); }
+        public static Options defaults() { return new Options(256, SignalWire.DEFAULT_MAX_BYTES, 50, 20); }
     }
 
     private final SSLServerSocket listener;
@@ -212,6 +216,7 @@ public final class SignalingServer implements AutoCloseable {
                 Thread.ofVirtual().name("meeting-writer").start(() -> writeLoop(output));
                 JsonObject body = new JsonObject(); body.addProperty("maxFrameBytes", options.maxFrameBytes());
                 body.addProperty("protocolVersion", 1);
+                body.addProperty("maxParticipants", options.maxParticipants());
                 send(message("SERVER_WELCOME", null, null, null, body));
                 while (!closed.get()) {
                     SignalMessage request = SignalWire.read(input, options.maxFrameBytes());
@@ -261,6 +266,7 @@ public final class SignalingServer implements AutoCloseable {
                                     JsonObject authenticated = new JsonObject();
                                     authenticated.addProperty("expiresAt", principal.expiresAt().toString());
                                     authenticated.addProperty("selfDisplayName", principal.displayName());
+                                    authenticated.addProperty("maxParticipants", options.maxParticipants());
                                     response = message("AUTHENTICATED", request.requestId(), null, null, authenticated);
                                 } else if ("NETWORK_STATS".equals(request.type())) {
                                     if (principal == null || closed.get()) {

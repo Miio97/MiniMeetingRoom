@@ -17,6 +17,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -84,7 +85,7 @@ class MeetingSignalingTest {
         statsService.start();
         AtomicReference<SignalingServer> current = new AtomicReference<>();
         rooms = new RoomService(new RoomRepository(fixture::connection), Clock.systemUTC(), "test-instance",
-                new byte[32], 10, event -> {
+                new byte[32], 20, event -> {
                     SignalingServer target = current.get();
                     if (target != null) target.event(event.recipientConnectionId(), event.type(), event.roomId(),
                             event.revision(), JSON.toJsonTree(event.body()).getAsJsonObject());
@@ -632,6 +633,81 @@ class MeetingSignalingTest {
         assertTrue(sessionDbQueries.get() > 0, "Non-stats request must validate session against DB");
     }
 
+    @Test void twentyParticipantsSignalingBenchmarkAndStateSync() throws Exception {
+        // 1. Verify host connects and receives maxParticipants = 20 from SERVER_WELCOME and AUTHENTICATED
+        List<SignalMessage> hostEvents = new CopyOnWriteArrayList<>();
+        SignalingClient host = login("benchHost", hostEvents);
+        assertEquals(20, host.serverMaxParticipants(), "Host client must read maxParticipants = 20 from server");
+
+        // Host creates room with capacity 20
+        RoomSnapshot room = create(host, 20, UUID.randomUUID().toString());
+        assertEquals(20, room.capacity());
+
+        // Host joins
+        join(host, room, "", UUID.randomUUID().toString());
+
+        // 2. Concurrently connect and join 19 more participants
+        List<SignalingClient> guests = new CopyOnWriteArrayList<>();
+        List<List<SignalMessage>> guestEvents = new CopyOnWriteArrayList<>();
+        int guestCount = 19;
+        for (int i = 0; i < guestCount; i++) {
+            guestEvents.add(new CopyOnWriteArrayList<>());
+        }
+
+        long startNanos = System.nanoTime();
+
+        // Connect all 19 guests
+        List<CompletableFuture<SignalingClient>> loginFutures = new ArrayList<>();
+        for (int i = 0; i < guestCount; i++) {
+            final int index = i;
+            loginFutures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    return login("guestBench" + index, guestEvents.get(index));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+        for (var future : loginFutures) {
+            guests.add(future.get(10, TimeUnit.SECONDS));
+        }
+
+        // All 19 guests join concurrently
+        List<CompletableFuture<SignalMessage>> joinFutures = new ArrayList<>();
+        for (int i = 0; i < guestCount; i++) {
+            final SignalingClient guest = guests.get(i);
+            joinFutures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    return join(guest, room, "1234", UUID.randomUUID().toString());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+        for (var future : joinFutures) {
+            future.get(10, TimeUnit.SECONDS);
+        }
+
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+        // Verify total join benchmark duration is well under 5 seconds (5000 ms)
+        assertTrue(durationMs < 5000, "Signaling join for 20 clients must complete in under 5s, took: " + durationMs + "ms");
+
+        // Verify room state is fully synchronized across all 20 participants
+        assertEquals(20, rooms.participantCount());
+        RoomSnapshot hostView = get(host, room.roomId());
+        assertEquals(20, hostView.participants().size());
+
+        // Verify each guest sees 20 participants and received PARTICIPANT_JOINED
+        for (SignalingClient guest : guests) {
+            RoomSnapshot guestView = get(guest, room.roomId());
+            assertEquals(20, guestView.participants().size());
+        }
+
+        // Host received participant joined events for guests
+        long joinedEventsReceived = hostEvents.stream().filter(e -> "PARTICIPANT_JOINED".equals(e.type())).count();
+        assertEquals(19, joinedEventsReceived, "Host must receive PARTICIPANT_JOINED for all 19 guests");
+    }
 
     private SignalingClient login(String user, List<SignalMessage> events) throws Exception {
         return connect(fixture.account(user, user).token(), events);
