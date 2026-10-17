@@ -31,14 +31,18 @@ public final class CameraSettingsDialog extends Dialog<Void> {
         locked.setOnAction(event -> changeSettings(locked.isSelected(), null, change));
         approval.setOnAction(event -> changeSettings(null, approval.isSelected(), change));
         roomState(state, host);
+        Label quality = Ui.label("", "caption"); quality.setId("adaptive-video-quality");
+        quality.textProperty().bind(javafx.beans.binding.Bindings.createStringBinding(
+                () -> "Chất lượng tự động: " + video.qualityProperty().get().label, video.qualityProperty()));
         var content = Ui.column(16, management, audio, new Separator(), Ui.label("Camera", "subtitle"), camera,
+                quality,
                 new Separator(), Ui.label("Giao diện", "subtitle"), ThemeManager.selector());
         content.getChildren().stream().filter(Label.class::isInstance).map(Label.class::cast).forEach(label -> label.setWrapText(true));
         content.setPrefWidth(600);
         ScrollPane scroll = Ui.scroll(content); scroll.setPrefViewportWidth(620); scroll.setPrefViewportHeight(500);
         getDialogPane().setContent(scroll); getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         ((Button) getDialogPane().lookupButton(ButtonType.CLOSE)).setText("Xong");
-        setOnHidden(event -> { hidden = true; camera.dispose(); audio.dispose(); });
+        setOnHidden(event -> { hidden = true; camera.dispose(); audio.dispose(); quality.textProperty().unbind(); });
     }
     public void roomState(common.meeting.RoomResponse state, boolean host) {
         confirmed = state; management.setVisible(host && state != null); management.setManaged(management.isVisible());

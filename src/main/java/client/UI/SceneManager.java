@@ -66,6 +66,7 @@ public final class SceneManager {
         if (!usingSfuRoom || closing) return;
         if (after != null && after.collaborationRoom() != null) updateRoom(after.collaborationRoom());
         else if (after == null && !leavingSfuRoom && roomJoined) {
+            if (sfuSession != null) endReason = sfuSession.noticeProperty().get();
             int count = roomInfo == null ? 0 : roomInfo.people();
             long seconds = sfuSession == null ? 0 : sfuSession.elapsedSeconds();
             roomJoined = false; pendingRoomId = -1; usingSfuRoom = false; invitationPin = "";
