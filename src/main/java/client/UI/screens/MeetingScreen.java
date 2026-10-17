@@ -53,6 +53,7 @@ public final class MeetingScreen extends BorderPane {
     private final Label lockLabel = Ui.label("", "caption");
     private final Label participantCount = Ui.label("", "caption");
     private final Label roomError = Ui.label("", "error-text");
+    private final Label adaptiveStatus = Ui.label("", "caption");
     private List<RoomParticipant> participantSnapshot = List.of();
     private boolean disposed, polling, leaving;
     private boolean sharing, panelOpen = true;
@@ -99,6 +100,14 @@ public final class MeetingScreen extends BorderPane {
         networkSignal = new NetworkSignalWidget();
         networkSignal.update(null, network.snapshot());
         HBox statusLine = Ui.row(8, networkSignal); statusLine.setAlignment(Pos.CENTER_LEFT);
+        if (videoRoom) {
+            adaptiveStatus.setId("adaptive-video-status");
+            adaptiveStatus.textProperty().bind(javafx.beans.binding.Bindings.createStringBinding(
+                    () -> mediaController.qualityProperty().get().label, mediaController.qualityProperty()));
+            adaptiveStatus.visibleProperty().bind(mediaController.qualityProperty().isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.NORMAL));
+            adaptiveStatus.managedProperty().bind(adaptiveStatus.visibleProperty());
+            statusLine.getChildren().add(0, adaptiveStatus);
+        }
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
         participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand,
@@ -394,6 +403,7 @@ public final class MeetingScreen extends BorderPane {
         networkSignal.dispose();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.
+            adaptiveStatus.textProperty().unbind(); adaptiveStatus.visibleProperty().unbind(); adaptiveStatus.managedProperty().unbind();
             if (statsListener != null) mediaController.statsProperty().removeListener(statsListener);
             mediaSession.roomProperty().removeListener(videoRoomListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);

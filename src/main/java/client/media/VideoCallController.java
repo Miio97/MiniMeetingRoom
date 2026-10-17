@@ -37,6 +37,13 @@ public final class VideoCallController implements AutoCloseable {
     private final ScheduledExecutorService statsSampler = Executors.newSingleThreadScheduledExecutor(
             Thread.ofPlatform().daemon().name("video-stats-sampler").factory());
     private final NetworkStatsCalculator statsCalculator = new NetworkStatsCalculator();
+    private final RtcQualityMonitor videoQualityMonitor = new RtcQualityMonitor();
+    private int qualityCursor;
+    private final AdaptiveVideoPolicy adaptivePolicy = new AdaptiveVideoPolicy();
+    private final AtomicBoolean adapting = new AtomicBoolean();
+    private volatile AdaptiveVideoPolicy.Profile appliedQuality = AdaptiveVideoPolicy.Profile.NORMAL;
+    private final ReadOnlyObjectWrapper<AdaptiveVideoPolicy.Profile> quality = new ReadOnlyObjectWrapper<>(AdaptiveVideoPolicy.Profile.NORMAL);
+    public ReadOnlyObjectProperty<AdaptiveVideoPolicy.Profile> qualityProperty() { return quality.getReadOnlyProperty(); }
     private final ReadOnlyObjectWrapper<NetworkStatsCalculator.CalculatedSample> latestStats = new ReadOnlyObjectWrapper<>();
     public ReadOnlyObjectProperty<NetworkStatsCalculator.CalculatedSample> statsProperty() { return latestStats.getReadOnlyProperty(); }
     public NetworkStatsCalculator.CalculatedSample latestStats() { return latestStats.get(); }
@@ -52,7 +59,7 @@ public final class VideoCallController implements AutoCloseable {
     public CompletableFuture<Void> closeComplete() { return closeComplete; }
     private volatile boolean activeCamera;
     private NativeVideoSession nativeSession;
-    private NativeVideoSession.Peer publisher;
+    private volatile NativeVideoSession.Peer publisher;
     private NativeVideoSession.Preview preview;
     private VideoInput input;
     private boolean inputStarted;
@@ -187,7 +194,8 @@ public final class VideoCallController implements AutoCloseable {
             JsonObject body = new JsonObject(); body.addProperty("sdp", offer);
             publicationAttempted = true; JsonObject answer = command("VIDEO_PUBLISH", body);
             if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
-            publisher.answer(answer.get("sdp").getAsString()); requireWanted(wanted); activeCamera = true;
+            publisher.answer(answer.get("sdp").getAsString()); requireWanted(wanted);
+            publisher.quality(appliedQuality); activeCamera = true;
             show("Camera đang bật; đang thiết lập kết nối WebRTC với SFU.");
         } catch (Exception | LinkageError failure) {
             stopLocalCamera(); if (publicationAttempted) try { command("VIDEO_STOP", new JsonObject()); } catch (Exception ignored) { }
@@ -238,6 +246,10 @@ public final class VideoCallController implements AutoCloseable {
             cameraSwitch.resetOff();
             stopLocalCamera(); subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
             show("Kết nối video gián đoạn. Camera đã tắt; hãy bật lại bằng tay khi server sẵn sàng."); throw failure;
+        }
+        if (appliedQuality == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {
+            subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear();
+            return;
         }
         for (String target : new ArrayList<>(subscriptions.keySet())) {
             Subscription subscription = subscriptions.get(target);
@@ -293,6 +305,9 @@ public final class VideoCallController implements AutoCloseable {
     private void sampleNetworkStats() {
         if (closed.get() || room.get() == null || self.get() == null) return;
         try {
+            var voiceEvidence = audio.networkQuality();
+            videoQualityMonitor.begin();
+            long statsDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1000);
             Double rttSeconds = null;
             Double maxJitterSeconds = null;
             Long packetsLost = null;
@@ -305,6 +320,7 @@ public final class VideoCallController implements AutoCloseable {
             NativeVideoSession.Peer pub = publisher;
             if (pub != null) {
                 dev.onvoid.webrtc.RTCStatsReport pubReport = pub.stats(500);
+                videoQualityMonitor.accept(pub, pubReport, appliedQuality == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
                 if (pubReport != null) {
                     for (dev.onvoid.webrtc.RTCStats stat : pubReport.getStats().values()) {
                         if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.CANDIDATE_PAIR) {
@@ -343,8 +359,14 @@ public final class VideoCallController implements AutoCloseable {
                 }
             }
 
-            for (Subscription sub : subscriptions.values()) {
-                dev.onvoid.webrtc.RTCStatsReport subReport = sub.peer().stats(500);
+            List<Subscription> qualitySubscriptions = List.copyOf(subscriptions.values());
+            int examined = 0;
+            for (; examined < qualitySubscriptions.size(); examined++) {
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(statsDeadline - System.nanoTime());
+                if (closed.get() || remainingMs <= 0) break;
+                Subscription sub = qualitySubscriptions.get(Math.floorMod(qualityCursor + examined, qualitySubscriptions.size()));
+                dev.onvoid.webrtc.RTCStatsReport subReport = sub.peer().stats(Math.min(100, remainingMs));
+                videoQualityMonitor.accept(sub.peer(), subReport);
                 if (subReport == null) continue;
                 for (dev.onvoid.webrtc.RTCStats stat : subReport.getStats().values()) {
                     if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.CANDIDATE_PAIR && rttSeconds == null) {
@@ -370,12 +392,24 @@ public final class VideoCallController implements AutoCloseable {
                     }
                 }
             }
+            qualityCursor = qualitySubscriptions.isEmpty() ? 0 : Math.floorMod(qualityCursor + examined, qualitySubscriptions.size());
 
             NetworkStatsCalculator.RawCounters raw = new NetworkStatsCalculator.RawCounters(
                     System.nanoTime(), rttSeconds, maxJitterSeconds,
                     packetsLost, packetsReceived, bytesSent, framesSent, width, height
             );
-            NetworkStatsCalculator.CalculatedSample sample = statsCalculator.process(raw);
+            NetworkStatsCalculator.CalculatedSample counters = statsCalculator.process(raw);
+            var videoEvidence = videoQualityMonitor.finish().merge(screen.transportQuality());
+            var connectionEvidence = videoEvidence.merge(voiceEvidence);
+            NetworkStatsCalculator.CalculatedSample sample = new NetworkStatsCalculator.CalculatedSample(
+                    connectionEvidence.rttMs(), connectionEvidence.jitterMs(), connectionEvidence.lossPct(),
+                    counters.bitrateKbps(), counters.fps(), counters.width(), counters.height());
+            if (adapting.compareAndSet(false, true)) {
+                observeNetwork(System.nanoTime(), videoEvidence, voiceEvidence).whenComplete((value, failure) -> {
+                    adapting.set(false);
+                    if (failure != null && !closed.get()) mediaFailure("adaptive_quality", failure);
+                });
+            }
             if (!closed.get()) {
                 try {
                     Platform.runLater(() -> latestStats.set(sample));
@@ -397,6 +431,26 @@ public final class VideoCallController implements AutoCloseable {
             signaling.request("NETWORK_STATS", body, UUID.randomUUID().toString());
         } catch (Exception ignored) {
         }
+    }
+
+    /** All native sender changes share the camera owner, so a manual off/host stop always wins. */
+    CompletableFuture<Void> observeNetwork(long observedAt, AdaptiveVideoPolicy.Evidence videoEvidence, AdaptiveVideoPolicy.Evidence voiceEvidence) {
+        return submit(() -> {
+            if (!inMeeting || room.get() == null || self.get() == null || System.nanoTime() - observedAt > TimeUnit.SECONDS.toNanos(3)) return null;
+            var next = adaptivePolicy.observe(observedAt, videoEvidence, voiceEvidence);
+            if (next == appliedQuality) return null;
+            if (publisher != null) publisher.quality(next);
+            screen.prioritizeVoice(next == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY).whenComplete((value, failure) -> {
+                if (failure != null && !closed.get()) mediaFailure("adaptive_screen", failure);
+            });
+            appliedQuality = next;
+            if (next == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {
+                subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear();
+            }
+            Platform.runLater(() -> { if (!closed.get()) quality.set(next); });
+            common.diagnostics.Diagnostics.current().event("video.quality.changed", Map.of("status", next.name()));
+            return null;
+        });
     }
 
     @Override public void close() {

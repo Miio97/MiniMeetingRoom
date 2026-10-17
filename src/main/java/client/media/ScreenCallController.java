@@ -24,7 +24,7 @@ public final class ScreenCallController implements AutoCloseable {
     private final Semaphore admission=new Semaphore(16);
     private final Set<CompletableFuture<?>> jobs=ConcurrentHashMap.newKeySet();
     private final Map<String,VideoFrameMailbox> frames=new ConcurrentHashMap<>();
-    private final Map<String,Subscription> subscriptions=new HashMap<>();
+    private final Map<String,Subscription> subscriptions=new ConcurrentHashMap<>();
     private final ReadOnlyBooleanWrapper requested=new ReadOnlyBooleanWrapper();
     private final ReadOnlyStringWrapper status=new ReadOnlyStringWrapper("");
     private final CameraSwitch sharing=new CameraSwitch(this::changed);
@@ -32,7 +32,24 @@ public final class ScreenCallController implements AutoCloseable {
     private volatile boolean active,entered;
     private final AtomicLong previewEpoch=new AtomicLong();
     private NativeVideoSession nativeSession;
-    private NativeVideoSession.Peer publisher;
+    private volatile NativeVideoSession.Peer publisher;
+    private volatile boolean networkPaused;
+    private boolean appliedNetworkPause;
+    CompletableFuture<Void> prioritizeVoice(boolean value) {
+        networkPaused = value;
+        return submit(() -> { applyNetworkPause(); return null; });
+    }
+    private void applyNetworkPause() {
+        if (publisher != null && appliedNetworkPause != networkPaused) publisher.pauseTransmission(networkPaused);
+        appliedNetworkPause = networkPaused;
+        if (networkPaused) { subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear(); }
+    }
+    AdaptiveVideoPolicy.Evidence transportQuality() {
+        var monitor = new RtcQualityMonitor(); monitor.begin();
+        var current = publisher;
+        if (current != null) monitor.accept(current, current.stats(100), true);
+        return monitor.finish();
+    }
     private NativeVideoSession.Preview preview;
     private VideoInput input;
     private long lastFrameCount,lastProgress,lastSourceCheck;
@@ -96,7 +113,8 @@ public final class ScreenCallController implements AutoCloseable {
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
             while(frames(self.get()).receivedFrames()<=before) {wanted();if(System.nanoTime()>deadline) throw new SignalException("SCREEN_NO_FRAMES");Thread.sleep(30);}
             JsonObject body=new JsonObject();body.addProperty("sdp",publisher.offer());wanted();attempted=true;
-            publisher.answer(command("SCREEN_PUBLISH",body).get("sdp").getAsString());wanted();active=true;
+            publisher.answer(command("SCREEN_PUBLISH",body).get("sdp").getAsString());wanted();
+            publisher.pauseTransmission(networkPaused); appliedNetworkPause = networkPaused; active=true;
             lastFrameCount=frames(self.get()).receivedFrames();lastProgress=System.nanoTime();changed();show("");
         } catch(Exception | LinkageError failure) {stop(attempted);if(!(failure instanceof CancellationException)) failed(failure);throw failure;}
     }
@@ -119,6 +137,8 @@ public final class ScreenCallController implements AutoCloseable {
             if(System.nanoTime()-lastProgress>TimeUnit.SECONDS.toNanos(8)) {sharing.resetOff();stop(true);throw new SignalException("SCREEN_NO_FRAMES");}
         }
         JsonObject sources=command("SCREEN_STATE",new JsonObject()).getAsJsonObject("sources");
+        applyNetworkPause();
+        if (networkPaused) return;
         for(String target:new ArrayList<>(subscriptions.keySet())) {
             var subscription=subscriptions.get(target);
             if(!sources.has(target) || !subscription.publication().equals(sources.get(target).getAsString()) || subscription.peer().failed()) {

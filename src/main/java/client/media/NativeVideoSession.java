@@ -59,6 +59,8 @@ public final class NativeVideoSession implements AutoCloseable {
         private final Set<CompletableFuture<?>> pending = ConcurrentHashMap.newKeySet();
         private final List<RTCRtpReceiver> receivers = new CopyOnWriteArrayList<>();
         private final Object trackLifecycle = new Object();
+        private final Object nativeLifecycle = new Object();
+        private RTCRtpSender sender;
         private volatile VideoTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
         private Peer(VideoTrack track, boolean publisher, VideoFrameMailbox sink, int bitrate, int fps) {
@@ -75,12 +77,13 @@ public final class NativeVideoSession implements AutoCloseable {
                     encoding.maxBitrate = bitrate; encoding.maxFramerate = (double) fps; init.sendEncodings = List.of(encoding);
                 }
                 RTCRtpTransceiver transceiver = connection.addTransceiver(track, init);
-                try { transceiver.setCodecPreferences(factory.getRtpSenderCapabilities(MediaType.VIDEO).getCodecs().stream()
+                try { if (publisher) sender = transceiver.getSender();
+                    transceiver.setCodecPreferences(factory.getRtpSenderCapabilities(MediaType.VIDEO).getCodecs().stream()
                         .filter(codec -> "VP8".equalsIgnoreCase(codec.getName())).toList()); }
                 finally { transceiver.dispose(); }
                 if (publisher) track.addSink(binding);
                 peers.add(this);
-            } catch (RuntimeException failure) { connection.close(); throw failure; }
+            } catch (RuntimeException failure) { connection.close(); if (sender != null) sender.dispose(); throw failure; }
         }
         public boolean failed() { return state == RTCPeerConnectionState.FAILED || state == RTCPeerConnectionState.CLOSED; }
         public boolean connected() { return state == RTCPeerConnectionState.CONNECTED; }
@@ -108,15 +111,42 @@ public final class NativeVideoSession implements AutoCloseable {
             finally { pending.remove(offer); }
         }
         public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
+        public void quality(AdaptiveVideoPolicy.Profile profile) {
+            synchronized (nativeLifecycle) {
+                if (closing.get() || sender == null) return;
+                RTCRtpSendParameters parameters = sender.getParameters();
+                if (parameters.encodings == null || parameters.encodings.isEmpty()) throw new IllegalStateException("VIDEO_ENCODINGS_UNAVAILABLE");
+                for (var encoding : parameters.encodings) {
+                    encoding.active = profile != AdaptiveVideoPolicy.Profile.VOICE_PRIORITY;
+                    encoding.maxBitrate = profile.bitrate; encoding.maxFramerate = (double) profile.fps;
+                    encoding.scaleResolutionDownBy = profile.scale;
+                }
+                sender.setParameters(parameters);
+                if (profile != AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) sender.generateKeyFrame();
+            }
+        }
+        /** Preserve a screen publication's own bitrate/size settings during voice-only fallback. */
+        public void pauseTransmission(boolean pause) {
+            synchronized (nativeLifecycle) {
+                if (closing.get() || sender == null) return;
+                var parameters = sender.getParameters();
+                for (var encoding : parameters.encodings) encoding.active = !pause;
+                sender.setParameters(parameters);
+                if (!pause) sender.generateKeyFrame();
+            }
+        }
         public RTCStatsReport stats(long timeoutMs) {
             if (closing.get()) return null;
             CompletableFuture<RTCStatsReport> result = new CompletableFuture<>();
             pending.add(result);
             try {
-                connection.getStats(report -> {
-                    if (!closing.get()) result.complete(report);
-                    else result.complete(null);
-                });
+                synchronized (nativeLifecycle) {
+                    if (closing.get()) return null;
+                    connection.getStats(report -> {
+                        if (!closing.get()) result.complete(report);
+                        else result.complete(null);
+                    });
+                }
                 return result.get(timeoutMs, TimeUnit.MILLISECONDS);
             } catch (Exception failure) {
                 return null;
@@ -142,7 +172,8 @@ public final class NativeVideoSession implements AutoCloseable {
                 VideoTrack received = remote; if (received != null) received.removeSink(binding);
             }
             sink.pause();
-            connection.close(); receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
+            synchronized (nativeLifecycle) { connection.close(); if (sender != null) { sender.dispose(); sender = null; } }
+            receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
             if (publisher) local.dispose(); peers.remove(this);
         }
     }
