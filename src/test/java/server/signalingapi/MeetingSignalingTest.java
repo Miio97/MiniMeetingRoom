@@ -135,6 +135,7 @@ class MeetingSignalingTest {
         request(guest, "LEAVE_ROOM", room.roomId(), new JsonObject());
         assertEquals(1, get(host, room.roomId()).participants().size());
         assertEquals("HEARTBEAT_ACK", request(host, "HEARTBEAT", null, new JsonObject()).type());
+        request(host, "LEAVE_ROOM", room.roomId(), new JsonObject());
         host.close(); await(() -> rooms.participantCount() == 0);
         assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
     }

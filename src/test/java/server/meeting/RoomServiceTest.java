@@ -423,6 +423,69 @@ class RoomServiceTest {
     private RoomSnapshot create(int user, String request, int capacity, boolean locked) throws SQLException {
         return service.create(principal(user), request, new CreateRoomParams("Room", "1234", capacity, locked));
     }
+    @Test void suspendedMemberResumesSameMembershipHostAndTicketWithoutADatabaseLeave() throws Exception {
+        RoomSnapshot room = create(1, "create-recovery-0001", 2, false);
+        var host = join(1, "host-old", "join-recovery-host1", room);
+        join(2, "guest", "join-recovery-guest", room);
+        service.suspend("host-old");
+        assertEquals(0, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NOT NULL"));
+        assertEquals(host.selfParticipantId(), service.getRoom("guest", room.roomId()).hostParticipantId());
+        error("CONNECTION_RESTORING", () -> service.getRoom("host-old", room.roomId()));
+        clock.value = NOW.plusSeconds(119); service.maintenanceTick();
+        var resumed = service.resume(principal(1), "host-new", 2, room.roomId(), host.selfParticipantId());
+        assertEquals("host-old", resumed.previousConnectionId());
+        assertEquals(host.selfParticipantId(), resumed.join().selfParticipantId());
+        assertEquals(host.selfParticipantId(), resumed.join().room().hostParticipantId());
+        assertEquals(2, count("Thanh_Vien_Phong"));
+        assertEquals(2, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NULL"));
+        assertFalse(resumed.join().room().participants().getFirst().mediaState().cameraRequested());
+        service.suspend("host-old"); // A delayed old-socket callback cannot evict the resumed owner.
+        error("STALE_CONNECTION", () -> service.resume(principal(1), "stale-resume", 1, room.roomId(), host.selfParticipantId()));
+        clock.value = NOW.plusSeconds(241); service.maintenanceTick();
+        assertEquals(host.selfParticipantId(), service.getRoom("host-new", room.roomId()).hostParticipantId());
+        error("NOT_A_MEMBER", () -> service.getRoom("host-old", room.roomId()));
+    }
+    @Test void reconnectDeadlineIsTwoMinutesAndRepeatedDisconnectsCannotExtendIt() throws Exception {
+        RoomSnapshot room = create(1, "create-recovery-0001", 2, false);
+        var host = join(1, "host", "join-recovery-host1", room);
+        join(2, "guest", "join-recovery-guest", room);
+        service.suspend("host");
+        clock.value = NOW.plusSeconds(100); service.suspend("host");
+        clock.value = NOW.plusSeconds(119); service.maintenanceTick();
+        assertEquals(2, service.participantCount());
+        clock.value = NOW.plusSeconds(120); service.maintenanceTick();
+        assertEquals(1, service.participantCount());
+        assertEquals("MAT_KET_NOI", scalar("SELECT Ly_Do_Roi FROM Thanh_Vien_Phong WHERE Ma_Nguoi_Dung=1"));
+        assertNotEquals(host.selfParticipantId(), service.getRoom("guest", room.roomId()).hostParticipantId());
+        error("NOT_A_MEMBER", () -> service.resume(principal(1), "new", 2, room.roomId(), host.selfParticipantId()));
+    }
+    @Test void resumeCannotBypassAnotherSessionKickClosedRoomOrExpiredReservation() throws Exception {
+        RoomSnapshot room = create(1, "create-recovery-0001", 3, false);
+        var host = join(1, "host", "join-recovery-host1", room);
+        var guest = join(2, "guest", "join-recovery-guest", room);
+        service.suspend("guest");
+        error("NOT_A_MEMBER", () -> service.resume(principal(3), "thief", 2, room.roomId(), guest.selfParticipantId()));
+        var otherSession = new SessionPrincipal(99, 2, "Other session", NOW.plusSeconds(1000), hashFor(2));
+        error("NOT_A_MEMBER", () -> service.resume(otherSession, "other", 2, room.roomId(), guest.selfParticipantId()));
+        service.kick("host", guest.selfParticipantId());
+        error("NOT_A_MEMBER", () -> service.resume(principal(2), "new", 2, room.roomId(), guest.selfParticipantId()));
+        service.suspend("host"); clock.value = NOW.plusSeconds(120);
+        error("RECONNECT_EXPIRED", () -> service.resume(principal(1), "new-host", 2, room.roomId(), host.selfParticipantId()));
+        assertTrue(events.stream().anyMatch(event -> "ROOM_CLOSED".equals(event.type())));
+        assertEquals("DA_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        error("ROOM_NOT_ACTIVE", () -> service.resume(principal(1), "new-host", 2, room.roomId(), host.selfParticipantId()));
+    }
+    @Test void reconnectDoesNotReapplyPinLockOrApprovalAndRevocationStillRemovesImmediately() throws Exception {
+        RoomSnapshot room = create(1, "create-recovery-0001", 3, false);
+        join(1, "host", "join-recovery-host1", room);
+        var guest = join(2, "guest", "join-recovery-guest", room);
+        service.suspend("guest"); service.setLocked("host", true);
+        service.resume(principal(2), "guest-new", 2, room.roomId(), guest.selfParticipantId());
+        assertEquals(2, service.participantCount());
+        service.suspend("guest-new"); service.revokeSession(hashFor(2));
+        assertEquals(1, service.participantCount());
+        error("NOT_A_MEMBER", () -> service.resume(principal(2), "guest-again", 3, room.roomId(), guest.selfParticipantId()));
+    }
     private RoomJoinReply join(int user, String connection, String request, RoomSnapshot room) throws SQLException {
         return service.join(principal(user), connection, 1, request, room.joinCode(), "1234", true, true);
     }

@@ -38,6 +38,8 @@ public final class AdaptiveVideoPolicy {
     private static final long UNSET = Long.MIN_VALUE;
     private long badSince = UNSET, severeSince = UNSET, voiceBadSince = UNSET, goodSince = UNSET, last = UNSET;
     public Profile profile() { return profile; }
+    /** A new transport has new paths and counters; old pause evidence must not block fresh subscriptions. */
+    public void reset() { profile = Profile.NORMAL; last = UNSET; resetWindows(); }
     public Profile observe(long now, Evidence video, Evidence voice) {
         if (last != UNSET && now <= last) return profile;
         if (last != UNSET && now - last > TimeUnit.SECONDS.toNanos(4)) resetWindows();

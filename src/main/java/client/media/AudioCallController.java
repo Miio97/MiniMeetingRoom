@@ -102,6 +102,11 @@ public final class AudioCallController implements AutoCloseable {
         });
     }
     public void enter() { entered=true; }
+    private volatile boolean controlConnected = true;
+    public void controlConnected(boolean connected) {
+        controlConnected = connected;
+        if (!connected) submit(() -> { disconnect(); return null; });
+    }
     public CompletableFuture<Void> toggle() {
         return microphone.toggle(active, () -> submit(() -> { start(); return null; }), () -> submit(() -> { stop(true); return null; }));
     }
@@ -152,6 +157,7 @@ public final class AudioCallController implements AutoCloseable {
         if (notify && room.get()!=null) command("AUDIO_STOP",new JsonObject());
     }
     private void synchronize() throws Exception {
+        if (!controlConnected) return;
         RoomSnapshot snapshot=room.get(); if (snapshot==null) { disconnect(); return; }
         if (active && publisher==null && microphone.wanted()) {
             try { publish(); } catch (Exception | Error failure) {
@@ -191,6 +197,7 @@ public final class AudioCallController implements AutoCloseable {
         }
     }
     private JsonObject command(String type, JsonObject body) throws Exception {
+        if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");
         if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
         try { return signaling.request(type,body,UUID.randomUUID().toString()).get(16,TimeUnit.SECONDS); }
         catch (ExecutionException failure) { if (failure.getCause() instanceof Exception cause) throw cause; throw failure; }

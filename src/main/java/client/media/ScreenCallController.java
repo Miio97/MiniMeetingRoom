@@ -68,6 +68,11 @@ public final class ScreenCallController implements AutoCloseable {
         },1,1,TimeUnit.SECONDS);
     }
     public void enter() {entered=true;}
+    private volatile boolean controlConnected = true;
+    public void controlConnected(boolean connected) {
+        controlConnected = connected;
+        if (!connected) submit(() -> { disconnect(); networkPaused = false; appliedNetworkPause = false; return null; });
+    }
     public ReadOnlyBooleanProperty requestedProperty() {return requested.getReadOnlyProperty();}
     public ReadOnlyStringProperty statusProperty() {return status.getReadOnlyProperty();}
     public CompletableFuture<Void> closeComplete() {return closeComplete;}
@@ -125,6 +130,7 @@ public final class ScreenCallController implements AutoCloseable {
         finally {if(preview!=null) {preview.close();preview=null;}if(publisher!=null) {publisher.close();publisher=null;}changed();}
     }
     private void synchronize() throws Exception {
+        if (!controlConnected) return;
         RoomSnapshot snapshot=room.get();if(snapshot==null) {disconnect();return;}
         if(publisher!=null && (publisher.failed() || snapshot.participants().stream().filter(p -> p.participantId().equals(self.get())).noneMatch(p -> p.mediaState().shareRequested()))) {
             sharing.resetOff();stop(true);
@@ -159,6 +165,7 @@ public final class ScreenCallController implements AutoCloseable {
         }
     }
     private JsonObject command(String type,JsonObject body) throws Exception {
+        if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");
         if(closed.get()) throw new SignalException("CONNECTION_CLOSED");
         try {return signaling.request(type,body,UUID.randomUUID().toString()).get(16,TimeUnit.SECONDS);}
         catch(ExecutionException failure) {if(failure.getCause() instanceof Exception cause) throw cause;throw failure;}

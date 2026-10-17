@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** One owner across lobby/prejoin/meeting. Views borrow properties; only this owner closes transport. */
 public final class MeetingSession implements AutoCloseable {
-    public enum State { READY, CONNECTING, CONNECTED, DISCONNECTED, CLOSED }
+    public enum State { READY, CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, CLOSED }
     private static final Gson JSON = new Gson();
     private final String token;
     private final Instant expiresAt;
@@ -37,6 +37,12 @@ public final class MeetingSession implements AutoCloseable {
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(32), Thread.ofPlatform().daemon().name("meeting-client-owner").factory());
     private final AtomicBoolean closed = new AtomicBoolean(), refreshing = new AtomicBoolean(), fxScheduled = new AtomicBoolean();
+    private final ScheduledExecutorService recoveryTimer = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofPlatform().daemon().name("meeting-recovery").factory());
+    private final Object recoveryLock = new Object();
+    private final java.time.Duration recoveryGrace;
+    private volatile Recovery recovery;
+    private record Recovery(String roomId, String participantId, long deadline) { }
     private final AtomicReference<Update> latest = new AtomicReference<>();
     private final ReadOnlyObjectWrapper<State> state = new ReadOnlyObjectWrapper<>(State.READY);
     private final ReadOnlyObjectWrapper<RoomSnapshot> room = new ReadOnlyObjectWrapper<>();
@@ -89,9 +95,15 @@ public final class MeetingSession implements AutoCloseable {
     }
     public MeetingSession(String token, Instant expiresAt, TransportFactory transports,
                           java.util.function.Function<MeetingSession, client.media.VideoCallController> mediaFactory) {
+        this(token, expiresAt, transports, mediaFactory, java.time.Duration.ofMinutes(2));
+    }
+    MeetingSession(String token, Instant expiresAt, TransportFactory transports,
+                   java.util.function.Function<MeetingSession, client.media.VideoCallController> mediaFactory,
+                   java.time.Duration recoveryGrace) {
         this.token = Objects.requireNonNull(token); this.expiresAt = Objects.requireNonNull(expiresAt);
         this.transports = Objects.requireNonNull(transports);
         this.mediaFactory = Objects.requireNonNull(mediaFactory);
+        this.recoveryGrace = Objects.requireNonNull(recoveryGrace);
     }
     public ReadOnlyObjectProperty<State> stateProperty() { return state.getReadOnlyProperty(); }
     public ReadOnlyObjectProperty<RoomSnapshot> roomProperty() { return room.getReadOnlyProperty(); }
@@ -180,7 +192,7 @@ public final class MeetingSession implements AutoCloseable {
         RoomSnapshot before = snapshot;
         if (before == null) return null;
         RoomSnapshot value = decode(command("GET_ROOM", before.roomId(), new JsonObject(), UUID.randomUUID().toString()), "room", RoomSnapshot.class);
-        if (snapshot != null && value.roomId().equals(snapshot.roomId()) && value.revision() >= snapshot.revision()) {
+        if (recovery == null && snapshot != null && value.roomId().equals(snapshot.roomId()) && value.revision() >= snapshot.revision()) {
             snapshot = value; publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối.");
         }
         return snapshot;
@@ -234,7 +246,7 @@ public final class MeetingSession implements AutoCloseable {
         closeVideo();
         return submit(() -> {
             try { if (snapshot != null) command("LEAVE_ROOM", snapshot.roomId(), new JsonObject(), UUID.randomUUID().toString()); }
-            finally { snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); }
+            finally { recovery = null; snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); }
             return null;
         });
     }
@@ -243,23 +255,95 @@ public final class MeetingSession implements AutoCloseable {
             JsonObject body = new JsonObject(); body.addProperty("closeRoom", closeRoom);
             if (successorParticipantId != null) body.addProperty("successorParticipantId", successorParticipantId);
             command("LEAVE_ROOM", requireRoom().roomId(), body, UUID.randomUUID().toString());
-            closeVideo(); snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0;
+            closeVideo(); recovery = null; snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0;
             closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); return null;
         });
     }
     private RoomSnapshot requireRoom() throws SignalException { if (snapshot == null) throw new SignalException("ROOM_REQUIRED"); return snapshot; }
     private void connect() throws Exception {
+        if (recovery != null) throw new SignalException("CONNECTION_RESTORING");
+        if (snapshot != null && (client == null || client.state() != SignalingClient.State.CONNECTED)) {
+            beginRecovery(); throw new SignalException("CONNECTION_RESTORING");
+        }
+        connectTransport(false);
+    }
+    private void connectTransport(boolean restoring) throws Exception {
+        Recovery expectedRecovery = recovery;
         if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
         if (!expiresAt.isAfter(Instant.now())) throw new SignalException("SESSION_INVALID");
         if (client != null && client.state() == SignalingClient.State.CONNECTED) return;
-        publish(State.CONNECTING, "Đang kết nối phòng họp…");
+        if (!restoring) publish(State.CONNECTING, "Đang kết nối phòng họp…");
         SignalingClient connection = transports.create(this::event);
-        synchronized (transportLock) {
-            if (closed.get()) { connection.close(); throw new SignalException("CONNECTION_CLOSED"); }
-            client = connection;
+        synchronized (recoveryLock) {
+            if (restoring && (expectedRecovery == null || recovery != expectedRecovery)) {
+                connection.close(); throw new SignalException("RECONNECT_EXPIRED");
+            }
+            synchronized (transportLock) {
+                if (closed.get()) { connection.close(); throw new SignalException("CONNECTION_CLOSED"); }
+                client = connection;
+            }
         }
-        try { connection.connect(token); publish(State.CONNECTED, "Đã kết nối máy chủ phòng họp."); }
-        catch (Exception failure) { connection.close(); publish(State.DISCONNECTED, "Không thể kết nối máy chủ phòng họp. Có thể thử lại."); throw failure; }
+        try { connection.connect(token); if (!restoring) publish(State.CONNECTED, "Đã kết nối máy chủ phòng họp."); }
+        catch (Exception failure) { connection.close(); if (!restoring) publish(State.DISCONNECTED, "Không thể kết nối máy chủ phòng họp. Có thể thử lại."); throw failure; }
+    }
+    private void beginRecovery() {
+        Recovery pending;
+        synchronized (recoveryLock) {
+            if (closed.get() || recovery != null || snapshot == null || self == null) return;
+            pending = new Recovery(snapshot.roomId(), self, System.nanoTime() + recoveryGrace.toNanos());
+            recovery = pending;
+            if (video != null) video.controlConnected(false);
+            publish(State.RECONNECTING, "Mất kết nối. Đang kết nối lại (tối đa 2 phút)…");
+            recoveryTimer.schedule(() -> expireRecovery(pending, "Không thể kết nối lại trong 2 phút. Bạn đã rời phòng."),
+                    recoveryGrace.toNanos(), TimeUnit.NANOSECONDS);
+            recoveryTimer.schedule(() -> retryRecovery(pending), 1, TimeUnit.SECONDS);
+        }
+    }
+    private void retryRecovery(Recovery pending) {
+        if (recovery != pending || closed.get()) return;
+        submit(() -> {
+            if (recovery != pending) return null;
+            if (System.nanoTime() - pending.deadline() >= 0) {
+                expireRecovery(pending, "Không thể kết nối lại trong 2 phút. Bạn đã rời phòng."); return null;
+            }
+            try {
+                connectTransport(true);
+                JsonObject body = new JsonObject(); body.addProperty("participantId", pending.participantId());
+                RoomJoinReply resumed = decode(client.request("RESUME_ROOM", pending.roomId(), body).get(16, TimeUnit.SECONDS), "join", RoomJoinReply.class);
+                synchronized (recoveryLock) {
+                    if (recovery != pending || closed.get()) return null;
+                    if (System.nanoTime() - pending.deadline() >= 0) {
+                        expireRecovery(pending, "Không thể kết nối lại trong 2 phút. Bạn đã rời phòng."); return null;
+                    }
+                    if (!pending.participantId().equals(resumed.selfParticipantId()) || !pending.roomId().equals(resumed.room().roomId()))
+                        throw new SignalException("INVALID_RESPONSE");
+                    snapshot = resumed.room(); recovery = null;
+                    if (video != null) video.controlConnected(true);
+                    publish(State.CONNECTED, "Đã kết nối lại. Bạn có thể bật lại camera và mic.");
+                }
+            } catch (Exception failure) {
+                Throwable cause = failure;
+                while ((cause instanceof ExecutionException || cause instanceof CompletionException) && cause.getCause() != null) cause = cause.getCause();
+                if (cause instanceof SignalException signal && java.util.Set.of("SESSION_INVALID", "ROOM_NOT_ACTIVE", "ROOM_NOT_FOUND",
+                        "NOT_A_MEMBER", "RECONNECT_EXPIRED", "STALE_CONNECTION", "UNKNOWN_OPERATION").contains(signal.code())) {
+                    expireRecovery(pending, "Không thể khôi phục phiên phòng. Bạn đã rời phòng.");
+                } else {
+                    closeTransport();
+                }
+            }
+            return null;
+        }).whenComplete((ignored, failure) -> {
+            synchronized (recoveryLock) {
+                if (recovery == pending && !closed.get()) recoveryTimer.schedule(() -> retryRecovery(pending), 2, TimeUnit.SECONDS);
+            }
+        });
+    }
+    private void expireRecovery(Recovery pending, String reason) {
+        synchronized (recoveryLock) {
+            if (recovery != pending || closed.get()) return;
+            recovery = null; snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null;
+            closeTransport(); closeVideo(); publish(State.DISCONNECTED, reason); clearChat();
+        }
     }
     private SignalMessage command(String type, String roomId, JsonObject body, String requestId) throws Exception {
         connect();
@@ -282,8 +366,9 @@ public final class MeetingSession implements AutoCloseable {
         SignalingClient connection = client;
         if (closed.get() || connection == null || !Objects.equals(message.connectionId(), connection.connectionId())
                 || message.generation() != connection.generation()) return;
+        if ("CONNECTION_CLOSED".equals(message.type()) && snapshot != null) { beginRecovery(); return; }
         if ("CONNECTION_CLOSED".equals(message.type()) || "SESSION_ENDED".equals(message.type())) {
-            submit(() -> { if (currentConnection(message)) { closeVideo(); snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); clearChat(); } return null; }); return;
+            submit(() -> { if (currentConnection(message)) { recovery = null; closeVideo(); snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); clearChat(); } return null; }); return;
         }
         RoomSnapshot active = snapshot;
         String expectedRoom = active != null ? active.roomId() : preview == null ? null : preview.roomId();
@@ -293,7 +378,7 @@ public final class MeetingSession implements AutoCloseable {
                 RoomSnapshot current = snapshot;
                 String currentRoom = current != null ? current.roomId() : preview == null ? null : preview.roomId();
                 if (currentConnection(message) && Objects.equals(currentRoom, message.roomId())) {
-                    closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); clearChat();
+                    recovery = null; closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); clearChat();
                 }
                 return null;
             }); return;
@@ -311,6 +396,7 @@ public final class MeetingSession implements AutoCloseable {
             }
             return;
         }
+        if (recovery != null) return;
         if (active != null && message.revision() != null && message.revision() <= active.revision()) return;
         if (message.body().has("room")) {
             try {
@@ -333,7 +419,7 @@ public final class MeetingSession implements AutoCloseable {
         if (!applyingRoom.compareAndSet(false, true)) return;
         submit(() -> {
             RoomSnapshot update = incomingRoom.getAndSet(null), active = snapshot;
-            if (update != null && active != null && update.roomId().equals(active.roomId()) && update.revision() > active.revision()) {
+            if (recovery == null && update != null && active != null && update.roomId().equals(active.roomId()) && update.revision() > active.revision()) {
                 snapshot = update; publish(State.CONNECTED, "Thành viên và trạng thái đã đồng bộ.");
             }
             return null;
@@ -372,7 +458,7 @@ public final class MeetingSession implements AutoCloseable {
         return future;
     }
     private synchronized void publish(State value, String text) {
-        currentState = closed.get() ? State.CLOSED : value;
+        currentState = closed.get() ? State.CLOSED : recovery != null && value == State.CONNECTED ? State.RECONNECTING : value;
         latest.set(new Update(currentState, snapshot, text));
         scheduleFx();
     }
@@ -380,7 +466,7 @@ public final class MeetingSession implements AutoCloseable {
         if (!fxScheduled.compareAndSet(false, true)) return;
         Platform.runLater(() -> {
             Update value = latest.getAndSet(null);
-            if (value != null) { state.set(value.state()); room.set(value.room()); participants.setAll(value.room() == null ? java.util.List.of() : value.room().participants()); notice.set(value.notice()); }
+            if (value != null) { notice.set(value.notice()); state.set(value.state()); room.set(value.room()); participants.setAll(value.room() == null ? java.util.List.of() : value.room().participants()); }
             fxScheduled.set(false);
             if (latest.get() != null) scheduleFx();
         });
@@ -390,7 +476,10 @@ public final class MeetingSession implements AutoCloseable {
         synchronized (transportLock) { SignalingClient current = client; client = null; if (current != null) current.close(); }
     }
     @Override public void close() {
-        if (!closed.compareAndSet(false, true)) return;
+        synchronized (recoveryLock) {
+            if (!closed.compareAndSet(false, true)) return;
+            recovery = null; recoveryTimer.shutdownNow();
+        }
         closeVideo(); closeTransport(); worker.shutdownNow(); snapshot = null; self = null; pin = ""; createIntent = null; reopenIntent = null; joinIntent = null;
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
         publish(State.CLOSED, "Session đã đóng.");

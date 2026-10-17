@@ -54,6 +54,17 @@ public final class VideoCallController implements AutoCloseable {
     private final Map<String, List<dev.onvoid.webrtc.media.video.VideoCaptureCapability>> formatCache = new ConcurrentHashMap<>();
     private volatile List<VideoDevice> knownCameras = List.of();
     private volatile boolean inMeeting;
+    private volatile boolean controlConnected = true;
+    /** Transport recovery preserves the controller borrowed by the view, but never reopens capture. */
+    public void controlConnected(boolean connected) {
+        controlConnected = connected; audio.controlConnected(connected); screen.controlConnected(connected);
+        if (!connected) submit(() -> {
+            cameraSwitch.resetOff(); stopLocalCamera();
+            subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
+            adaptivePolicy.reset(); appliedQuality = AdaptiveVideoPolicy.Profile.NORMAL;
+            Platform.runLater(() -> { if (!closed.get()) quality.set(AdaptiveVideoPolicy.Profile.NORMAL); }); return null;
+        });
+    }
     private final AtomicReference<String> latestStatus = new AtomicReference<>();
     private final CompletableFuture<Void> closeComplete = new CompletableFuture<>();
     public CompletableFuture<Void> closeComplete() { return closeComplete; }
@@ -235,6 +246,7 @@ public final class VideoCallController implements AutoCloseable {
         show("Camera đã tắt.");
     }
     private void synchronize() throws Exception {
+        if (!controlConnected) return;
         RoomSnapshot current = room.get();
         if (current == null) { stopLocalCamera(); return; }
         String own = self.get();
@@ -275,6 +287,7 @@ public final class VideoCallController implements AutoCloseable {
         if (preview == null && (activeCamera || !subscriptions.isEmpty())) show("Video qua WebRTC/SFU • " + subscriptions.size() + " luồng camera nhận.");
     }
     private JsonObject command(String type, JsonObject body) throws Exception {
+        if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");
         if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
         try { return signaling.request(type, body, UUID.randomUUID().toString()).get(16, TimeUnit.SECONDS); }
         catch (ExecutionException failure) { if (failure.getCause() instanceof Exception cause) throw cause; throw failure; }
@@ -303,6 +316,7 @@ public final class VideoCallController implements AutoCloseable {
     }
 
     private void sampleNetworkStats() {
+        if (!controlConnected) return;
         if (closed.get() || room.get() == null || self.get() == null) return;
         try {
             var voiceEvidence = audio.networkQuality();
@@ -436,7 +450,7 @@ public final class VideoCallController implements AutoCloseable {
     /** All native sender changes share the camera owner, so a manual off/host stop always wins. */
     CompletableFuture<Void> observeNetwork(long observedAt, AdaptiveVideoPolicy.Evidence videoEvidence, AdaptiveVideoPolicy.Evidence voiceEvidence) {
         return submit(() -> {
-            if (!inMeeting || room.get() == null || self.get() == null || System.nanoTime() - observedAt > TimeUnit.SECONDS.toNanos(3)) return null;
+            if (!controlConnected || !inMeeting || room.get() == null || self.get() == null || System.nanoTime() - observedAt > TimeUnit.SECONDS.toNanos(3)) return null;
             var next = adaptivePolicy.observe(observedAt, videoEvidence, voiceEvidence);
             if (next == appliedQuality) return null;
             if (publisher != null) publisher.quality(next);
