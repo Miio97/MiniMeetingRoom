@@ -1,12 +1,37 @@
 /* Một theme chung cho toàn bộ màn hình và dialog. Màu là looked-up colors của JavaFX. */
-.root {
+/* Pre-join shares the live theme palette; only the middle region scrolls. */
+.prejoin-heading { -fx-padding: 24 28 16 28; }
+.prejoin-content { -fx-padding: 8 28 20 28; }
+.prejoin-scroll, .prejoin-scroll > .viewport { -fx-background-color: -bg-main; }
+.prejoin-scroll { -fx-padding: 0; -fx-background-insets: 0; -fx-border-width: 0; }
+.prejoin-preview {
+    -fx-background-color: -bg-elevated; -fx-background-radius: 16;
+    -fx-border-color: -border; -fx-border-radius: 16;
+}
+.prejoin-screen .prejoin-placeholder { -fx-text-fill: -text-muted; -fx-padding: 16; }
+.prejoin-settings {
+    -fx-background-color: -bg-surface; -fx-background-radius: 16;
+    -fx-border-color: -border; -fx-border-radius: 16; -fx-padding: 20;
+}
+.prejoin-settings .combo-box { -fx-pref-width: 280; }
+.prejoin-footer {
+    -fx-padding: 16 28; -fx-background-color: -bg-surface;
+    -fx-border-color: -border transparent transparent transparent;
+}
+.prejoin-action { -fx-min-height: 44; -fx-pref-height: 44; }
+.prejoin-screen .button:disabled { -fx-opacity: 1; -fx-background-color: -bg-elevated; -fx-text-fill: -text-disabled; -fx-border-color: -border; }
+.prejoin-screen .button:focused { -fx-border-color: -primary-hover; -fx-border-width: 2; -fx-padding: 10 17; }
+.prejoin-screen .button:pressed { -fx-opacity: .85; }
+.root, .theme-dark {
     -bg-main: #0F1117; -bg-surface: #181B23; -bg-elevated: #21252F; -border: #2C313D;
     -primary: #6C5CE7; -primary-hover: #7D6FF0; -accent: #00C2A8;
     -danger: #FF5D5D; -warning: #FFB020; -success: #2ECC71;
     -text-main: #F3F4F6; -text-muted: #9AA0AE;
+    -bg-hover: #303543; -bg-selected: #342D55; -text-selected: #C5BAFF;
+    -bg-success: #173B2C; -bg-danger: #3D242A; -text-disabled: #A5ADBD;
     -fx-font-family: "Segoe UI", sans-serif; -fx-font-size: 13px;
     -fx-background-color: -bg-main; -fx-text-fill: -text-main;
-    -fx-base: -bg-surface; -fx-accent: -primary; -fx-focus-color: -primary; -fx-faint-focus-color: transparent;
+    -fx-base: -bg-surface; -fx-control-inner-background: -bg-elevated; -fx-accent: -primary; -fx-focus-color: -primary; -fx-faint-focus-color: transparent;
 }
 .label { -fx-text-fill: -text-main; }
 .title { -fx-font-size: 26px; -fx-font-weight: bold; }
@@ -23,10 +48,9 @@
     -fx-border-color: -border; -fx-border-radius: 10; -fx-padding: 11 18; -fx-cursor: hand;
     -fx-font-weight: bold;
 }
-.button:hover, .toggle-button:hover { -fx-background-color: #303543; }
+.button:hover, .toggle-button:hover { -fx-background-color: -bg-hover; }
 .button:pressed, .toggle-button:pressed { -fx-opacity: .8; }
 .button:focused, .toggle-button:focused { -fx-border-color: -primary-hover; }
-.button:disabled { -fx-opacity: .4; }
 .primary, .toggle-button:selected { -fx-background-color: -primary; -fx-border-color: -primary; -fx-text-fill: white; }
 .primary:hover { -fx-background-color: -primary-hover; -fx-border-color: -primary-hover; }
 .secondary { -fx-background-color: -bg-elevated; }
@@ -36,7 +60,7 @@
 .nav-selected { -fx-background-color: #2b244b; -fx-text-fill: #b6adff; -fx-border-color: transparent; }
 .text-field, .password-field, .combo-box {
     -fx-background-color: -bg-elevated; -fx-background-radius: 10; -fx-border-color: -border; -fx-border-radius: 10;
-    -fx-text-fill: -text-main; -fx-prompt-text-fill: #72798a; -fx-padding: 9 12;
+    -fx-text-fill: -text-main; -fx-prompt-text-fill: -text-muted; -fx-padding: 9 12;
     -fx-highlight-fill: -primary; -fx-highlight-text-fill: white;
 }
 .text-field:focused, .password-field:focused, .combo-box:focused {
@@ -47,8 +71,13 @@
 .combo-box .list-cell { -fx-text-fill: -text-main; -fx-background-color: transparent; -fx-padding: 7 8; }
 .combo-box-popup .list-view { -fx-background-color: -bg-elevated; -fx-border-color: -border; -fx-background-radius: 8; }
 .combo-box-popup .list-cell { -fx-background-color: -bg-elevated; -fx-text-fill: -text-main; }
-.combo-box-popup .list-cell:hover, .combo-box-popup .list-cell:selected { -fx-background-color: #373052; }
+.combo-box-popup .list-cell:filled:hover, .combo-box-popup .list-cell:filled:selected { -fx-background-color: -bg-selected; -fx-text-fill: -text-selected; }
 .combo-box .arrow { -fx-background-color: -text-muted; }
+.text-field:disabled, .password-field:disabled, .combo-box:disabled,
+.light-mode .text-field:disabled, .light-mode .password-field:disabled {
+    -fx-opacity: 1; -fx-text-fill: -text-disabled; -fx-border-color: -border;
+}
+.combo-box:disabled .list-cell { -fx-opacity: 1; -fx-text-fill: -text-disabled; }
 .branding { -fx-background-color: linear-gradient(to bottom right, #5142ad, #25345d, #143e48); }
 .brand-name { -fx-font-size: 23px; -fx-font-weight: bold; }
 .brand-name-small { -fx-font-size: 17px; -fx-font-weight: bold; }
@@ -134,11 +163,12 @@
 .check-box .box { -fx-background-color: -bg-elevated; -fx-border-color: -border; -fx-border-radius: 4; -fx-background-radius: 4; }
 .check-box:selected .box { -fx-background-color: -primary; }
 .check-box:selected .mark { -fx-background-color: white; }
-.context-menu { -fx-background-color: -bg-elevated; -fx-background-radius: 10; -fx-border-color: -border; -fx-border-radius: 10; -fx-padding: 8; }
+.root.theme-popup-root { -fx-background-color: transparent; }
+.context-menu { -fx-background-color: -bg-elevated; -fx-background-insets: 0; -fx-background-radius: 10; -fx-border-color: -border; -fx-border-width: 1; -fx-border-insets: 0; -fx-border-radius: 10; -fx-padding: 8; }
 .menu-item { -fx-padding: 10 16; -fx-background-radius: 6; }
-.menu-item:focused { -fx-background-color: #393052; }
+.menu-item:focused { -fx-background-color: -bg-selected; }
 .menu-item .label { -fx-text-fill: -text-main; }
-.tooltip { -fx-background-color: #303543; -fx-text-fill: -text-main; -fx-background-radius: 8; -fx-font-size: 12px; }
+.tooltip { -fx-background-color: -bg-elevated; -fx-text-fill: -text-main; -fx-background-radius: 8; -fx-font-size: 12px; }
 .dialog-pane { -fx-background-color: -bg-surface; -fx-padding: 16; }
 .dialog-pane > .content.label { -fx-text-fill: -text-muted; }
 .dialog-pane:header .header-panel { -fx-background-color: -bg-surface; }
@@ -161,6 +191,8 @@
     -primary: #6350D8; -primary-hover: #5340C4; -accent: #008575;
     -danger: #C93546; -warning: #986000; -success: #187A49;
     -text-main: #202638; -text-muted: #5D687D;
+    -bg-hover: #E0E5F0; -bg-selected: #EEEBFF; -text-selected: #5940BF;
+    -bg-success: #E6F9F0; -bg-danger: #FCE8EB; -text-disabled: #626C80;
     -fx-background-color: -bg-main; -fx-text-fill: -text-main;
     -fx-base: -bg-surface; -fx-control-inner-background: -bg-surface;
 }
@@ -204,7 +236,7 @@
 .light-mode .scroll-bar .thumb { -fx-background-color: #AFB8CB; }
 .light-mode .slider .track { -fx-background-color: #CED5E5; }
 .light-mode .menu-item:focused { -fx-background-color: #E6DFFF; }
-.light-mode .tooltip { -fx-background-color: #3C4760; -fx-text-fill: white; }
+.light-mode .tooltip { -fx-background-color: -bg-elevated; -fx-text-fill: -text-main; }
 .light-mode .chart-vertical-grid-lines, .light-mode .chart-horizontal-grid-lines { -fx-stroke: #D8DEEB; }
 /* Nền video/branding mang màu riêng, cần chữ và icon sáng trong cả hai theme. */
 .light-mode .branding .label, .light-mode .video-tile .label, .light-mode .shared-slide .label { -fx-text-fill: #F3F4F6; }
@@ -226,7 +258,7 @@
 .light-mode .text-field, .light-mode .password-field {
     -fx-background-color: white; -fx-border-color: #D5D9E2; -fx-border-width: 1;
     -fx-background-radius: 10; -fx-border-radius: 10; -fx-padding: 10 14;
-    -fx-text-fill: #1F2430; -fx-prompt-text-fill: #9AA0AE;
+    -fx-text-fill: -text-main; -fx-prompt-text-fill: -text-muted;
 }
 .light-mode .text-field:hover, .light-mode .password-field:hover { -fx-border-color: #B8BDCB; }
 .light-mode .text-field:focused, .light-mode .password-field:focused {
@@ -235,55 +267,67 @@
 .light-mode .text-field:error { -fx-border-color: -danger; }
 .caption, .eyebrow, .error-text, .small-button, .tile-tag, .host-badge, .panel-note, .control-label { -fx-font-size: 12px; }
 .light-mode .card { -fx-padding: 22; -fx-effect: dropshadow(gaussian, rgba(30,40,70,.06), 16, 0, 0, 4); }
-.sidebar-icon { -fx-fill: transparent; -fx-stroke: #5B6475; -fx-stroke-line-cap: round; -fx-stroke-line-join: round; }
+.sidebar-icon { -fx-fill: transparent; -fx-stroke: -text-muted; -fx-stroke-line-cap: round; -fx-stroke-line-join: round; }
 .brand-logo { -fx-background-color: linear-gradient(to bottom right, #6C5CE7, #8E7CFF); -fx-background-radius: 10; }
 .brand-logo .sidebar-icon { -fx-stroke: white; }
-.light-mode .workspace-nav {
+.workspace-nav {
     -fx-alignment: center-left; -fx-padding: 0 14; -fx-background-color: transparent;
     -fx-background-radius: 10; -fx-border-radius: 10; -fx-border-color: transparent;
-    -fx-border-width: 0 0 0 3; -fx-text-fill: #5B6475; -fx-font-weight: normal;
+    -fx-border-width: 0 0 0 3; -fx-text-fill: -text-muted; -fx-font-weight: normal;
 }
-.light-mode .workspace-nav:hover { -fx-background-color: #F4F5F9; }
-.light-mode .workspace-nav-active, .light-mode .workspace-nav-active:hover {
-    -fx-background-color: #EEEBFF; -fx-text-fill: #6C5CE7;
-    -fx-border-color: transparent transparent transparent #6C5CE7; -fx-font-weight: bold;
+.workspace-nav:hover, .light-mode .workspace-nav:hover { -fx-background-color: -bg-elevated; }
+.workspace-nav-active, .workspace-nav-active:hover, .light-mode .workspace-nav-active, .light-mode .workspace-nav-active:hover {
+    -fx-background-color: -bg-selected; -fx-text-fill: -text-selected;
+    -fx-border-color: transparent transparent transparent -primary; -fx-font-weight: bold;
 }
-.workspace-nav-active .sidebar-icon { -fx-stroke: #6C5CE7; }
-.sidebar-user { -fx-background-color: #F4F5F9; -fx-background-radius: 12; -fx-padding: 8 10; }
+.workspace-nav .sidebar-icon { -fx-stroke: -text-muted; }
+.workspace-nav-active .sidebar-icon { -fx-stroke: -text-selected; }
+.sidebar-user { -fx-background-color: -bg-elevated; -fx-background-radius: 12; -fx-padding: 8 10; }
 .user-name { -fx-font-size: 13.5px; -fx-font-weight: bold; }
-.user-caption { -fx-font-size: 12px; -fx-text-fill: #7A8194; }
+.user-caption { -fx-font-size: 12px; -fx-text-fill: -text-muted; }
 .profile-hit { -fx-cursor: hand; }
-.light-mode .logout-button {
+.logout-button {
     -fx-background-color: transparent; -fx-border-color: transparent; -fx-background-radius: 999;
     -fx-padding: 0; -fx-min-width: 32; -fx-min-height: 32; -fx-max-width: 32; -fx-max-height: 32;
 }
-.logout-button .sidebar-icon { -fx-stroke: #7A8194; }
-.light-mode .logout-button:hover { -fx-background-color: #FDECEC; }
-.logout-button:hover .sidebar-icon { -fx-stroke: #E5484D; }
+.logout-button .sidebar-icon { -fx-stroke: -text-muted; }
+.logout-button:hover, .light-mode .logout-button:hover { -fx-background-color: -bg-danger; }
+.logout-button:hover .sidebar-icon { -fx-stroke: -danger; }
 .profile-menu { -fx-background-radius: 12; -fx-border-radius: 12; -fx-effect: dropshadow(gaussian, rgba(31,36,48,.16), 18, 0, 0, 5); }
+.context-menu.light-mode, .context-menu.theme-dark { -fx-background-color: -bg-elevated; }
 .danger, .light-mode .danger:hover { -fx-background-color: #E5484D; -fx-border-color: #E5484D; -fx-text-fill: white; }
 .light-mode .danger:focused { -fx-border-color: #E5484D; }
-.room-title { -fx-font-size: 14.5px; -fx-font-weight: bold; -fx-text-fill: #1F2430; }
-.room-meta { -fx-font-size: 12.5px; -fx-text-fill: #5B6475; }
-.date-label, .room-hint { -fx-font-size: 12.5px; -fx-text-fill: #7A8194; }
+.room-title { -fx-font-size: 14.5px; -fx-font-weight: bold; -fx-text-fill: -text-main; }
+.room-meta { -fx-font-size: 12.5px; -fx-text-fill: -text-muted; }
+.date-label, .room-hint { -fx-font-size: 12.5px; -fx-text-fill: -text-muted; }
 .room-live, .room-ended, .role-chip { -fx-font-size: 12px; -fx-padding: 4 8; -fx-background-radius: 999; }
-.room-live { -fx-background-color: #E6F9F0; -fx-text-fill: #1E9E5A; }
-.room-ended { -fx-background-color: #F0F1F5; -fx-text-fill: #7A8194; }
-.role-chip { -fx-background-color: #EEEBFF; -fx-text-fill: #6C5CE7; }
-.ready-chip { -fx-background-color: #E6F9F0; -fx-background-radius: 999; -fx-padding: 8 12; }
-.ready-text { -fx-text-fill: #1E9E5A; -fx-font-size: 12.5px; }
+.room-live { -fx-background-color: -bg-success; -fx-text-fill: -success; }
+.room-ended { -fx-background-color: -bg-elevated; -fx-text-fill: -text-muted; }
+.role-chip { -fx-background-color: -bg-selected; -fx-text-fill: -text-selected; }
+.ready-chip { -fx-background-color: -bg-success; -fx-background-radius: 999; -fx-padding: 8 12; }
+.ready-text { -fx-text-fill: -success; -fx-font-size: 12.5px; }
+.create-card .sidebar-icon { -fx-stroke: -text-selected; }
+.create-art-camera { -fx-opacity: .65; }
 .scroll-pane { -fx-border-color: transparent; -fx-border-width: 0; }
 .scroll-bar { -fx-pref-width: 6; -fx-pref-height: 6; }
 .light-mode .scroll-bar .thumb { -fx-background-color: #CFD3DD; -fx-background-radius: 999; }
 .settings-tabs .tab-header-area { -fx-padding: 0 0 16 0; }
 .settings-tabs .tab-header-background { -fx-background-color: transparent; }
-.settings-tabs .tab { -fx-background-color: #F0F1F5; -fx-background-radius: 999; -fx-padding: 10 14; -fx-border-width: 0; }
-.light-mode .settings-tabs .tab:selected { -fx-background-color: #EEEBFF; -fx-border-color: transparent; }
-.light-mode .settings-tabs .tab:selected .tab-label { -fx-text-fill: #6C5CE7; }
+.settings-tabs .tab { -fx-background-color: -bg-elevated; -fx-background-radius: 999; -fx-padding: 10 14; -fx-border-width: 0; }
+.settings-tabs .tab:selected { -fx-background-color: -bg-selected; -fx-border-color: transparent; }
+.settings-tabs .tab:selected .tab-label { -fx-text-fill: -text-selected; }
 .settings-tabs .tab-content-area { -fx-background-color: transparent; }
 .settings-tabs .focus-indicator { -fx-border-color: transparent; }
+.settings-switch, .settings-switch:hover, .settings-switch:selected,
 .light-mode .settings-switch, .light-mode .settings-switch:hover, .light-mode .settings-switch:selected {
     -fx-background-color: transparent; -fx-border-color: transparent; -fx-padding: 2;
 }
-.switch-track { -fx-background-color: #CFD3DD; -fx-background-radius: 999; }
+.switch-track { -fx-background-color: -text-muted; -fx-background-radius: 999; }
 .settings-switch:selected .switch-track { -fx-background-color: #6C5CE7; }
+
+/* Disabled must also win over selected/hover colors in both palettes. */
+.button:disabled, .toggle-button:disabled,
+.light-mode .button:disabled, .light-mode .toggle-button:disabled {
+    -fx-opacity: 1; -fx-background-color: -bg-elevated; -fx-text-fill: -text-disabled;
+    -fx-border-color: -border; -fx-cursor: default;
+}

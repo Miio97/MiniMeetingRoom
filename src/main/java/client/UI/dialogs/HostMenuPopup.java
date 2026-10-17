@@ -1,6 +1,5 @@
 package client.UI.dialogs;
 
-import client.UI.ThemeManager;
 import javafx.scene.control.*;
 
 public final class HostMenuPopup extends ContextMenu {
@@ -19,6 +18,5 @@ public final class HostMenuPopup extends ContextMenu {
             getItems().add(screen);
         }
         getItems().addAll(new SeparatorMenuItem(), change, kick);
-        setOnShowing(event -> ThemeManager.attach(getScene().getRoot()));
     }
 }

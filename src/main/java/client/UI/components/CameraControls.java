@@ -34,6 +34,7 @@ public final class CameraControls extends VBox {
         setId("camera-controls"); cameras.setId("video-camera-device"); cameras.setPromptText("Chưa cấp quyền camera"); cameras.setPrefWidth(240);
         status.setId("camera-device-status");
         cameras.setPlaceholder(Ui.label("Không có camera", "caption"));
+        DeviceChoiceStyle.apply(cameras, VideoDevice::getName);
         cameras.setConverter(new javafx.util.StringConverter<>() {
             public String toString(VideoDevice device) { return device == null ? "" : device.getName(); }
             public VideoDevice fromString(String value) { return null; }
@@ -131,11 +132,18 @@ public final class CameraControls extends VBox {
         }));
     }
     public void focusDevices() { cameras.requestFocus(); cameras.show(); }
+    /** Rehome the existing toggle beside the preview, retaining its action and state. */
+    public Button separatePreviewToggle() {
+        ((javafx.scene.layout.HBox) getChildren().getFirst()).getChildren().remove(toggle);
+        getChildren().setAll(Ui.field("Camera", cameras), status);
+        return toggle;
+    }
+    public javafx.beans.property.ReadOnlyStringProperty errorProperty() { return status.textProperty(); }
     private void controls() {
         permissionGranted.set(initialized && access == CameraConsentStore.Access.ALLOWED && !prompting && !loading);
         boolean active = video.cameraRequestedProperty().get(), pending = video.cameraPendingProperty().get();
-        toggle.setText(active ? "Tắt camera" : "Bật camera");
-        toggle.setDisable(!initialized || prompting || loading && !active && cameras.getItems().isEmpty());
+        toggle.setText(prompting ? "Đang xin quyền…" : pending ? "Đang xử lý…" : loading ? "Đang tải…" : active ? "Tắt camera" : "Bật camera");
+        toggle.setDisable(!initialized || prompting || pending || loading && !active && cameras.getItems().isEmpty());
         cameras.setDisable(pending || prompting || active || access != CameraConsentStore.Access.ALLOWED || loading && cameras.getItems().isEmpty());
     }
     public void dispose() {

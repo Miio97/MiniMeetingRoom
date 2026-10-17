@@ -24,6 +24,7 @@ public final class DeviceSettingsDialog extends Dialog<Void> {
             Button closeRoom = Ui.button("Đóng phòng", "danger", () -> {
                 Alert confirm = new Alert(Alert.AlertType.CONFIRMATION); confirm.initOwner(getDialogPane().getScene().getWindow());
                 confirm.setTitle("Đóng phòng"); confirm.setHeaderText("Kết thúc phòng cho mọi người?");
+                Ui.style(confirm);
                 confirm.showAndWait().filter(ButtonType.OK::equals).ifPresent(value -> { close(); end.run(); });
             });
             content.getChildren().addAll(new Separator(), Ui.label("Quản lý phòng", "subtitle"), locked, required, closeRoom);
