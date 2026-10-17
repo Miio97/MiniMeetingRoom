@@ -41,6 +41,19 @@ public final class AuthValidation {
                 ? "Vui lòng nhập mật khẩu (tối đa 128 ký tự)." : null;
     }
 
+    public static String profileError(String username, String displayName, String email) {
+        String error = registrationUsernameError(username);
+        if (error != null) return error;
+        if (username.codePoints().anyMatch(Character::isISOControl)) return "Tên đăng nhập chứa ký tự không hợp lệ.";
+        if (displayName == null || displayName.isBlank() || displayName.length() > 100)
+            return "Tên hiển thị phải có 1–100 ký tự.";
+        if (displayName.codePoints().anyMatch(Character::isISOControl)) return "Tên hiển thị chứa ký tự không hợp lệ.";
+        if (email != null && !email.isEmpty() && (email.length() > 255 || email.codePoints().anyMatch(Character::isISOControl)
+                || !email.matches("[^\\s@]+@[^\\s@]+\\.[^\\s@]+")))
+            return "Địa chỉ email không hợp lệ (tối đa 255 ký tự).";
+        return null;
+    }
+
     private static boolean isSpecial(int character) {
         return switch (Character.getType(character)) {
             case Character.CONNECTOR_PUNCTUATION, Character.DASH_PUNCTUATION,

@@ -38,9 +38,9 @@ import javax.net.ssl.SSLSocket;
 public final class AuthClient {
     private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
             "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
-            "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
+            "SESSION_EXPIRED", "WRONG_PASSWORD", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
             "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE");
-    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
+    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "UPDATE_PROFILE", "CHANGE_PASSWORD", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
             "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
@@ -74,6 +74,14 @@ public final class AuthClient {
 
     public AuthResponse logout(String token) throws IOException {
         return send(new AuthRequest("LOGOUT", null, null, null, null, token));
+    }
+
+    public AuthResponse updateProfile(String token, String username, String displayName, String email) throws IOException {
+        return send(new AuthRequest("UPDATE_PROFILE", username, null, displayName, email, token));
+    }
+
+    public AuthResponse changePassword(String token, String currentPassword, String newPassword) throws IOException {
+        return send(new AuthRequest("CHANGE_PASSWORD", null, currentPassword, null, null, token, null, newPassword));
     }
 
     public AuthResponse createRoom(String token, String name, String pin, int capacity) throws IOException {
@@ -117,6 +125,11 @@ public final class AuthClient {
             }
             if (response.success()) {
                 switch (request.action()) {
+                    case "UPDATE_PROFILE", "CHANGE_PASSWORD" -> {
+                        if (response.user() == null || response.user().id() <= 0 || response.user().username() == null
+                                || response.user().displayName() == null)
+                            throw new IOException("Thông tin tài khoản từ máy chủ không hợp lệ.");
+                    }
                     case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "GET_ROOM", "LEAVE_ROOM" -> {
                         if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
                     }

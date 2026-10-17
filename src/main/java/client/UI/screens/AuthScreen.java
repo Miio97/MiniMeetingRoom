@@ -55,6 +55,12 @@ public final class AuthScreen extends HBox {
         submitButton = Ui.button(value ? "Tạo tài khoản" : "Đăng nhập  →", "primary", this::submit); submitButton.setMaxWidth(Double.MAX_VALUE); submitButton.setDefaultButton(true);
         status.setText(""); status.setVisible(false); status.setManaged(false);
         form.getChildren().addAll(submitButton, status);
+        if (!value) {
+            Button forgot = Ui.button("Quên mật khẩu", "secondary", () -> { });
+            forgot.setId("login-forgot-password"); forgot.setDisable(true);
+            forgot.setTooltip(new Tooltip("Chức năng quên mật khẩu chưa được hỗ trợ."));
+            form.getChildren().add(forgot);
+        }
         FadeTransition fade = new FadeTransition(Duration.millis(200), form); fade.setFromValue(.3); fade.setToValue(1); fade.play();
     }
     private void addInput(String name, String hint, boolean secret) {

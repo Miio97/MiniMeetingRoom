@@ -255,6 +255,141 @@ class AuthServiceTest {
         }
     }
 
+    @Test void profileUpdatesAllFieldsAndKeepsTheUserIdAndCurrentSession() throws Exception {
+        assertTrue(register("original", "Tên cũ", "old@example.com").success());
+        var session = login("original", PASSWORD);
+        var saved = profile(session.token(), "ChangedUser", "  Tên mới 日本語  ", "  new@example.com  ");
+        assertTrue(saved.success(), saved::message);
+        assertEquals(session.user().id(), saved.user().id());
+        assertEquals("ChangedUser", saved.user().username()); assertEquals("Tên mới 日本語", saved.user().displayName());
+        assertEquals("new@example.com", saved.user().email());
+        assertNull(saved.token());
+        assertEquals("INVALID_CREDENTIALS", login("original", PASSWORD).code());
+        assertEquals("INVALID_CREDENTIALS", login("changeduser", PASSWORD).code());
+        assertEquals(saved.user(), login("ChangedUser", PASSWORD).user());
+        assertEquals(saved.user().id(), new SessionService(() -> DriverManager.getConnection(url), Clock.fixed(NOW, ZoneOffset.UTC))
+                .authenticate(session.token()));
+    }
+
+    @Test void profileDuplicatesDoNotPartiallySaveAndOwnValuesOrEmptyEmailAreAllowed() throws SQLException {
+        register("first", "First", "first@example.com"); register("second", "Second", "second@example.com");
+        var session = login("first", PASSWORD);
+        assertEquals("USERNAME_TAKEN", profile(session.token(), "SECOND", "Changed", "unused@example.com").code());
+        assertEquals("EMAIL_TAKEN", profile(session.token(), "unused", "Changed", "second@example.com").code());
+        assertEquals(session.user(), login("first", PASSWORD).user());
+        assertTrue(profile(session.token(), "first", "First", "first@example.com").success());
+        var cleared = profile(session.token(), "First", "First", "  ");
+        assertTrue(cleared.success()); assertNull(cleared.user().email());
+        assertTrue(register("third", "Third", "first@example.com").success());
+    }
+
+    @Test void accountChangesRequireAnActiveSessionAndActiveAccount() throws SQLException {
+        register("first", "First", null);
+        var session = login("first", PASSWORD);
+        for (String token : new String[]{null, "", "unknown", "x".repeat(257)}) {
+            assertEquals("SESSION_EXPIRED", profile(token, "changed", "New", null).code());
+            assertEquals("SESSION_EXPIRED", password(token, PASSWORD, "New-password-456!").code());
+        }
+        logout(session.token());
+        assertEquals("SESSION_EXPIRED", profile(session.token(), "changed", "New", null).code());
+        assertEquals("SESSION_EXPIRED", password(session.token(), PASSWORD, "New-password-456!").code());
+        session = login("first", PASSWORD);
+        execute("UPDATE Phien_Dang_Nhap SET Het_Han_Luc=TIMESTAMP '2026-01-01 00:00:00'");
+        assertEquals("SESSION_EXPIRED", profile(session.token(), "changed", "New", null).code());
+        assertEquals("SESSION_EXPIRED", password(session.token(), PASSWORD, "New-password-456!").code());
+        session = login("first", PASSWORD);
+        execute("UPDATE Nguoi_Dung SET Trang_Thai='BI_KHOA'");
+        assertEquals("SESSION_EXPIRED", profile(session.token(), "changed", "New", null).code());
+        assertEquals("SESSION_EXPIRED", password(session.token(), PASSWORD, "New-password-456!").code());
+    }
+
+    @Test void accountValidationRejectsInvalidFieldsAndWeakPasswordsWithoutMutation() throws SQLException {
+        register("first", "First", null); String token = login("first", PASSWORD).token();
+        for (AuthRequest invalid : List.of(
+                request("UPDATE_PROFILE", "bad name", null, "Valid", null, token),
+                request("UPDATE_PROFILE", "first", null, " ", null, token),
+                request("UPDATE_PROFILE", "first", null, "x".repeat(101), null, token),
+                request("UPDATE_PROFILE", "first", null, "Name\nInjected", null, token),
+                request("UPDATE_PROFILE", "first", null, "Valid", "invalid-email", token)))
+            assertEquals("VALIDATION_ERROR", service.handle(invalid).code());
+        assertEquals("VALIDATION_ERROR", password(token, PASSWORD, "weak").code());
+        assertEquals("VALIDATION_ERROR", password(token, PASSWORD, PASSWORD).code());
+        assertEquals("WRONG_PASSWORD", password(token, "Wrong-password-123!", "New-password-456!").code());
+        assertEquals("First", login("first", PASSWORD).user().displayName());
+    }
+
+    @Test void passwordChangeHashesNewSecretRevokesOtherSessionsAndNotifiesAfterCommit() throws SQLException {
+        register("first", "First", null); register("other", "Other", null);
+        var current = login("first", PASSWORD); var another = login("first", PASSWORD); var otherUser = login("other", PASSWORD);
+        List<String> revoked = new ArrayList<>();
+        AuthService observed = new AuthService(() -> DriverManager.getConnection(url), new PasswordHasher(),
+                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofHours(24), hash -> {
+                    revoked.add(hash);
+                    try { assertNotNull(timestamp("SELECT Thu_Hoi_Luc FROM Phien_Dang_Nhap WHERE Token_Bam='" + hash + "'")); }
+                    catch (SQLException error) { throw new AssertionError(error); }
+                });
+        var changed = observed.handle(new AuthRequest("CHANGE_PASSWORD", null, PASSWORD, null, null,
+                current.token(), null, "New-password-456!"));
+        assertTrue(changed.success(), changed::message); assertNull(changed.token());
+        assertEquals(List.of(AuthService.tokenHash(another.token())), revoked);
+        assertEquals("INVALID_CREDENTIALS", login("first", PASSWORD).code());
+        assertTrue(login("first", "New-password-456!").success());
+        assertTrue(profile(current.token(), "first", "Updated", null).success());
+        assertEquals("SESSION_EXPIRED", profile(another.token(), "first", "Forbidden", null).code());
+        assertTrue(profile(otherUser.token(), "other", "Still active", null).success());
+        try (Connection connection = DriverManager.getConnection(url); Statement statement = connection.createStatement();
+                ResultSet rows = statement.executeQuery("SELECT Mat_Khau_Bam FROM Nguoi_Dung WHERE Ten_Dang_Nhap='first'")) {
+            assertTrue(rows.next()); assertNotEquals("New-password-456!", rows.getString(1));
+            assertTrue(new PasswordHasher().verify("New-password-456!", rows.getString(1)));
+        }
+    }
+
+    @Test void passwordAndRevocationsRollBackTogetherWhenDatabaseUpdateFails() throws SQLException {
+        register("first", "First", null);
+        var current = login("first", PASSWORD); var another = login("first", PASSWORD);
+        execute("ALTER TABLE Phien_Dang_Nhap ADD CONSTRAINT reject_revoke CHECK(Thu_Hoi_Luc IS NULL)");
+        assertThrows(SQLException.class, () -> password(current.token(), PASSWORD, "New-password-456!"));
+        assertTrue(login("first", PASSWORD).success());
+        assertEquals("INVALID_CREDENTIALS", login("first", "New-password-456!").code());
+        assertTrue(profile(another.token(), "first", "First", null).success());
+    }
+
+    @Test void concurrentProfileUpdatesCannotClaimTheSameUsername() throws Exception {
+        register("first", "First", null); register("second", "Second", null);
+        String one = login("first", PASSWORD).token(), two = login("second", PASSWORD).token();
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var start = new CountDownLatch(1);
+            var first = executor.submit(() -> { start.await(); return profile(one, "Shared", "First", null); });
+            var second = executor.submit(() -> { start.await(); return profile(two, "Shared", "Second", null); });
+            start.countDown();
+            var a = first.get(10, TimeUnit.SECONDS); var b = second.get(10, TimeUnit.SECONDS);
+            assertNotEquals(a.success(), b.success()); assertEquals("USERNAME_TAKEN", a.success() ? b.code() : a.code());
+            assertEquals(2, count("Nguoi_Dung"));
+        }
+    }
+
+    @Test void concurrentPasswordChangesCannotReuseARevokedSession() throws Exception {
+        register("first", "First", null);
+        String one = login("first", PASSWORD).token(), two = login("first", PASSWORD).token();
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var start = new CountDownLatch(1);
+            var first = executor.submit(() -> { start.await(); return password(one, PASSWORD, "One-password-456!"); });
+            var second = executor.submit(() -> { start.await(); return password(two, PASSWORD, "Two-password-456!"); });
+            start.countDown();
+            var a = first.get(10, TimeUnit.SECONDS); var b = second.get(10, TimeUnit.SECONDS);
+            assertNotEquals(a.success(), b.success());
+            assertEquals("SESSION_EXPIRED", a.success() ? b.code() : a.code());
+            assertTrue(login("first", a.success() ? "One-password-456!" : "Two-password-456!").success());
+        }
+    }
+
+    private AuthResponse profile(String token, String username, String name, String email) throws SQLException {
+        return service.handle(request("UPDATE_PROFILE", username, null, name, email, token));
+    }
+    private AuthResponse password(String token, String current, String next) throws SQLException {
+        return service.handle(new AuthRequest("CHANGE_PASSWORD", null, current, null, null, token, null, next));
+    }
+
     private AuthResponse register(String username, String name, String email) throws SQLException {
         return service.handle(request("REGISTER", username, PASSWORD, name, email, null));
     }
