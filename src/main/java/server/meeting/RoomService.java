@@ -144,10 +144,12 @@ public final class RoomService implements AutoCloseable {
                     || current.principal.sessionId() != principal.sessionId())) throw new RoomException("ALREADY_IN_ROOM");
             if (current == null && connections.size() >= MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
             LiveRoom room = requireRoom(stored.roomId());
+            pruneWaiting(room);
             if (current == null) {
                 for (Member admitted : connections.values()) if (admitted.principal.userId() == principal.userId())
                     throw new RoomException(admitted.roomId.equals(stored.roomId()) ? "ALREADY_JOINED" : "ALREADY_IN_ROOM");
                 for (LiveRoom other : rooms.values()) {
+                    pruneWaiting(other);
                     Waiting waiting = other.waiting.get(principal.userId());
                     if (waiting != null && (!other.stored.roomId().equals(stored.roomId()) || !waiting.connectionId.equals(connectionId)))
                         throw new RoomException("ALREADY_IN_ROOM");
@@ -160,17 +162,46 @@ public final class RoomService implements AutoCloseable {
                 Waiting waiting = room.waiting.get(principal.userId());
                 if (waiting == null || !waiting.principal.tokenHash().equals(principal.tokenHash())) {
                     if (room.waiting.size() >= 20) throw new RoomException("QUEUE_FULL");
-                    waiting = new Waiting(principal, connectionId, clock.instant()); room.waiting.put(principal.userId(), waiting);
+                    waiting = new Waiting(principal, connectionId, generation, requestId, hash, mic, camera, clock.instant()); room.waiting.put(principal.userId(), waiting);
                 }
-                waiting.seen = clock.instant();
                 if (waiting.rejected) { room.waiting.remove(principal.userId()); throw new RoomException("ADMISSION_REJECTED"); }
                 if (!waiting.approved) throw new RoomException("APPROVAL_PENDING");
             }
+            reply = admit(room, principal, connectionId, generation, requestId, hash, mic, camera, current);
+        }
+        drainEvents(); return reply;
+    }
+
+    /** Only the connection/session whose PIN was already validated may poll this admission. */
+    public RoomJoinReply admissionStatus(SessionPrincipal principal, String connectionId, long generation, String roomId) throws SQLException {
+        checkPrincipal(principal); RoomJoinReply reply;
+        synchronized (lock) {
+            available(); eventBudget(); LiveRoom room = requireRoom(roomId); pruneWaiting(room);
+            Member admitted = connections.get(connectionId);
+            if (admitted != null && admitted.roomId.equals(roomId) && admitted.generation == generation
+                    && admitted.principal.sessionId() == principal.sessionId() && admitted.principal.tokenHash().equals(principal.tokenHash()))
+                return new RoomJoinReply(admitted.participantId, snapshot(room));
+            Waiting waiting = room.waiting.get(principal.userId());
+            if (waiting == null) throw new RoomException("ADMISSION_EXPIRED");
+            if (!waiting.connectionId.equals(connectionId) || waiting.generation != generation
+                    || waiting.principal.sessionId() != principal.sessionId() || !waiting.principal.tokenHash().equals(principal.tokenHash()))
+                throw new RoomException("ADMISSION_FORBIDDEN");
+            if (waiting.rejected) { room.waiting.remove(principal.userId()); throw new RoomException("ADMISSION_REJECTED"); }
+            if (room.stored.locked() || room.approval && !waiting.approved) throw new RoomException("APPROVAL_PENDING");
+            reply = admit(room, principal, connectionId, generation, waiting.requestId, waiting.hash, waiting.mic, waiting.camera, null);
+        }
+        drainEvents(); return reply;
+    }
+
+    private RoomJoinReply admit(LiveRoom room, SessionPrincipal principal, String connectionId, long generation,
+                                 String requestId, byte[] hash, boolean mic, boolean camera, Member current) throws SQLException {
+            RoomRepository.StoredRoom stored = room.stored;
+            if (current == null && connections.size() >= MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
             RoomRepository.JoinResult result = repository.join(principal, requestId, hash, stored.id(), opaque("p_"), instanceId, epoch, clock.instant());
             if (!result.active() || result.room().status() == RoomStatus.CLOSED) throw new RoomException("REQUEST_ALREADY_ENDED");
             if (result.replay()) {
                 if (current == null || !current.participantId.equals(result.participantId())) throw new RoomException("ALREADY_JOINED");
-                reply = new RoomJoinReply(current.participantId, snapshot(room));
+                return new RoomJoinReply(current.participantId, snapshot(room));
             } else {
                 Member member = new Member(connectionId, generation, principal, stored.roomId(), result.membershipId(),
                         result.participantId(), result.room().hostId() == principal.userId() ? RoomRole.HOST : RoomRole.MEMBER,
@@ -180,10 +211,14 @@ public final class RoomService implements AutoCloseable {
                 for (Member other : room.members.values()) if (other != member)
                     events.add(event(other, "PARTICIPANT_JOINED", room, Map.of("participant", member.view())));
                 enqueue(events);
-                reply = new RoomJoinReply(member.participantId, snapshot(room));
+                return new RoomJoinReply(member.participantId, snapshot(room));
             }
-        }
-        drainEvents(); return reply;
+    }
+
+    private void pruneWaiting(LiveRoom room) {
+        Instant now = clock.instant();
+        room.waiting.values().removeIf(waiting -> !(waiting.decisionExpiresAt == null ? waiting.expiresAt : waiting.decisionExpiresAt).isAfter(now)
+                || !waiting.principal.expiresAt().isAfter(now));
     }
 
     public RoomSnapshot getRoom(String connectionId, String roomId) {
@@ -291,6 +326,28 @@ public final class RoomService implements AutoCloseable {
         }
         drainEvents();
     }
+    /** Intentional host departure: commit the chosen successor before removing the old host. */
+    public void leaveByChoice(String connectionId, String roomId, String successorId, boolean closeRoom) throws SQLException {
+        synchronized (lock) {
+            available(); eventBudget(); Member self = member(connectionId); sameRoom(self, roomId); LiveRoom room = requireRoom(roomId);
+            if (self.role != RoomRole.HOST) {
+                if (closeRoom || successorId != null) throw new RoomException("HOST_REQUIRED");
+                remove(self, "TU_ROI");
+            } else if (closeRoom) remove(self, "PHONG_DONG");
+            else {
+                if (successorId == null) throw new RoomException("HOST_DECISION_REQUIRED");
+                Member successor = room.members.get(successorId);
+                if (successor == null || successor == self) throw new RoomException("PARTICIPANT_NOT_FOUND");
+                checkPrincipal(successor.principal);
+                if (new server.auth.SessionValidator(repository.connections(), clock).validateHash(successor.principal.tokenHash()).isEmpty())
+                    throw new RoomException("PARTICIPANT_NOT_FOUND");
+                repository.transferHost(room.stored.id(), successor.principal.userId());
+                self.role = RoomRole.MEMBER; successor.role = RoomRole.HOST; room.stored = room.stored.withHost(successor.principal.userId());
+                remove(self, "TU_ROI");
+            }
+        }
+        drainEvents();
+    }
     public void revokeSession(String tokenHash) {
         synchronized (lock) {
             for (LiveRoom room : rooms.values()) room.waiting.values().removeIf(waiting -> waiting.principal.tokenHash().equals(tokenHash));
@@ -348,7 +405,7 @@ public final class RoomService implements AutoCloseable {
                 catch (SQLException failure) { }
             }
             Instant now = clock.instant();
-            for (LiveRoom room : rooms.values()) room.waiting.values().removeIf(waiting -> waiting.seen.isBefore(now.minusSeconds(10)) || !waiting.principal.expiresAt().isAfter(now));
+            for (LiveRoom room : rooms.values()) pruneWaiting(room);
             for (Member member : new ArrayList<>(connections.values())) {
                 if (!member.principal.expiresAt().isAfter(now) && connections.containsKey(member.connectionId)) remove(member, "MAT_KET_NOI");
             }
@@ -506,8 +563,12 @@ public final class RoomService implements AutoCloseable {
         ParticipantView view() { return new ParticipantView(participantId, principal.displayName(), role, media); }
     }
     private static final class Waiting {
-        final SessionPrincipal principal; final String connectionId; Instant seen; boolean approved, rejected;
-        Waiting(SessionPrincipal principal, String connectionId, Instant now) { this.principal = principal; this.connectionId = connectionId; seen = now; }
+        final SessionPrincipal principal; final String connectionId, requestId; final long generation;
+        final byte[] hash; final boolean mic, camera; final Instant expiresAt; Instant decisionExpiresAt; boolean approved, rejected;
+        Waiting(SessionPrincipal principal, String connectionId, long generation, String requestId, byte[] hash, boolean mic, boolean camera, Instant now) {
+            this.principal = principal; this.connectionId = connectionId; this.generation = generation; this.requestId = requestId;
+            this.hash = hash.clone(); this.mic = mic; this.camera = camera; expiresAt = now.plus(Duration.ofMinutes(5));
+        }
     }
     @FunctionalInterface public interface ChatAction<T> {
         T handle(java.sql.Connection connection, Participant participant) throws SQLException;
@@ -555,6 +616,7 @@ public final class RoomService implements AutoCloseable {
                 available(); eventBudget(); Member self = authorized(principal, request.roomId(), request.ticket());
                 if (self == null) return RoomResponse.error("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc chưa được duyệt.");
                 LiveRoom room = requireRoom(self.roomId);
+                pruneWaiting(room);
                 Member target = room.members.values().stream().filter(member -> member.principal.userId() == request.target()).findFirst().orElse(null);
                 switch (request.action()) {
                     case "ROOM_POLL" -> { }
@@ -581,6 +643,7 @@ public final class RoomService implements AutoCloseable {
                                     room.waiting.remove(request.target()); throw new RoomException("SESSION_INVALID");
                                 }
                                 waiting.approved = request.action().equals("ROOM_PENDING_APPROVE"); waiting.rejected = !waiting.approved;
+                                if (waiting.decisionExpiresAt == null) waiting.decisionExpiresAt = clock.instant().plusSeconds(30);
                             }
                             case "ROOM_CLOSE" -> {
                                 remove(self, "PHONG_DONG");

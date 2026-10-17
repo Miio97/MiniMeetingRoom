@@ -36,6 +36,8 @@ class UnifiedRoomCompatibilityTest {
     AuthClient transport;
     final List<MeetingSession> sessions = new ArrayList<>();
     final List<ChatConnection> chats = new ArrayList<>();
+    final TestClock clock = new TestClock();
+    volatile boolean emulateOldAdmissionServer;
     @BeforeAll static void runtime() throws Exception { FxTestRuntime.start(); tls = RoomTestFixture.certificates(temporary); }
     @BeforeEach void start() throws Exception {
         database = new RoomTestFixture(tls);
@@ -44,11 +46,18 @@ class UnifiedRoomCompatibilityTest {
         for (String sql : migration.split(";")) if (!sql.isBlank()) database.execute(sql);
         database.execute("CREATE TABLE Tin_Nhan (Ma_Tin_Nhan BIGINT AUTO_INCREMENT PRIMARY KEY, Ma_Phong BIGINT NOT NULL, Ma_Nguoi_Gui BIGINT NOT NULL, Loai_Tin_Nhan VARCHAR(20), Noi_Dung VARCHAR(2000), Ngay_Gui TIMESTAMP, Ngay_Xoa TIMESTAMP)");
         AtomicReference<SignalingServer> signal = new AtomicReference<>(); Gson json = new Gson();
-        rooms = new RoomService(new RoomRepository(database::connection), Clock.systemUTC(), "unified-test", new byte[32], 16, event -> {
+        rooms = new RoomService(new RoomRepository(database::connection), clock, "unified-test", new byte[32], 16, event -> {
             var server = signal.get(); if (server != null) server.event(event.recipientConnectionId(), event.type(), event.roomId(), event.revision(), json.toJsonTree(event.body()).getAsJsonObject());
         }); rooms.start();
+        var handler = new MeetingHandler(rooms);
         signaling = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0), new SessionValidator(database::connection, Clock.systemUTC()),
-                new MeetingHandler(rooms), rooms.serverEpoch(), SignalingServer.Options.defaults()); signal.set(signaling); signaling.start();
+                new SignalingServer.Handler() {
+                    public common.signaling.SignalMessage handle(SignalingServer.Connection connection, common.signaling.SignalMessage request) throws Exception {
+                        if (emulateOldAdmissionServer && "ADMISSION_STATUS".equals(request.type())) throw new common.signaling.SignalException("UNKNOWN_OPERATION");
+                        return handler.handle(connection, request);
+                    }
+                    public void disconnected(SignalingServer.Connection connection, String reason) { handler.disconnected(connection, reason); }
+                }, rooms.serverEpoch(), SignalingServer.Options.defaults()); signal.set(signaling); signaling.start();
         collaboration = new AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0), request -> common.auth.AuthResponse.error("INVALID_REQUEST", "Unsupported"), rooms);
         collaboration.start(); transport = new AuthClient("localhost", collaboration.port(), tls.client(), 5000);
     }
@@ -61,6 +70,75 @@ class UnifiedRoomCompatibilityTest {
         MeetingSession session = new MeetingSession(account.token(), Instant.parse(account.expiresAt()), listener -> new SignalingClient(
                 new SignalingClient.Settings("localhost", signaling.port(), null, SignalWire.DEFAULT_MAX_BYTES), tls.client(), listener));
         sessions.add(session); return session;
+    }
+    @Test void chosenSuccessorRatherThanEarliestJoinerKeepsRoomAndFileRightsUntilExplicitClose() throws Exception {
+        var host = database.account("choiceHost", "Host"); var early = database.account("choiceEarly", "Early"); var chosen = database.account("choiceChosen", "Chosen");
+        var a = session(host); var b = session(early); var c = session(chosen);
+        a.create(new CreateRoomParams("Chosen host", "1234", 4, false)).get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);
+        String code = a.snapshot().joinCode(); long id = a.snapshot().collaborationRoom().id();
+        b.lookup(code, "1234").get(10, TimeUnit.SECONDS); b.join(false, false).get(10, TimeUnit.SECONDS);
+        c.lookup(code, "1234").get(10, TimeUnit.SECONDS); c.join(false, false).get(10, TimeUnit.SECONDS);
+        var failed = assertThrows(ExecutionException.class, () -> a.leave("missing", false).get(10, TimeUnit.SECONDS));
+        assertEquals("PARTICIPANT_NOT_FOUND", ((common.signaling.SignalException) failed.getCause()).code()); assertTrue(a.isHost());
+        a.leave(c.selfParticipantId(), false).get(10, TimeUnit.SECONDS); waitFor(c::isHost); assertFalse(b.isHost());
+        var files = new FileMetadataRepository(database::connection); files.authorize(early.user().id(), id); files.authorize(chosen.user().id(), id);
+        assertThrows(common.filetransfer.TransferException.class, () -> files.authorize(host.user().id(), id));
+        assertTrue(transport.chat(ChatRequest.send(chosen.token(), id, c.selfParticipantId(), "new host can chat")).success());
+        c.leave(null, true).get(10, TimeUnit.SECONDS); waitFor(() -> b.snapshot() == null);
+        assertEquals(0, rooms.participantCount()); assertThrows(common.filetransfer.TransferException.class, () -> files.authorize(early.user().id(), id));
+    }
+    @Test void pendingAdmissionCanBeApprovedAfterMorePollsThanThePinAttemptBudget() throws Exception {
+        var host = database.account("longWaitHost", "Host"); var guest = database.account("longWaitGuest", "Guest");
+        var a = session(host); var b = session(guest);
+        a.create(new CreateRoomParams("Long wait", "1234", 3, false)).get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);
+        transport.meeting(RoomRequest.settings(host.token(), a.snapshot().collaborationRoom().id(), a.selfParticipantId(), null, true));
+        b.lookup(a.snapshot().joinCode(), "1234").get(10, TimeUnit.SECONDS); var joining = b.join(false, false);
+        waitFor(() -> { try { return transport.meeting(command("ROOM_POLL", host, a, 0)).waiting().size() == 1; } catch (Exception error) { throw new RuntimeException(error); } });
+        Thread.sleep(7000); assertFalse(joining.isDone(), "Pending polls must not consume the PIN attempt budget");
+        transport.meeting(command("ROOM_PENDING_APPROVE", host, a, guest.user().id()));
+        joining.get(10, TimeUnit.SECONDS); assertEquals(2, rooms.participantCount());
+    }
+    @Test @Timeout(340) void pendingAdmissionRemainsUntilFiveMinutesThenExpiresAndAllowsANewRequest() throws Exception {
+        var host = database.account("ttlHost", "Host"); var guest = database.account("ttlGuest", "Guest");
+        var a = session(host); var b = session(guest);
+        a.create(new CreateRoomParams("Five minute wait", "1234", 3, false)).get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);
+        assertTrue(transport.meeting(RoomRequest.settings(host.token(), a.snapshot().collaborationRoom().id(), a.selfParticipantId(), null, true)).success());
+        b.lookup(a.snapshot().joinCode(), "1234").get(10, TimeUnit.SECONDS); var joining = b.join(false, false);
+        waitFor(() -> { try { return transport.meeting(command("ROOM_POLL", host, a, 0)).waiting().size() == 1; } catch (Exception error) { throw new RuntimeException(error); } });
+        Instant created = clock.instant(); long started = System.nanoTime();
+        for (int second : new int[]{4, 30, 60, 120, 240, 299}) {
+            if (Boolean.getBoolean("mmr.admission.test.realWait")) TimeUnit.NANOSECONDS.sleep(Math.max(0, TimeUnit.SECONDS.toNanos(second) - (System.nanoTime() - started)));
+            clock.now = created.plusSeconds(second);
+            assertEquals(1, transport.meeting(command("ROOM_POLL", host, a, 0)).waiting().size(), "Request disappeared at second " + second);
+            assertFalse(joining.isDone(), "Waiting must survive without a host decision at second " + second);
+            assertEquals(1, rooms.participantCount(), "Pending guests must not receive membership");
+        }
+        if (Boolean.getBoolean("mmr.admission.test.realWait")) TimeUnit.NANOSECONDS.sleep(Math.max(0, TimeUnit.SECONDS.toNanos(300) - (System.nanoTime() - started)));
+        clock.now = created.plusSeconds(300); rooms.maintenanceTick();
+        assertTrue(transport.meeting(command("ROOM_POLL", host, a, 0)).waiting().isEmpty());
+        var expired = assertThrows(ExecutionException.class, () -> joining.get(10, TimeUnit.SECONDS));
+        assertEquals("ADMISSION_EXPIRED", ((common.signaling.SignalException) expired.getCause()).code());
+        var retried = b.join(false, false);
+        waitFor(() -> { try { return transport.meeting(command("ROOM_POLL", host, a, 0)).waiting().size() == 1; } catch (Exception error) { throw new RuntimeException(error); } });
+        assertTrue(transport.meeting(command("ROOM_PENDING_APPROVE", host, a, guest.user().id())).success());
+        retried.get(10, TimeUnit.SECONDS); assertEquals(2, rooms.participantCount());
+    }
+    @Test void oldServerReportsThatItNeedsRestartingInsteadOfAGenericConnectionError() throws Exception {
+        emulateOldAdmissionServer = true;
+        var host = database.account("oldHost", "Host"); var guest = database.account("oldGuest", "Guest");
+        var a = session(host); var b = session(guest);
+        a.create(new CreateRoomParams("Old server", "1234", 3, false)).get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);
+        transport.meeting(RoomRequest.settings(host.token(), a.snapshot().collaborationRoom().id(), a.selfParticipantId(), null, true));
+        b.lookup(a.snapshot().joinCode(), "1234").get(10, TimeUnit.SECONDS);
+        var failed = assertThrows(ExecutionException.class, () -> b.join(false, false).get(10, TimeUnit.SECONDS));
+        assertEquals("SERVER_UPDATE_REQUIRED", ((common.signaling.SignalException) failed.getCause()).code());
+        assertTrue(client.UI.SceneManager.connectionError(failed).contains("khởi động lại server"));
+    }
+    private static final class TestClock extends Clock {
+        volatile Instant now = Instant.now();
+        public Instant instant() { return now; }
+        public ZoneId getZone() { return ZoneOffset.UTC; }
+        public Clock withZone(ZoneId zone) { return this; }
     }
     RoomRequest command(String action, AuthResponse account, MeetingSession session, long target) {
         return RoomRequest.command(action, account.token(), session.snapshot().collaborationRoom().id(), session.selfParticipantId(), target);

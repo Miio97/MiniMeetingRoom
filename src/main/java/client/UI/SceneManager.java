@@ -178,11 +178,30 @@ public final class SceneManager {
     public void leaveRoom(Runnable success, Consumer<String> failure) {
         if (!roomJoined || roomInfo == null) { success.run(); return; }
         if (usingSfuRoom && sfuSession != null) {
+            var session = sfuSession;
+            client.UI.dialogs.HostLeaveDialog.Choice choice = null;
+            if (session.isHost()) {
+                var dialog = new client.UI.dialogs.HostLeaveDialog(stage, session.snapshot(), session.selfParticipantId());
+                javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> changed = (observable, before, after) -> {
+                    if (after == null || !session.isHost()) dialog.close();
+                };
+                session.roomProperty().addListener(changed);
+                java.util.Optional<client.UI.dialogs.HostLeaveDialog.Choice> selected;
+                try { selected = dialog.showAndWait(); } finally { session.roomProperty().removeListener(changed); }
+                if (selected.isEmpty()) { failure.accept(""); return; }
+                choice = selected.get();
+            }
+            if (closing || sfuSession != session || session.snapshot() == null) { failure.accept("Phòng đã thay đổi. Vui lòng thử lại."); return; }
             leavingSfuRoom = true;
             Parent leavingView = stage.getScene().getRoot();
             if (leavingView instanceof MeetingScreen meeting) meeting.pauseFileTransfers();
-            sfuSession.leave().whenComplete((value, error) -> Platform.runLater(() -> {
+            var leaving = choice == null ? session.leave(null, false) : session.leave(choice.successorParticipantId(), choice.closeRoom());
+            leaving.whenComplete((value, error) -> Platform.runLater(() -> {
                 if (closing) return;
+                if (error != null && session.snapshot() != null) {
+                    session.refresh();
+                    leavingSfuRoom = false; restoreRoomFiles(leavingView); failure.accept(connectionError(error)); return;
+                }
                 leavingSfuRoom = false; roomJoined = false; pendingRoomId = -1;
                 closeSfuSession(); success.run();
             }));
@@ -264,12 +283,19 @@ public final class SceneManager {
         error = unwrap(error);
         if (error instanceof common.signaling.SignalException signal) return switch (signal.code()) {
             case "APPROVAL_PENDING" -> "Đang chờ chủ phòng duyệt.";
+            case "ADMISSION_EXPIRED" -> "Yêu cầu chờ đã hết hạn sau 5 phút. Bạn có thể gửi lại.";
+            case "ADMISSION_FORBIDDEN" -> "Yêu cầu chờ không thuộc kết nối hiện tại. Hãy tham gia lại.";
+            case "SERVER_UPDATE_REQUIRED" -> "Máy chủ đang chạy bản cũ. Hãy cập nhật và khởi động lại server rồi tham gia lại.";
+            case "HOST_DECISION_REQUIRED" -> "Bạn đang là chủ phòng. Hãy chọn người kế nhiệm hoặc đóng phòng khi rời.";
+            case "PARTICIPANT_NOT_FOUND" -> "Thành viên hoặc yêu cầu chờ không còn tồn tại. Vui lòng chọn lại.";
+            case "PIN_RATE_LIMIT" -> "Bạn đã thử PIN quá nhiều lần. Vui lòng chờ một phút rồi thử lại.";
+            case "ROOM_NOT_ACTIVE" -> "Phòng đã đóng hoặc không còn hoạt động.";
             case "ADMISSION_REJECTED" -> "Chủ phòng đã từ chối yêu cầu tham gia.";
             case "QUEUE_FULL" -> "Danh sách chờ đã đầy.";
             case "WRONG_PIN" -> "PIN phòng không đúng.";
             case "ROOM_FULL" -> "Phòng đã đủ số người tham gia.";
             case "ROOM_LOCKED" -> "Phòng đang khóa.";
-            case "ROOM_NOT_FOUND", "ROOM_NOT_ACTIVE" -> "Không tìm thấy phòng đang hoạt động.";
+            case "ROOM_NOT_FOUND" -> "Không tìm thấy phòng đang hoạt động.";
             case "ROOM_CLOSED" -> "Phòng đã kết thúc. Chủ phòng có thể mở lại phòng.";
             case "ROOM_ALREADY_ACTIVE" -> "Phòng đã được mở. Hãy làm mới danh sách và tham gia phòng.";
             case "ROOM_NOT_STARTED" -> "Chủ phòng chưa vào phòng. Vui lòng thử lại sau.";
