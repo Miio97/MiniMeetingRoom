@@ -136,8 +136,89 @@ class NetworkSignalWidgetTest {
             assertTrue(widget.isPopoverShowing());
             widget.dispose();
             assertFalse(widget.isPopoverShowing());
+            assertNull(widget.currentSample());
+            assertNull(widget.currentQuality());
+            assertEquals("Chưa có dữ liệu", widget.qualityBadgeLabel().getText());
 
             stage.close();
+            return null;
+        });
+    }
+
+    @Test
+    void fallbackToNetworkMonitorWhenSampleIsNull() throws Exception {
+        FxTestRuntime.call(() -> {
+            NetworkSignalWidget widget = new NetworkSignalWidget();
+            client.network.NetworkMonitor.Snapshot snapshot = new client.network.NetworkMonitor.Snapshot(
+                    client.network.NetworkMonitor.Quality.GOOD,
+                    42.0, 5.0, 1000.0, 1000.0, 500, 500, 10, 0, 0.0, 10.0, java.util.List.of()
+            );
+
+            widget.update(null, snapshot);
+
+            assertTrue(widget.isFallback());
+            assertEquals("TOT", widget.currentQuality());
+            assertEquals("Tốt", widget.qualityBadgeLabel().getText());
+            assertEquals("42.0 ms", widget.rttValueLabel().getText());
+            assertEquals("5.0 ms", widget.jitterValueLabel().getText());
+            assertEquals("--", widget.lossValueLabel().getText());
+            assertEquals("--", widget.bitrateValueLabel().getText());
+            assertEquals("--", widget.fpsValueLabel().getText());
+            assertEquals("--", widget.resolutionValueLabel().getText());
+
+            assertEquals(NetworkSignalWidget.COLOR_GOOD, widget.bar1().getFill());
+            assertEquals(NetworkSignalWidget.COLOR_GOOD, widget.bar2().getFill());
+            assertEquals(NetworkSignalWidget.COLOR_GOOD, widget.bar3().getFill());
+
+            assertTrue(widget.sourceLabel().getText().contains("Máy chủ (Camera tắt)"));
+            assertTrue(widget.tooltip().getText().contains("Kênh máy chủ"));
+            return null;
+        });
+    }
+
+    @Test
+    void fallbackTransitionsBackToWebRtcWhenSampleBecomesAvailable() throws Exception {
+        FxTestRuntime.call(() -> {
+            NetworkSignalWidget widget = new NetworkSignalWidget();
+            client.network.NetworkMonitor.Snapshot snapshot = new client.network.NetworkMonitor.Snapshot(
+                    client.network.NetworkMonitor.Quality.GOOD,
+                    42.0, 5.0, 1000.0, 1000.0, 500, 500, 10, 0, 0.0, 10.0, java.util.List.of()
+            );
+
+            widget.update(null, snapshot);
+            assertTrue(widget.isFallback());
+            assertEquals("42.0 ms", widget.rttValueLabel().getText());
+
+            CalculatedSample sample = new CalculatedSample(25.0, 3.0, 0.1, 1500, 30, 1280, 720);
+            widget.update(sample, snapshot);
+
+            assertFalse(widget.isFallback());
+            assertEquals("25.0 ms", widget.rttValueLabel().getText());
+            assertEquals("1500 kbps", widget.bitrateValueLabel().getText());
+            assertEquals("30", widget.fpsValueLabel().getText());
+            assertTrue(widget.sourceLabel().getText().contains("WebRTC Media"));
+            assertFalse(widget.tooltip().getText().contains("Kênh máy chủ"));
+            return null;
+        });
+    }
+
+    @Test
+    void emptySampleFallsBackToNetworkMonitor() throws Exception {
+        FxTestRuntime.call(() -> {
+            NetworkSignalWidget widget = new NetworkSignalWidget();
+            client.network.NetworkMonitor.Snapshot snapshot = new client.network.NetworkMonitor.Snapshot(
+                    client.network.NetworkMonitor.Quality.GOOD,
+                    55.5, 6.2, 1000.0, 1000.0, 500, 500, 10, 0, 0.0, 10.0, java.util.List.of()
+            );
+            CalculatedSample emptySample = new CalculatedSample(null, null, null, null, null, null, null);
+
+            widget.update(emptySample, snapshot);
+
+            assertTrue(widget.isFallback());
+            assertEquals("TOT", widget.currentQuality());
+            assertEquals("55.5 ms", widget.rttValueLabel().getText());
+            assertEquals("6.2 ms", widget.jitterValueLabel().getText());
+            assertTrue(widget.sourceLabel().getText().contains("Máy chủ"));
             return null;
         });
     }

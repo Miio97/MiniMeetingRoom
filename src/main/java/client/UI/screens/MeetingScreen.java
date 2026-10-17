@@ -27,7 +27,13 @@ public final class MeetingScreen extends BorderPane {
     private ParticipantPanel participantPanel;
     private common.meeting.RoomResponse managedState;
     public client.network.NetworkMonitor networkMonitor() { return network; }
-    public void refreshNetwork() { }
+    public void refreshNetwork() {
+        if (disposed) return;
+        client.media.NetworkStatsCalculator.CalculatedSample sample = (videoRoom && mediaController != null)
+                ? mediaController.latestStats()
+                : null;
+        networkSignal.update(sample, network != null ? network.snapshot() : null);
+    }
     private final SceneManager manager;
     private final ObservableList<MockData.Participant> people;
     private final List<VideoTile> tiles = new ArrayList<>();
@@ -85,6 +91,7 @@ public final class MeetingScreen extends BorderPane {
         copy.setOnAction(e -> { ClipboardContent content = new ClipboardContent(); content.putString(manager.room().code()); Clipboard.getSystemClipboard().setContent(content); copy.setIcon("check"); PauseTransition reset = new PauseTransition(Duration.seconds(1.5)); reset.setOnFinished(done -> copy.setIcon("copy")); reset.play(); });
         network = manager.authClient().startNetworkMonitoring();
         networkSignal = new NetworkSignalWidget();
+        networkSignal.update(null, network.snapshot());
         HBox statusLine = Ui.row(8, networkSignal); statusLine.setAlignment(Pos.CENTER_LEFT);
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
@@ -123,10 +130,12 @@ public final class MeetingScreen extends BorderPane {
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
             video.cameraRequestedProperty().addListener(cameraListener);
             statsListener = (observable, before, after) -> {
-                if (!disposed) networkSignal.update(after);
+                if (!disposed) networkSignal.update(after, network != null ? network.snapshot() : null);
             };
             video.statsProperty().addListener(statsListener);
-            if (video.latestStats() != null) networkSignal.update(video.latestStats());
+            if (video.latestStats() != null) {
+                networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
+            }
             manager.sfuSession().roomProperty().addListener(videoRoomListener); renderNativeParticipants();
         }
         people.addListener((ListChangeListener<MockData.Participant>) change -> {

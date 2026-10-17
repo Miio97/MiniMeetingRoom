@@ -35,6 +35,7 @@ public final class NetworkSignalWidget extends Button {
     private final VBox popoverContent = new VBox(8);
 
     private final Label qualityBadge = Ui.label("Chưa có dữ liệu", "caption");
+    private final Label sourceLabel = Ui.label("", "caption");
     private final Label rttValue = Ui.label("--", "strong");
     private final Label lossValue = Ui.label("--", "strong");
     private final Label jitterValue = Ui.label("--", "strong");
@@ -44,6 +45,7 @@ public final class NetworkSignalWidget extends Button {
 
     private NetworkStatsCalculator.CalculatedSample currentSample;
     private String currentQuality;
+    private boolean isFallback;
 
     public NetworkSignalWidget() {
         setId("network-signal");
@@ -85,6 +87,10 @@ public final class NetworkSignalWidget extends Button {
         popoverContent.getStyleClass().addAll("card", "network-popover");
 
         qualityBadge.setId("popover-quality");
+        sourceLabel.setId("popover-source");
+        sourceLabel.setVisible(false);
+        sourceLabel.setManaged(false);
+
         HBox header = Ui.row(8, Ui.label("Thông số mạng", "strong"), Ui.spacer(), qualityBadge);
 
         rttValue.setId("popover-rtt");
@@ -104,19 +110,35 @@ public final class NetworkSignalWidget extends Button {
         grid.addRow(4, Ui.label("FPS:", "caption"), fpsValue);
         grid.addRow(5, Ui.label("Độ phân giải:", "caption"), resolutionValue);
 
-        popoverContent.getChildren().addAll(header, new Separator(), grid);
+        popoverContent.getChildren().addAll(header, sourceLabel, new Separator(), grid);
         popover.getContent().add(popoverContent);
     }
 
     public void update(NetworkStatsCalculator.CalculatedSample sample) {
-        this.currentSample = sample;
-        this.currentQuality = sample != null
-                ? NetworkStatsService.calculateQuality(sample.rttMs(), sample.jitterMs(), sample.lossPct())
-                : null;
+        update(sample, null);
+    }
 
-        updateBarsAndQuality(currentQuality);
-        updateValues(sample);
-        updateTooltipAndText();
+    public void update(NetworkStatsCalculator.CalculatedSample sample, client.network.NetworkMonitor.Snapshot fallback) {
+        this.currentSample = sample;
+        if (sample != null && !sample.isEmpty()) {
+            this.isFallback = false;
+            this.currentQuality = NetworkStatsService.calculateQuality(sample.rttMs(), sample.jitterMs(), sample.lossPct());
+            updateBarsAndQuality(currentQuality);
+            updateValues(sample);
+            updateTooltipAndText();
+        } else if (fallback != null && fallback.rttMillis() != null) {
+            this.isFallback = true;
+            this.currentQuality = NetworkStatsService.calculateQuality(fallback.rttMillis(), fallback.jitterMillis(), null);
+            updateBarsAndQuality(currentQuality);
+            updateFallbackValues(fallback);
+            updateTooltipAndText();
+        } else {
+            this.isFallback = false;
+            this.currentQuality = null;
+            updateBarsAndQuality(null);
+            updateValues(null);
+            updateTooltipAndText();
+        }
     }
 
     private void updateBarsAndQuality(String quality) {
@@ -161,10 +183,32 @@ public final class NetworkSignalWidget extends Button {
         bitrateValue.setText(s == null || s.bitrateKbps() == null ? "--" : s.bitrateKbps() + " kbps");
         fpsValue.setText(s == null || s.fps() == null ? "--" : String.valueOf(s.fps()));
         resolutionValue.setText(s == null || s.width() == null || s.height() == null ? "--" : s.width() + "x" + s.height());
+        if (s != null && !s.isEmpty()) {
+            sourceLabel.setText("Kênh truyền: WebRTC Media");
+            sourceLabel.setVisible(true);
+            sourceLabel.setManaged(true);
+        } else {
+            sourceLabel.setText("");
+            sourceLabel.setVisible(false);
+            sourceLabel.setManaged(false);
+        }
+    }
+
+    private void updateFallbackValues(client.network.NetworkMonitor.Snapshot fb) {
+        rttValue.setText(fb == null || fb.rttMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", fb.rttMillis()));
+        lossValue.setText("--");
+        jitterValue.setText(fb == null || fb.jitterMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", fb.jitterMillis()));
+        bitrateValue.setText("--");
+        fpsValue.setText("--");
+        resolutionValue.setText("--");
+        sourceLabel.setText("Kênh truyền: Máy chủ (Camera tắt)");
+        sourceLabel.setVisible(true);
+        sourceLabel.setManaged(true);
     }
 
     private void updateTooltipAndText() {
-        String tip = "Chất lượng kết nối: " + qualityBadge.getText() + "\n"
+        String tip = "Chất lượng kết nối: " + qualityBadge.getText()
+                + (isFallback ? " (Kênh máy chủ)" : "") + "\n"
                 + "Độ trễ (RTT, ms): " + rttValue.getText() + "\n"
                 + "Mất gói (%): " + lossValue.getText() + "\n"
                 + "Jitter (ms): " + jitterValue.getText() + "\n"
@@ -223,6 +267,8 @@ public final class NetworkSignalWidget extends Button {
         return popover.isShowing();
     }
 
+    public boolean isFallback() { return isFallback; }
+    public Label sourceLabel() { return sourceLabel; }
     public String currentQuality() { return currentQuality; }
     public NetworkStatsCalculator.CalculatedSample currentSample() { return currentSample; }
     public Rectangle bar1() { return bar1; }
@@ -240,5 +286,6 @@ public final class NetworkSignalWidget extends Button {
 
     public void dispose() {
         hidePopover();
+        update(null, null);
     }
 }
