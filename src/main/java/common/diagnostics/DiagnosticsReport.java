@@ -280,7 +280,7 @@ public final class DiagnosticsReport {
                     "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
                     "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
                     "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE",
-                    "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE", "CHAT_SEND", "CHAT_HISTORY", "OTHER"))
+                    "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE", "CHAT_SEND", "CHAT_HISTORY", "NETWORK_STATS", "OTHER"))
                     ? tag(fields, "action") : "unavailable";
             String phase = tagged(fields, "phase", PHASES) ? tag(fields, "phase") : "unavailable";
             Long cycleId = event.startsWith("media.probe.") || event.startsWith("sfu.probe.")

@@ -108,6 +108,22 @@ public final class NativeVideoSession implements AutoCloseable {
             finally { pending.remove(offer); }
         }
         public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
+        public RTCStatsReport stats(long timeoutMs) {
+            if (closing.get()) return null;
+            CompletableFuture<RTCStatsReport> result = new CompletableFuture<>();
+            pending.add(result);
+            try {
+                connection.getStats(report -> {
+                    if (!closing.get()) result.complete(report);
+                    else result.complete(null);
+                });
+                return result.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (Exception failure) {
+                return null;
+            } finally {
+                pending.remove(result);
+            }
+        }
         private void set(RTCSessionDescription value, boolean remoteDescription) throws Exception {
             CompletableFuture<Void> result = new CompletableFuture<>(); pending.add(result);
             SetSessionDescriptionObserver observer = new SetSessionDescriptionObserver() {

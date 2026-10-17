@@ -262,6 +262,11 @@ public final class SignalingServer implements AutoCloseable {
                                     authenticated.addProperty("expiresAt", principal.expiresAt().toString());
                                     authenticated.addProperty("selfDisplayName", principal.displayName());
                                     response = message("AUTHENTICATED", request.requestId(), null, null, authenticated);
+                                } else if ("NETWORK_STATS".equals(request.type())) {
+                                    if (principal == null || closed.get()) {
+                                        terminate("SESSION_INVALID"); throw new SignalException("SESSION_INVALID");
+                                    }
+                                    response = handler.handle(Connection.this, request);
                                 } else {
                                     Optional<SessionPrincipal> live = validator.validateHash(principal.tokenHash());
                                     if (live.isEmpty() || closed.get()) {
@@ -397,7 +402,7 @@ public final class SignalingServer implements AutoCloseable {
                     "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
                     "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH",
                     "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE",
-                    "CHAT_SEND", "CHAT_HISTORY" -> type;
+                    "CHAT_SEND", "CHAT_HISTORY", "NETWORK_STATS" -> type;
             default -> "OTHER";
         };
     }

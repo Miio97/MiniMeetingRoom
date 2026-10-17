@@ -214,6 +214,20 @@ public final class RoomService implements AutoCloseable {
             return member != null ? member.participantId : null;
         }
     }
+    public Long currentStoredRoomIdForConnection(String connectionId) {
+        synchronized (lock) {
+            Member member = connections.get(connectionId);
+            if (member == null) return null;
+            LiveRoom room = rooms.get(member.roomId);
+            return room != null ? room.stored.id() : null;
+        }
+    }
+    public String currentRoomIdForConnection(String connectionId) {
+        synchronized (lock) {
+            Member member = connections.get(connectionId);
+            return member != null ? member.roomId : null;
+        }
+    }
     public Clock clock() { return clock; }
     public server.auth.ConnectionProvider connectionProvider() { return repository.connections(); }
     public RoomSnapshot setMediaState(String connectionId, boolean mic, boolean camera, boolean share) {
