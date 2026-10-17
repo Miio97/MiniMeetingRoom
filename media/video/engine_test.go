@@ -310,4 +310,3 @@ func TestEngineConfigurableCapacity(t *testing.T) {
 	}
 	e.mu.Unlock()
 }
-

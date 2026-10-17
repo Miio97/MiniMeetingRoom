@@ -251,11 +251,19 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                             request.roomId(), text(body, "joinCode", 64), text(body, "pin", 6), bool(body, "mic", false), bool(body, "camera", false));
                     response.add("join", JSON.toJsonTree(joined)); type = "ROOM_JOINED";
                 }
+                case "ADMISSION_STATUS" -> {
+                    if (request.roomId() == null) throw new SignalException("INVALID_REQUEST");
+                    var joined = rooms.admissionStatus(connection.principal(), connection.id(), connection.generation(), request.roomId());
+                    response.add("join", JSON.toJsonTree(joined)); type = "ROOM_JOINED";
+                }
                 case "GET_ROOM" -> {
                     response.add("room", JSON.toJsonTree(rooms.getRoom(connection.id(), request.roomId()))); type = "ROOM_SNAPSHOT";
                 }
                 case "LEAVE_ROOM" -> {
-                    rooms.assertMember(connection.id(), request.roomId()); rooms.leave(connection.id(), "TU_ROI");
+                    rooms.assertMember(connection.id(), request.roomId());
+                    if (body.has("closeRoom")) rooms.leaveByChoice(connection.id(), request.roomId(),
+                            body.has("successorParticipantId") ? text(body, "successorParticipantId", 96) : null, bool(body, "closeRoom", false));
+                    else rooms.leave(connection.id(), "TU_ROI");
                     if (video != null) video.revoke(connection.id());
                     response.addProperty("ok", true); type = "ROOM_LEFT";
                 }

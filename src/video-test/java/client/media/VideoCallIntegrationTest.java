@@ -233,6 +233,8 @@ public class VideoCallIntegrationTest {
                         var root = stages.get(0).getScene().getRoot(); root.applyCss(); root.layout();
                         assertTrue(nodes(root).noneMatch(node -> "video-camera-list".equals(node.getId())));
                         assertTrue(nodes(root).noneMatch(node -> "camera-controls".equals(node.getId())), "Camera configuration belongs in Settings, not the meeting footer");
+                        assertNull(root.lookup("#room-management"));
+                        assertTrue(find(root, "meeting-tabs", javafx.scene.control.TabPane.class).getTabs().get(3).isDisable());
                         find(root, "meeting-settings", javafx.scene.control.Button.class).fire();
                         return find(root, "meeting-video-area", javafx.scene.layout.StackPane.class).getHeight();
                     });
@@ -241,6 +243,11 @@ public class VideoCallIntegrationTest {
                     FxTestRuntime.call(() -> {
                         for (var window : List.copyOf(javafx.stage.Window.getWindows())) if (window.getScene() != null && window.getScene().getRoot() instanceof javafx.scene.control.DialogPane pane
                                 && nodes(pane).anyMatch(node -> "camera-controls".equals(node.getId()))) {
+                            assertTrue(find(pane, "room-settings-section", javafx.scene.layout.VBox.class).isManaged());
+                            assertFalse(nodes(pane).filter(javafx.scene.control.Button.class::isInstance).map(javafx.scene.control.Button.class::cast)
+                                    .anyMatch(button -> "Đóng phòng".equals(button.getText())));
+                            saveUi(pane, "room-settings-preview.png");
+                            find(pane, "room-approval", javafx.scene.control.CheckBox.class).fire();
                             var root = (javafx.scene.layout.Region) stages.get(0).getScene().getRoot();
                             boolean original = client.UI.ThemeManager.isLight();
                             find(pane, "theme-light", javafx.scene.control.Button.class).fire(); root.applyCss(); pane.applyCss();
@@ -252,6 +259,67 @@ public class VideoCallIntegrationTest {
                         }
                         return null;
                     });
+                    var waitingAccount = fixture.database.account("uiWaiting", "Waiting Guest");
+                    var waiter = fixture.session(waitingAccount);
+                    try {
+                        // Wait for the host's settings reply before submitting the admission.
+                        long settingsDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                        boolean approvalReady;
+                        do {
+                            approvalReady = fixture.client().meeting(common.meeting.RoomRequest.command("ROOM_POLL", host.token(), room.id(), hostSession.selfParticipantId(), 0)).room().approval();
+                            if (!approvalReady) Thread.sleep(40);
+                        } while (!approvalReady && System.nanoTime() < settingsDeadline);
+                        assertTrue(approvalReady);
+                        FxTestRuntime.await(() -> !find(stages.get(0).getScene().getRoot(), "meeting-tabs", javafx.scene.control.TabPane.class).getTabs().get(3).isDisable());
+                        FxTestRuntime.call(() -> {
+                            var root = stages.get(0).getScene().getRoot();
+                            var tabs = find(root, "meeting-tabs", javafx.scene.control.TabPane.class);
+                            assertEquals("waiting-room-tab", tabs.getTabs().get(3).getId());
+                            tabs.getSelectionModel().select(3); root.applyCss(); root.layout();
+                            var guestTabs = find(stages.get(1).getScene().getRoot(), "meeting-tabs", javafx.scene.control.TabPane.class);
+                            assertTrue(guestTabs.getTabs().get(3).isDisable());
+                            assertTrue(nodes(find(root, "meeting-toolbar-content", javafx.scene.layout.VBox.class))
+                                    .filter(javafx.scene.control.Label.class::isInstance).map(javafx.scene.control.Label.class::cast)
+                                    .noneMatch(label -> label.isVisible() && (label.getText().contains("cùng phòng") || label.getText().contains("WebRTC/SFU"))));
+                            return null;
+                        });
+                        waiter.lookup(room.code(), "1234").get(10, TimeUnit.SECONDS); var admission = waiter.join(false, false);
+                        FxTestRuntime.await(() -> {
+                            var root = stages.get(0).getScene().getRoot(); root.applyCss(); root.layout();
+                            return root.lookup("#admit-" + waitingAccount.user().id()) != null;
+                        });
+                        FxTestRuntime.call(() -> { saveUi(stages.get(0).getScene().getRoot(), "room-admission-preview.png"); return null; });
+                        long beforeAdmission = hostMedia.frames(guestId).receivedFrames();
+                        Thread.sleep(6000); assertFalse(admission.isDone());
+                        assertTrue(hostMedia.frames(guestId).receivedFrames() > beforeAdmission, "Video must continue while another client waits");
+                        FxTestRuntime.call(() -> { find(stages.get(0).getScene().getRoot(), "admit-" + waitingAccount.user().id(), javafx.scene.control.Button.class).fire(); return null; });
+                        admission.get(10, TimeUnit.SECONDS);
+                        FxTestRuntime.await(() -> hostSession.roomProperty().get().participants().size() == 3);
+                        FxTestRuntime.call(() -> {
+                            // Hold the FX event queue while the network worker removes a member.
+                            // A pin click must still render the coherent, currently displayed room.
+                            waiter.leave().get(5, TimeUnit.SECONDS);
+                            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                            while (hostSession.snapshot().participants().size() != 2 && System.nanoTime() < until) Thread.sleep(10);
+                            assertEquals(2, hostSession.snapshot().participants().size());
+                            assertEquals(3, hostSession.roomProperty().get().participants().size());
+                            var root = stages.get(0).getScene().getRoot();
+                            ((javafx.scene.control.Button) root.lookup(".pin-action")).fire();
+                            root.applyCss(); root.layout();
+                            assertEquals(3, root.lookupAll(".video-tile").size()); return null;
+                        });
+                        FxTestRuntime.await(() -> "Chờ duyệt".equals(find(stages.get(0).getScene().getRoot(), "meeting-tabs", javafx.scene.control.TabPane.class).getTabs().get(3).getText()));
+                        FxTestRuntime.call(() -> {
+                            var root = stages.get(0).getScene().getRoot();
+                            assertNull(root.lookup("#admit-" + waitingAccount.user().id()));
+                            assertEquals(3, find(root, "meeting-tabs", javafx.scene.control.TabPane.class).getSelectionModel().getSelectedIndex()); return null;
+                        });
+                        assertTrue(fixture.client().meeting(common.meeting.RoomRequest.settings(host.token(), room.id(), hostSession.selfParticipantId(), null, false)).success());
+                        FxTestRuntime.await(() -> {
+                            var tabs = find(stages.get(0).getScene().getRoot(), "meeting-tabs", javafx.scene.control.TabPane.class);
+                            return tabs.getTabs().get(3).isDisable() && tabs.getSelectionModel().getSelectedIndex() == 0;
+                        });
+                    } finally { waiter.close(); }
                     long beforeHidden = hostMedia.frames(guestId).receivedFrames();
                     FxTestRuntime.call(() -> {
                         var root = stages.get(0).getScene().getRoot();
@@ -259,12 +327,13 @@ public class VideoCallIntegrationTest {
                         assertFalse(find(root, "meeting-toolbar-content", javafx.scene.layout.VBox.class).isManaged());
                         assertTrue(find(root, "meeting-video-area", javafx.scene.layout.StackPane.class).getHeight() > expandedHeight + 60,
                                 "Hidden tools must return space to the video area");
-                        assertEquals("Hiện thanh công cụ", find(root, "toggle-meeting-toolbar", javafx.scene.control.Button.class).getText()); return null;
+                        assertTrue(find(root, "show-meeting-toolbar", javafx.scene.control.Button.class).isVisible()); return null;
                     });
                     FxTestRuntime.await(() -> hostMedia.frames(guestId).receivedFrames() > beforeHidden + 3);
+                    FxTestRuntime.call(() -> { saveUi(stages.get(0).getScene().getRoot(), "room-toolbar-hidden-preview.png"); return null; });
                     FxTestRuntime.call(() -> {
                         var root = stages.get(0).getScene().getRoot();
-                        find(root, "toggle-meeting-toolbar", javafx.scene.control.Button.class).fire(); root.layout();
+                        find(root, "show-meeting-toolbar", javafx.scene.control.Button.class).fire(); root.layout();
                         assertTrue(find(root, "meeting-toolbar-content", javafx.scene.layout.VBox.class).isManaged());
                         assertTrue(hostMedia.publishingProperty().get()); return null;
                     });
@@ -307,7 +376,7 @@ public class VideoCallIntegrationTest {
                                 .map(javafx.scene.control.Label.class::cast).anyMatch(label -> label.getText().contains("video-room-file.txt"));
                     });
                     FxTestRuntime.await(() -> nodes(stages.get(1).getScene().getRoot()).filter(javafx.scene.control.TabPane.class::isInstance)
-                            .map(javafx.scene.control.TabPane.class::cast).findFirst().orElseThrow().getTabs().size() == 3);
+                            .map(javafx.scene.control.TabPane.class::cast).findFirst().orElseThrow().getTabs().size() == 4);
                     FxTestRuntime.call(() -> {
                         var root = stages.get(0).getScene().getRoot(); root.applyCss(); root.layout();
                         var snapshot = root.snapshot(null, null); int width = (int) snapshot.getWidth(), height = (int) snapshot.getHeight();
@@ -324,8 +393,16 @@ public class VideoCallIntegrationTest {
                     assertThrows(java.io.IOException.class, () -> guestFiles.listFiles(guest.token(), room.id(), 0));
                     FxTestRuntime.call(() -> {
                         assertEquals("Vào lại phòng", find(stages.get(1).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).getText());
-                        find(stages.get(0).getScene().getRoot(), "leave-meeting", javafx.scene.control.Button.class).fire(); return null;
+                        javafx.application.Platform.runLater(() -> find(stages.get(0).getScene().getRoot(), "leave-meeting", javafx.scene.control.Button.class).fire()); return null;
                     });
+                    FxTestRuntime.await(() -> hostLeavePane() != null);
+                    FxTestRuntime.call(() -> { saveUi(hostLeavePane(), "room-host-leave-preview.png"); return null; });
+                    FxTestRuntime.call(() -> { ((javafx.scene.control.Button) hostLeavePane().lookupButton(javafx.scene.control.ButtonType.CANCEL)).fire(); return null; });
+                    FxTestRuntime.await(() -> !stages.get(0).getScene().getRoot().isDisabled());
+                    assertTrue(hostMedia.publishingProperty().get(), "Canceling host departure must preserve the camera");
+                    FxTestRuntime.call(() -> { javafx.application.Platform.runLater(() -> find(stages.get(0).getScene().getRoot(), "leave-meeting", javafx.scene.control.Button.class).fire()); return null; });
+                    FxTestRuntime.await(() -> hostLeavePane() != null);
+                    FxTestRuntime.call(() -> { ((javafx.scene.control.Button) hostLeavePane().lookup("#host-leave-close")).fire(); return null; });
                     hostMedia.closeComplete().get(10, TimeUnit.SECONDS);
                     FxTestRuntime.await(() -> stages.get(0).getScene().getRoot() instanceof client.UI.screens.MeetingEndedScreen
                             && find(stages.get(0).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).getText().equals("Mở lại phòng"));
@@ -472,6 +549,17 @@ public class VideoCallIntegrationTest {
                 if (guestVideo != null) guestVideo.closeComplete().get(10, TimeUnit.SECONDS);
             }
         }
+    }
+    private static void saveUi(javafx.scene.Parent root, String filename) throws Exception {
+        root.applyCss(); root.layout(); var snapshot = root.snapshot(null, null); int width = (int) snapshot.getWidth(), height = (int) snapshot.getHeight();
+        int[] pixels = new int[width * height]; snapshot.getPixelReader().getPixels(0, 0, width, height, javafx.scene.image.PixelFormat.getIntArgbInstance(), pixels, 0, width);
+        var picture = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB); picture.setRGB(0, 0, width, height, pixels, 0, width);
+        javax.imageio.ImageIO.write(picture, "png", Path.of("target", filename).toFile());
+    }
+    private static javafx.scene.control.DialogPane hostLeavePane() {
+        return javafx.stage.Window.getWindows().stream().filter(window -> window.getScene() != null)
+                .map(window -> window.getScene().getRoot()).filter(javafx.scene.control.DialogPane.class::isInstance).map(javafx.scene.control.DialogPane.class::cast)
+                .filter(pane -> pane.lookup("#host-leave-close") != null).findFirst().orElse(null);
     }
     private static void answerCameraPermission(boolean allowed) throws Exception {
         FxTestRuntime.await(() -> javafx.stage.Window.getWindows().stream().anyMatch(window -> window.getScene() != null

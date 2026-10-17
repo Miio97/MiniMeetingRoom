@@ -21,13 +21,7 @@ public final class DeviceSettingsDialog extends Dialog<Void> {
         if (room != null) {
             CheckBox locked = new CheckBox("Khóa phòng"); locked.setSelected(room.locked()); locked.setOnAction(event -> lock.accept(locked.isSelected()));
             CheckBox required = new CheckBox("Duyệt thành viên trước khi vào"); required.setSelected(room.approval()); required.setOnAction(event -> approval.accept(required.isSelected()));
-            Button closeRoom = Ui.button("Đóng phòng", "danger", () -> {
-                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION); confirm.initOwner(getDialogPane().getScene().getWindow());
-                confirm.setTitle("Đóng phòng"); confirm.setHeaderText("Kết thúc phòng cho mọi người?");
-                Ui.style(confirm);
-                confirm.showAndWait().filter(ButtonType.OK::equals).ifPresent(value -> { close(); end.run(); });
-            });
-            content.getChildren().addAll(new Separator(), Ui.label("Quản lý phòng", "subtitle"), locked, required, closeRoom);
+            content.getChildren().addAll(new Separator(), Ui.label("Quản lý phòng", "subtitle"), locked, required);
         }
         content.setPrefWidth(420); getDialogPane().setContent(content); getDialogPane().getButtonTypes().add(ButtonType.CLOSE); ((Button) getDialogPane().lookupButton(ButtonType.CLOSE)).setText("Xong");
     }

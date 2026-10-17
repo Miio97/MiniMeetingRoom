@@ -375,6 +375,25 @@ class RoomFlowTest {
     }
 
     private Parent root() { return stage.getScene().getRoot(); }
+    @Test void lobbySeesAnotherHostsReopenedRoomWithoutManualRefresh() throws Exception {
+        var room = fixture.client().createRoom(host.token(), "Tự cập nhật", "1234", 3).room();
+        var guest = fixture.account("autoRefreshGuest", "Guest");
+        fixture.client().joinRoom(guest.token(), room.code(), "1234");
+        fixture.client().leaveRoom(guest.token(), room.id()); fixture.client().leaveRoom(host.token(), room.id());
+        hiddenClient(guest);
+        FxTestRuntime.call(() -> {
+            assertTrue(node(root(), "room-action-" + room.id(), Button.class).isDisabled());
+            node(root(), "join-room-identifier", TextField.class).setText("MMR-KEEPINPUT23456");
+            node(root(), "join-room-pin", TextField.class).setText("5678"); return null;
+        });
+        fixture.client().reopenRoom(host.token(), room.id());
+        FxTestRuntime.await(() -> !node(root(), "room-action-" + room.id(), Button.class).isDisabled());
+        FxTestRuntime.call(() -> {
+            assertEquals("Nhập PIN", node(root(), "room-action-" + room.id(), Button.class).getText());
+            assertEquals("MMR-KEEPINPUT23456", node(root(), "join-room-identifier", TextField.class).getText());
+            assertEquals("5678", node(root(), "join-room-pin", TextField.class).getText()); return null;
+        });
+    }
 
     private static <T extends Node> T node(Parent root, String id, Class<T> type) {
         return nodes(root).filter(candidate -> id.equals(candidate.getId())).map(type::cast).findFirst()

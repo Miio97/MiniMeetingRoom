@@ -153,10 +153,15 @@ public final class MeetingSession implements AutoCloseable {
                 if (failure instanceof SignalException signal && "REQUEST_ALREADY_ENDED".equals(signal.code())) joinIntent = null;
                 throw failure;
             }
-            self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null; reopenIntent = null;
-            pin = "";
-            publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
+            return acceptJoin(joined);
         });
+        return awaitAdmission(attempt);
+    }
+    private RoomSnapshot acceptJoin(RoomJoinReply joined) {
+        self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null; reopenIntent = null; pin = "";
+        publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
+    }
+    private CompletableFuture<RoomSnapshot> awaitAdmission(CompletableFuture<RoomSnapshot> attempt) {
         return attempt.handle((value, failure) -> {
             if (failure == null) return CompletableFuture.completedFuture(value);
             Throwable cause = failure;
@@ -164,7 +169,8 @@ public final class MeetingSession implements AutoCloseable {
             if (cause instanceof SignalException signal && "APPROVAL_PENDING".equals(signal.code()) && !closed.get()) {
                 publish(State.CONNECTED, "Đang chờ chủ phòng duyệt. Bạn có thể hủy yêu cầu.");
                 return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS))
-                        .thenCompose(ignored -> join(mic, camera));
+                        .thenCompose(ignored -> awaitAdmission(submit(() -> acceptJoin(decode(command("ADMISSION_STATUS",
+                                Objects.requireNonNull(preview, "ROOM_REQUIRED").roomId(), new JsonObject(), UUID.randomUUID().toString()), "join", RoomJoinReply.class)))));
             }
             return CompletableFuture.<RoomSnapshot>failedFuture(cause);
         }).thenCompose(value -> value);
@@ -232,6 +238,15 @@ public final class MeetingSession implements AutoCloseable {
             return null;
         });
     }
+    public CompletableFuture<Void> leave(String successorParticipantId, boolean closeRoom) {
+        return submit(() -> {
+            JsonObject body = new JsonObject(); body.addProperty("closeRoom", closeRoom);
+            if (successorParticipantId != null) body.addProperty("successorParticipantId", successorParticipantId);
+            command("LEAVE_ROOM", requireRoom().roomId(), body, UUID.randomUUID().toString());
+            closeVideo(); snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0;
+            closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); return null;
+        });
+    }
     private RoomSnapshot requireRoom() throws SignalException { if (snapshot == null) throw new SignalException("ROOM_REQUIRED"); return snapshot; }
     private void connect() throws Exception {
         if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
@@ -250,7 +265,11 @@ public final class MeetingSession implements AutoCloseable {
         connect();
         long started = System.nanoTime();
         try { return client.request(type, roomId, body, requestId).get(16, TimeUnit.SECONDS); }
-        catch (ExecutionException failure) { if (failure.getCause() instanceof Exception cause) throw cause; throw failure; }
+        catch (ExecutionException failure) {
+            if (failure.getCause() instanceof SignalException signal && "UNKNOWN_OPERATION".equals(signal.code()) && "ADMISSION_STATUS".equals(type))
+                throw new SignalException("SERVER_UPDATE_REQUIRED");
+            if (failure.getCause() instanceof Exception cause) throw cause; throw failure;
+        }
         finally { common.diagnostics.Diagnostics.current().event("signaling.client.request", java.util.Map.of(
                 "action", type, "signaling_round_trip_ms", (System.nanoTime() - started) / 1_000_000.0)); }
     }

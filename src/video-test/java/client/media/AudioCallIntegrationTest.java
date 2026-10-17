@@ -99,11 +99,17 @@ public class AudioCallIntegrationTest {
                 }
                 var guest=clients.get(1); var guestVideo=videos.get(1);
                 guestVideo.startInput(() -> new VideoCallIntegrationTest.GeneratedCamera(1)).get(20,TimeUnit.SECONDS);
+                // SDP completion precedes the first RTP frame; verify the camera is actually
+                // being received before checking that stopping audio preserves that camera.
+                var receivedCamera = videos.getFirst().frames(guest.selfParticipantId());
+                await(() -> receivedCamera.receivedFrames() >= 3);
                 await(() -> guest.snapshot().participants().stream().filter(p -> p.participantId().equals(guest.selfParticipantId())).anyMatch(p -> p.mediaState().audioPublishing()));
+                long cameraFrames = receivedCamera.receivedFrames();
                 host.stopPublish(guest.selfParticipantId(),"AUDIO").get(10,TimeUnit.SECONDS);
                 await(() -> !guestVideo.audio().requestedProperty().get());
                 JsonObject camera=host.videoRequest("VIDEO_STATE",new JsonObject(),UUID.randomUUID().toString()).get(10,TimeUnit.SECONDS);
                 assertTrue(camera.getAsJsonObject("sources").has(guest.selfParticipantId()),"Host mic stop must preserve the camera");
+                await(() -> receivedCamera.receivedFrames() > cameraFrames + 3);
                 FxTestRuntime.call(() -> {
                     CompletableFuture<Void> last=null;for(int i=0;i<100;i++) last=guestVideo.audio().toggle();return last;
                 }).get(25,TimeUnit.SECONDS);

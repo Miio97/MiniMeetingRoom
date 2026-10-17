@@ -609,7 +609,7 @@ class DucAuthFlowTest {
             checkboxes.stream().filter(box -> "Khóa phòng".equals(box.getText())).findFirst().orElseThrow().fire();
             checkboxes.stream().filter(box -> "Duyệt thành viên trước khi vào".equals(box.getText())).findFirst().orElseThrow().fire();
             assertEquals(List.of("locked=true", "approval=true"), commands);
-            assertTrue(nodes(content).filter(Button.class::isInstance).map(Button.class::cast).anyMatch(button -> "Đóng phòng".equals(button.getText())));
+            assertTrue(nodes(content).filter(Button.class::isInstance).map(Button.class::cast).noneMatch(button -> "Đóng phòng".equals(button.getText())));
             var memberSettings = new client.UI.dialogs.DeviceSettingsDialog(stage);
             assertFalse(nodes(memberSettings.getDialogPane().getContent()).filter(javafx.scene.control.CheckBox.class::isInstance)
                     .map(javafx.scene.control.CheckBox.class::cast).anyMatch(box -> "Khóa phòng".equals(box.getText())));
