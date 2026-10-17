@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class SettingsScreen extends BorderPane {
+    private final AccountSettingsPane accountPane;
     private final client.media.VideoCallController cameraOwner = new client.media.VideoCallController(
             (type, body, id) -> java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("NO_ROOM")), () -> null, () -> null);
     private final CameraControls cameras = new CameraControls(cameraOwner, true, null, true);
@@ -57,19 +58,14 @@ public final class SettingsScreen extends BorderPane {
         notifications.getChildren().add(Ui.field("Giao diện", client.UI.ThemeManager.selector()));
         notifications.getChildren().addAll(toggle(manager, "notification", "Âm thanh thông báo", true), toggle(manager, "muteMic", "Tự tắt mic khi vào phòng", false),
             toggle(manager, "muteCamera", "Tự tắt camera khi vào phòng", false), Ui.field("Chất lượng video tối đa", device(manager, "quality", List.of("360p", "720p", "Tự động"))));
-        VBox profile = card();
-        TextField username = new TextField(manager.username()), name = new TextField(manager.user()), email = new TextField(manager.email());
-        username.setEditable(false); name.setEditable(false); email.setEditable(false);
-        Button password = Ui.button("Đổi mật khẩu", "secondary", () -> { }); password.setDisable(true);
-        Button save = Ui.button("Lưu thay đổi", "primary", () -> { }); save.setDisable(true);
-        profile.getChildren().addAll(Ui.field("Tên đăng nhập", username), Ui.field("Tên hiển thị", name), Ui.field("Email", email),
-            Ui.row(12, password, save), Ui.label("Thông tin từ tài khoản đã đăng nhập. Chỉnh sửa hồ sơ và đổi mật khẩu sẽ được bổ sung sau.", "caption"));
-        tabs.getTabs().addAll(new Tab("Thiết bị", Ui.scroll(devices)), new Tab("Giao diện & thông báo", Ui.scroll(notifications)), new Tab("Tài khoản", Ui.scroll(profile)));
+        accountPane = new AccountSettingsPane(manager, () -> setLeft(new Sidebar(manager, "settings")));
+        VBox.setMargin(accountPane, new Insets(18, 0, 0, 0));
+        tabs.getTabs().addAll(new Tab("Thiết bị", Ui.scroll(devices)), new Tab("Giao diện & thông báo", Ui.scroll(notifications)), new Tab("Tài khoản", Ui.scroll(accountPane)));
         if (account) tabs.getSelectionModel().select(2);
         VBox.setVgrow(tabs, Priority.ALWAYS); main.getChildren().addAll(Ui.label("Cài đặt", "title"), Ui.label("Thiết lập trải nghiệm họp theo cách của bạn.", "muted"), tabs); setCenter(main);
     }
     private VBox card() { VBox box = new VBox(20); box.getStyleClass().add("card"); VBox.setMargin(box, new Insets(18, 0, 0, 0)); box.setMaxWidth(Double.MAX_VALUE); return box; }
-    public void dispose() { disposed = true; microphoneTestToken++; speakerTestToken++; audioTester.close(); cameras.dispose(); cameraOwner.close(); }
+    public void dispose() { disposed = true; accountPane.dispose(); microphoneTestToken++; speakerTestToken++; audioTester.close(); cameras.dispose(); cameraOwner.close(); }
 
     private void toggleMicrophoneTest() {
         if (microphoneTesting) { stopMicrophoneTest(); return; }

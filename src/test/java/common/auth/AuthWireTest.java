@@ -18,6 +18,21 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class AuthWireTest {
+    @Test void verificationStateComesFromSnapshotAndDefaultsToFalseForLegacyResponses() throws IOException {
+        AuthUser legacy = AuthWire.read(input(frame(
+                "{\"id\":7,\"username\":\"user\",\"displayName\":\"Name\",\"email\":\"user@example.com\"}"
+                        .getBytes(StandardCharsets.UTF_8))), AuthUser.class);
+        assertFalse(legacy.emailVerified());
+        AuthUser verified = new AuthUser(7, "user", "Name", "user@example.com", true);
+        assertTrue(AuthWire.read(input(encode(verified)), AuthUser.class).emailVerified());
+        assertFalse(new AuthUser(7, "user", "Name", null, true).emailVerified());
+    }
+    @Test void passwordChangeRoundTripsWithoutExposingSecretsInToString() throws IOException {
+        AuthRequest request = new AuthRequest("CHANGE_PASSWORD", null, "Old-password-123!", null, null,
+                "private-token", null, "New-password-456!");
+        assertEquals(request, AuthWire.read(input(encode(request)), AuthRequest.class));
+        assertEquals("AuthRequest[action=CHANGE_PASSWORD]", request.toString());
+    }
     @Test
     void preservesVietnameseAndUsesUtf8ByteLength() throws IOException {
         AuthRequest request = new AuthRequest("REGISTER", "khoa", "bí_mật_🔐",

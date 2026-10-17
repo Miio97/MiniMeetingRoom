@@ -311,6 +311,168 @@ class AuthFlowTest {
         fx(() -> { assertFalse(manager.isRoomJoined()); assertNull(manager.roomInfo()); assertNull(manager.sessionToken()); return null; });
     }
 
+    @Test void accountSettingsSavesAllFieldsUpdatesSidebarAndPreservesSession() throws Exception {
+        AuthClient client = accountClient();
+        var login = accountLogin(client);
+        fx(() -> {
+            manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
+            assertTrue(node("account-username", TextField.class).isEditable());
+            assertTrue(node("account-forgot-password", Button.class).isDisabled());
+            assertTrue(node("account-verify-email", Button.class).isDisabled());
+            assertTrue(node("account-change-password", Button.class).isVisible());
+            assertTrue(node("account-change-password", Button.class).isManaged());
+            assertTrue(node("account-change-password", Button.class).isDisabled());
+            node("account-username", TextField.class).setText("NewLogin");
+            node("account-display-name", TextField.class).setText("Tên mới 日本語");
+            node("account-email", TextField.class).setText("updated@example.com");
+            node("account-save", Button.class).fire(); node("account-save", Button.class).fire();
+            assertTrue(node("account-save", Button.class).isDisabled()); return null;
+        });
+        awaitFx(() -> "NewLogin".equals(manager.username()) && !node("account-save", Button.class).isDisabled());
+        fx(() -> {
+            assertEquals("Tên mới 日本語", manager.user()); assertEquals("updated@example.com", manager.email());
+            assertEquals(login.token(), manager.sessionToken());
+            assertTrue(hasLabel("Đã lưu thông tin tài khoản."));
+            assertTrue(node("account-change-password", Button.class).isVisible());
+            assertTrue(node("account-change-password", Button.class).isDisabled());
+            assertTrue(nodes(root()).filter(Label.class::isInstance).map(Label.class::cast)
+                    .anyMatch(label -> label.getStyleClass().contains("user-name") && "Tên mới 日本語".equals(label.getText())));
+            return null;
+        });
+        assertEquals(1, actions.stream().filter("UPDATE_PROFILE"::equals).count());
+        assertEquals("INVALID_CREDENTIALS", client.login("AccountUser", PASSWORD).code());
+        assertEquals("updated@example.com", client.login("NewLogin", PASSWORD).user().email());
+        snapshotAccount();
+    }
+
+    @Test void accountSettingsReportsValidationAndDuplicatesAndAllowsRetry() throws Exception {
+        AuthClient client = accountClient(); var login = accountLogin(client);
+        assertTrue(client.register("TakenUser", "Taken", "taken@example.com", PASSWORD).success());
+        fx(() -> {
+            manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
+            node("account-username", TextField.class).setText("bad name"); node("account-save", Button.class).fire();
+            assertTrue(hasLabel("Tên đăng nhập không được chứa khoảng trắng."));
+            assertFalse(node("account-save", Button.class).isDisabled());
+            node("account-username", TextField.class).setText("TakenUser"); node("account-save", Button.class).fire(); return null;
+        });
+        awaitFx(() -> hasLabel("Tên đăng nhập đã được sử dụng."));
+        fx(() -> {
+            assertEquals("AccountUser", manager.username());
+            node("account-username", TextField.class).setText("AccountUser");
+            node("account-email", TextField.class).setText("taken@example.com"); node("account-save", Button.class).fire(); return null;
+        });
+        awaitFx(() -> hasLabel("Email đã được sử dụng."));
+        fx(() -> { node("account-email", TextField.class).clear(); node("account-save", Button.class).fire(); return null; });
+        awaitFx(() -> hasLabel("Đã lưu thông tin tài khoản."));
+        assertEquals("", fx(manager::email));
+    }
+
+    @Test void passwordDialogValidatesConfirmationHandlesWrongPasswordAndChangesCredentials() throws Exception {
+        AuthClient client = accountClient(); var login = accountLogin(client);
+        var another = client.login("AccountUser", PASSWORD);
+        var dialog = fx(() -> {
+            // A trusted verified snapshot models the future OTP result; production never grants it locally.
+            var user = login.user();
+            manager.acceptSession(AuthResponse.ok(login.message(), new common.auth.AuthUser(user.id(), user.username(),
+                    user.displayName(), user.email(), true), login.token(), login.expiresAt()));
+            return new client.UI.dialogs.ChangePasswordDialog(manager);
+        });
+        String next = "New-password-456!";
+        try {
+            fx(() -> {
+                ((PasswordField) dialog.getDialogPane().lookup("#password-current")).setText(PASSWORD);
+                ((PasswordField) dialog.getDialogPane().lookup("#password-new")).setText(next);
+                ((PasswordField) dialog.getDialogPane().lookup("#password-confirm")).setText("mismatch");
+                passwordSubmit(dialog).fire();
+                assertEquals("Mật khẩu xác nhận chưa khớp.", ((Label) dialog.getDialogPane().lookup("#password-status")).getText());
+                assertFalse(actions.contains("CHANGE_PASSWORD"));
+                ((PasswordField) dialog.getDialogPane().lookup("#password-current")).setText("Wrong-password-123!");
+                ((PasswordField) dialog.getDialogPane().lookup("#password-confirm")).setText(next);
+                passwordSubmit(dialog).fire(); return null;
+            });
+            awaitFx(() -> "Mật khẩu hiện tại không đúng.".equals(((Label) dialog.getDialogPane().lookup("#password-status")).getText()));
+            fx(() -> {
+                assertEquals("", ((PasswordField) dialog.getDialogPane().lookup("#password-current")).getText());
+                ((PasswordField) dialog.getDialogPane().lookup("#password-current")).setText(PASSWORD);
+                passwordSubmit(dialog).fire(); return null;
+            });
+            awaitFx(() -> ((Label) dialog.getDialogPane().lookup("#password-status")).getText().startsWith("Đã đổi mật khẩu."));
+            fx(() -> {
+                for (String id : List.of("password-current", "password-new", "password-confirm"))
+                    assertEquals("", ((PasswordField) dialog.getDialogPane().lookup("#" + id)).getText());
+                assertTrue(passwordSubmit(dialog).isDisabled());
+                assertEquals(login.token(), manager.sessionToken()); return null;
+            });
+            assertEquals("INVALID_CREDENTIALS", client.login("AccountUser", PASSWORD).code());
+            assertTrue(client.login("AccountUser", next).success());
+            assertEquals("SESSION_EXPIRED", client.updateProfile(another.token(), "AccountUser", "Rejected", null).code());
+            assertTrue(client.updateProfile(login.token(), "AccountUser", "Accepted", null).success());
+        } finally { fx(() -> { dialog.close(); return null; }); }
+    }
+
+    @Test void expiredAccountSessionReturnsToLoginAndForgotPasswordRemainsInactive() throws Exception {
+        AuthClient client = accountClient(); var login = accountLogin(client);
+        fx(() -> { manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout(); return null; });
+        assertTrue(client.logout(login.token()).success());
+        fx(() -> { node("account-save", Button.class).fire(); return null; });
+        awaitFx(() -> root() instanceof AuthScreen);
+        fx(() -> {
+            assertNull(manager.sessionToken());
+            root().applyCss(); root().layout();
+            assertTrue(node("login-forgot-password", Button.class).isDisabled());
+            node("login-forgot-password", Button.class).fire(); assertTrue(root() instanceof AuthScreen); return null;
+        });
+    }
+
+    @Test void passwordButtonStaysVisibleAndIsDisabledUntilEmailIsVerified() throws Exception {
+        var login = accountLogin(accountClient());
+        fx(() -> {
+            manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
+            Button password = node("account-change-password", Button.class);
+            Button otp = node("account-verify-email", Button.class);
+            assertTrue(otp.isVisible()); assertTrue(otp.isDisabled());
+            assertSame(node("account-email", TextField.class).getParent(), otp.getParent());
+            assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertTrue(password.isDisabled());
+            otp.fire(); password.fire();
+            assertFalse(manager.emailVerified()); assertFalse(actions.contains("CHANGE_PASSWORD"));
+
+            var user = login.user();
+            manager.updateAccount(new common.auth.AuthUser(user.id(), user.username(), user.displayName(), user.email(), true));
+            assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertFalse(password.isDisabled());
+            node("account-email", TextField.class).setText("new@example.com");
+            assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertTrue(password.isDisabled());
+            node("account-email", TextField.class).setText(user.email());
+            assertTrue(password.isVisible()); assertFalse(password.isDisabled());
+            manager.updateAccount(user);
+            assertTrue(password.isVisible()); assertTrue(password.isDisabled());
+            return null;
+        });
+    }
+
+    private AuthClient accountClient() { return new AuthClient("localhost", server.port(), clientTls, 5000); }
+    private Button passwordSubmit(client.UI.dialogs.ChangePasswordDialog dialog) {
+        return (Button) dialog.getDialogPane().lookupButton(dialog.getDialogPane().getButtonTypes().getFirst());
+    }
+    private AuthResponse accountLogin(AuthClient client) throws Exception {
+        registrationRelease.countDown();
+        assertTrue(client.register("AccountUser", "Tên ban đầu", "account@example.com", PASSWORD).success());
+        return client.login("AccountUser", PASSWORD);
+    }
+    private <T extends Node> T node(String id, Class<T> type) {
+        return type.cast(nodes(root()).filter(node -> id.equals(node.getId())).findFirst()
+                .orElseThrow(() -> new AssertionError("Missing node: " + id)));
+    }
+    private void snapshotAccount() throws Exception {
+        WritableImage image = fx(() -> {
+            Parent view = root(); view.resize(1280, 800); view.setOpacity(1); view.applyCss(); view.layout();
+            return view.snapshot(new SnapshotParameters(), null);
+        });
+        BufferedImage png = new BufferedImage((int) image.getWidth(), (int) image.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < png.getHeight(); y++) for (int x = 0; x < png.getWidth(); x++) png.setRGB(x, y, image.getPixelReader().getArgb(x, y));
+        Path output = Path.of("target", "qa", "account-settings.png"); Files.createDirectories(output.getParent());
+        assertTrue(ImageIO.write(png, "png", output.toFile()));
+    }
+
     private void createRoomTables() throws Exception {
         String schema = Files.readString(Path.of("database/schema.sql"))
                 .replaceAll("(?m)^\\s*--.*$", "")
