@@ -43,8 +43,13 @@ public final class VideoServiceProcess implements AutoCloseable {
         String secret = keys.getProperty("control.key", "");
         if (!secret.matches("[A-Za-z0-9_-]{43}")) throw new IllegalStateException("VIDEO_PRIVATE_CONFIG_INVALID");
         int port = ServerConfig.getInt("media.control.port", 8766);
+        int maxParticipants = Math.min(50, Math.max(2, ServerConfig.getInt("meeting.maxParticipants", 20)));
         ProcessBuilder builder = new ProcessBuilder(binary.toString()).directory(root.toFile());
-        builder.environment().put("MMR_MEDIA_CONTROL_SECRET", secret); builder.environment().put("MMR_MEDIA_CONTROL_PORT", Integer.toString(port));
+        builder.environment().put("MMR_MEDIA_CONTROL_SECRET", secret);
+        builder.environment().put("MMR_MEDIA_CONTROL_PORT", Integer.toString(port));
+        builder.environment().put("MINIMEETING_MAX_PEERS", Integer.toString(maxParticipants));
+        builder.environment().put("MMR_MAX_PEERS", Integer.toString(maxParticipants));
+        builder.environment().put("MMR_MAX_PARTICIPANTS", Integer.toString(maxParticipants));
         for (String key : List.of("MMR_DB_URL", "MMR_DB_USER", "MMR_DB_PASSWORD", "MMR_AUTH_KEYSTORE_PASSWORD")) builder.environment().remove(key);
         builder.redirectOutput(ProcessBuilder.Redirect.DISCARD); builder.redirectError(ProcessBuilder.Redirect.DISCARD);
         Process process = builder.start();

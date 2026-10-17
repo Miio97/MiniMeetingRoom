@@ -57,6 +57,8 @@ class UnifiedRoomCompatibilityTest {
                         return handler.handle(connection, request);
                     }
                     public void disconnected(SignalingServer.Connection connection, String reason) { handler.disconnected(connection, reason); }
+                    public void validated(SignalingServer.Connection connection) { handler.validated(connection); }
+                    public void bindServer(SignalingServer server) { handler.bindServer(server); }
                 }, rooms.serverEpoch(), SignalingServer.Options.defaults()); signal.set(signaling); signaling.start();
         collaboration = new AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0), request -> common.auth.AuthResponse.error("INVALID_REQUEST", "Unsupported"), rooms);
         collaboration.start(); transport = new AuthClient("localhost", collaboration.port(), tls.client(), 5000);
@@ -74,13 +76,22 @@ class UnifiedRoomCompatibilityTest {
     @Test void chosenSuccessorRatherThanEarliestJoinerKeepsRoomAndFileRightsUntilExplicitClose() throws Exception {
         var host = database.account("choiceHost", "Host"); var early = database.account("choiceEarly", "Early"); var chosen = database.account("choiceChosen", "Chosen");
         var a = session(host); var b = session(early); var c = session(chosen);
+        var cleared = new java.util.concurrent.atomic.AtomicInteger();
+        var received = new java.util.concurrent.atomic.AtomicInteger();
+        a.addChatListener(new MeetingSession.ChatListener() {
+            public void onChatMessage(common.chat.ChatMessage message) { received.incrementAndGet(); }
+            public void onChatCleared() { cleared.incrementAndGet(); }
+        });
         a.create(new CreateRoomParams("Chosen host", "1234", 4, false)).get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);
         String code = a.snapshot().joinCode(); long id = a.snapshot().collaborationRoom().id();
         b.lookup(code, "1234").get(10, TimeUnit.SECONDS); b.join(false, false).get(10, TimeUnit.SECONDS);
         c.lookup(code, "1234").get(10, TimeUnit.SECONDS); c.join(false, false).get(10, TimeUnit.SECONDS);
+        a.sendChat("Chat before explicit host transfer").get(10, TimeUnit.SECONDS); waitFor(() -> received.get() == 1);
         var failed = assertThrows(ExecutionException.class, () -> a.leave("missing", false).get(10, TimeUnit.SECONDS));
         assertEquals("PARTICIPANT_NOT_FOUND", ((common.signaling.SignalException) failed.getCause()).code()); assertTrue(a.isHost());
+        assertEquals(0, cleared.get(), "Rejected host departure must preserve the chat");
         a.leave(c.selfParticipantId(), false).get(10, TimeUnit.SECONDS); waitFor(c::isHost); assertFalse(b.isHost());
+        assertEquals(1, cleared.get(), "Explicit host departure must clear chat as the new chat transport expects");
         var files = new FileMetadataRepository(database::connection); files.authorize(early.user().id(), id); files.authorize(chosen.user().id(), id);
         assertThrows(common.filetransfer.TransferException.class, () -> files.authorize(host.user().id(), id));
         assertTrue(transport.chat(ChatRequest.send(chosen.token(), id, c.selfParticipantId(), "new host can chat")).success());

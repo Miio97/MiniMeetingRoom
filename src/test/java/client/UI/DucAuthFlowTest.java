@@ -487,8 +487,6 @@ class DucAuthFlowTest {
                 }
                 assertFalse(((Label) pane.lookup("#network-latency")).getText().equals("--"));
                 assertFalse(dialog.getHeaderText().contains("Mô phỏng"));
-                var chart = (javafx.scene.chart.LineChart<?, ?>) pane.lookup("#network-chart");
-                assertFalse(chart.getData().isEmpty());
                 WritableImage dark = pane.snapshot(new SnapshotParameters(), null);
                 ThemeManager.setLight(true); pane.applyCss(); pane.layout();
                 return List.of(dark, pane.snapshot(new SnapshotParameters(), null));
@@ -505,8 +503,6 @@ class DucAuthFlowTest {
         WritableImage delayed = fx(() -> {
             meeting.refreshNetwork(); assertTrue(((Button) root().lookup("#network-badge")).getText().contains("Yếu"));
             dialog.refresh(); var pane = dialog.getDialogPane(); pane.applyCss(); pane.layout();
-            var chart = (javafx.scene.chart.LineChart<?, ?>) pane.lookup("#network-chart");
-            assertTrue(((javafx.scene.chart.NumberAxis) chart.getYAxis()).getUpperBound() >= 200, "Slow responses must not be clipped at the old 100ms chart maximum");
             return pane.snapshot(new SnapshotParameters(), null);
         });
         writeSnapshot(delayed, "network-real-slow.png");

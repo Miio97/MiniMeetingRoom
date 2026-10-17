@@ -447,7 +447,13 @@ public final class SceneManager {
         return sfuSession;
     }
     public boolean hasVideoRoom() { return usingSfuRoom && sfuSession != null && sfuSession.snapshot() != null; }
-    public int maxRoomCapacity() { return meetingFactory == null ? common.room.RoomValidation.MAX_CAPACITY : 16; }
+    public int maxRoomCapacity() {
+        if (sfuSession != null) {
+            int cap = sfuSession.maxRoomCapacity();
+            if (cap > 0) return Math.min(50, cap);
+        }
+        return meetingFactory == null ? common.room.RoomValidation.MAX_CAPACITY : 20;
+    }
     public boolean usesSignalingRooms() { return meetingFactory != null; }
     public void cancelAdmission() { closeSfuSession(); }
     private void closeSfuSession() {

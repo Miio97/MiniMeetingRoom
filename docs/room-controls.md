@@ -1,5 +1,13 @@
 # Cập nhật điều khiển phòng — 17/10/2026
 
+## Ghép code chat và thống kê mạng
+
+Bản ghép giữ tab Chờ duyệt, thời hạn 5 phút, Cài đặt chung, lựa chọn host kế nhiệm/đóng phòng, icon mắt và snapshot giao diện nhất quán. Đồng thời nhận chat qua signaling, thống kê mạng WebRTC/TLS trên thanh trên và giới hạn phòng theo cấu hình mới (mặc định 20, tối đa 50) từ đồng đội. Không đưa lại cửa sổ quản lý phòng riêng hoặc các dòng trạng thái kỹ thuật dư.
+
+Theo lựa chọn của người dùng khi xử lý conflict, giữ chính sách xóa vĩnh viễn chat văn bản/hệ thống sau khi phòng đóng 20 phút. Tin nhắn đính kèm vẫn do chính sách truyền tệp quản lý. Luồng host chọn kế nhiệm và rời phòng cũng dọn chat của client khi rời thành công; chuyển quyền bị từ chối không làm mất chat.
+
+Kiểm thử bản ghép: `mvn test` chạy 370 tests, 0 failures/errors, 2 skipped (`target/merge-regression.txt`); bộ native video/audio/screen và phòng thống nhất chạy 18/18 PASS (`target/merge-media-integration.txt`); `go test ./...` PASS (`target/merge-go-tests.txt`). SFU dùng binary thử `target/mmr-merge-video.exe`, không thay binary của server đang chạy. Test mới xác nhận chat signaling hoạt động trước khi chuyển host, chỉ dọn chat sau khi rời thành công.
+
 ## Sảnh tự cập nhật
 
 Danh sách phòng gần đây tự đọc lại khoảng 2 giây/lần khi đang ở sảnh. Đây là polling tự động, không phải push trên signaling. Chỉ giữ một yêu cầu danh sách đang chạy; kết quả không đổi không dựng lại các hàng. Không xóa mã phòng/PIN đang nhập. Rời sảnh dừng timer. Nút Làm mới vẫn dùng được; cache hiển thị ngay khi quay lại sảnh rồi được cập nhật trong chu kỳ kế tiếp.

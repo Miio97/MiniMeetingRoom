@@ -33,7 +33,13 @@ public final class VideoCallController implements AutoCloseable {
             Thread.ofPlatform().daemon().name("camera-discovery").factory());
     private final Set<CompletableFuture<?>> jobs = ConcurrentHashMap.newKeySet();
     private final Map<String, VideoFrameMailbox> frames = new ConcurrentHashMap<>();
-    private final Map<String, Subscription> subscriptions = new HashMap<>();
+    private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService statsSampler = Executors.newSingleThreadScheduledExecutor(
+            Thread.ofPlatform().daemon().name("video-stats-sampler").factory());
+    private final NetworkStatsCalculator statsCalculator = new NetworkStatsCalculator();
+    private final ReadOnlyObjectWrapper<NetworkStatsCalculator.CalculatedSample> latestStats = new ReadOnlyObjectWrapper<>();
+    public ReadOnlyObjectProperty<NetworkStatsCalculator.CalculatedSample> statsProperty() { return latestStats.getReadOnlyProperty(); }
+    public NetworkStatsCalculator.CalculatedSample latestStats() { return latestStats.get(); }
     private final ReadOnlyStringWrapper status = new ReadOnlyStringWrapper("Camera đang tắt.");
     private final ReadOnlyBooleanWrapper publishing = new ReadOnlyBooleanWrapper();
     private final ReadOnlyBooleanWrapper cameraRequested = new ReadOnlyBooleanWrapper(), cameraPending = new ReadOnlyBooleanWrapper();
@@ -69,6 +75,7 @@ public final class VideoCallController implements AutoCloseable {
             if (closed.get() || room.get() == null || !polling.compareAndSet(false, true)) return;
             submit(() -> { synchronize(); return null; }).whenComplete((value, failure) -> polling.set(false));
         }, 1, 2, TimeUnit.SECONDS);
+        statsSampler.scheduleWithFixedDelay(this::sampleNetworkStats, 1, 1, TimeUnit.SECONDS);
     }
     public ReadOnlyStringProperty statusProperty() { return status.getReadOnlyProperty(); }
     public ReadOnlyBooleanProperty publishingProperty() { return publishing.getReadOnlyProperty(); }
@@ -282,8 +289,124 @@ public final class VideoCallController implements AutoCloseable {
             if (latestStatus.get() != null) show(latestStatus.get());
         });
     }
+
+    private void sampleNetworkStats() {
+        if (closed.get() || room.get() == null || self.get() == null) return;
+        try {
+            Double rttSeconds = null;
+            Double maxJitterSeconds = null;
+            Long packetsLost = null;
+            Long packetsReceived = null;
+            Long bytesSent = null;
+            Long framesSent = null;
+            Integer width = null;
+            Integer height = null;
+
+            NativeVideoSession.Peer pub = publisher;
+            if (pub != null) {
+                dev.onvoid.webrtc.RTCStatsReport pubReport = pub.stats(500);
+                if (pubReport != null) {
+                    for (dev.onvoid.webrtc.RTCStats stat : pubReport.getStats().values()) {
+                        if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.CANDIDATE_PAIR) {
+                            Object rttObj = stat.getAttributes().get("currentRoundTripTime");
+                            if (rttObj instanceof Number num) {
+                                double val = num.doubleValue();
+                                if (val >= 0 && (rttSeconds == null || val < rttSeconds)) rttSeconds = val;
+                            }
+                        } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.REMOTE_INBOUND_RTP) {
+                            Object rttObj = stat.getAttributes().get("roundTripTime");
+                            if (rttObj instanceof Number num) {
+                                double val = num.doubleValue();
+                                if (val >= 0 && (rttSeconds == null || val < rttSeconds)) rttSeconds = val;
+                            }
+                        } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.OUTBOUND_RTP) {
+                            Object bytesObj = stat.getAttributes().get("bytesSent");
+                            if (bytesObj instanceof Number num) bytesSent = num.longValue();
+                            Object framesObj = stat.getAttributes().get("framesSent");
+                            if (framesObj == null) framesObj = stat.getAttributes().get("framesEncoded");
+                            if (framesObj instanceof Number num) framesSent = num.longValue();
+                            Object wObj = stat.getAttributes().get("frameWidth");
+                            if (wObj instanceof Number num) width = num.intValue();
+                            Object hObj = stat.getAttributes().get("frameHeight");
+                            if (hObj instanceof Number num) height = num.intValue();
+                        } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.MEDIA_SOURCE) {
+                            if (width == null) {
+                                Object wObj = stat.getAttributes().get("width");
+                                if (wObj instanceof Number num) width = num.intValue();
+                            }
+                            if (height == null) {
+                                Object hObj = stat.getAttributes().get("height");
+                                if (hObj instanceof Number num) height = num.intValue();
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (Subscription sub : subscriptions.values()) {
+                dev.onvoid.webrtc.RTCStatsReport subReport = sub.peer().stats(500);
+                if (subReport == null) continue;
+                for (dev.onvoid.webrtc.RTCStats stat : subReport.getStats().values()) {
+                    if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.CANDIDATE_PAIR && rttSeconds == null) {
+                        Object rttObj = stat.getAttributes().get("currentRoundTripTime");
+                        if (rttObj instanceof Number num) {
+                            double val = num.doubleValue();
+                            if (val >= 0) rttSeconds = val;
+                        }
+                    } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.INBOUND_RTP) {
+                        Object jitterObj = stat.getAttributes().get("jitter");
+                        if (jitterObj instanceof Number num) {
+                            double j = num.doubleValue();
+                            if (j >= 0) maxJitterSeconds = maxJitterSeconds == null ? j : Math.max(maxJitterSeconds, j);
+                        }
+                        Object lostObj = stat.getAttributes().get("packetsLost");
+                        if (lostObj instanceof Number num) {
+                            packetsLost = (packetsLost == null ? 0L : packetsLost) + num.longValue();
+                        }
+                        Object recvObj = stat.getAttributes().get("packetsReceived");
+                        if (recvObj instanceof Number num) {
+                            packetsReceived = (packetsReceived == null ? 0L : packetsReceived) + num.longValue();
+                        }
+                    }
+                }
+            }
+
+            NetworkStatsCalculator.RawCounters raw = new NetworkStatsCalculator.RawCounters(
+                    System.nanoTime(), rttSeconds, maxJitterSeconds,
+                    packetsLost, packetsReceived, bytesSent, framesSent, width, height
+            );
+            NetworkStatsCalculator.CalculatedSample sample = statsCalculator.process(raw);
+            if (!closed.get()) {
+                try {
+                    Platform.runLater(() -> latestStats.set(sample));
+                } catch (IllegalStateException ignored) {
+                    latestStats.set(sample);
+                }
+            }
+            if (sample.isEmpty() || closed.get()) return;
+
+            JsonObject body = new JsonObject();
+            if (sample.rttMs() != null) body.addProperty("rtt", sample.rttMs());
+            if (sample.jitterMs() != null) body.addProperty("jitter", sample.jitterMs());
+            if (sample.lossPct() != null) body.addProperty("loss", sample.lossPct());
+            if (sample.bitrateKbps() != null) body.addProperty("bitrate", sample.bitrateKbps());
+            if (sample.fps() != null) body.addProperty("fps", sample.fps());
+            if (sample.width() != null) body.addProperty("width", sample.width());
+            if (sample.height() != null) body.addProperty("height", sample.height());
+
+            signaling.request("NETWORK_STATS", body, UUID.randomUUID().toString());
+        } catch (Exception ignored) {
+        }
+    }
+
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
+        statsSampler.shutdownNow();
+        try {
+            Platform.runLater(() -> latestStats.set(null));
+        } catch (IllegalStateException ignored) {
+            latestStats.set(null);
+        }
         cameraSwitch.close(); audio.close(); screen.close(); formatCache.clear(); knownCameras = List.of();
         timer.shutdownNow(); worker.shutdownNow(); preferences.shutdownNow(); discovery.shutdownNow(); frames.values().forEach(VideoFrameMailbox::close);
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();

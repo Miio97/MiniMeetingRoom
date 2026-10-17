@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"net/http/httptest"
@@ -260,4 +261,52 @@ func realFanout(t *testing.T, kind string) {
 	if count != 0 {
 		t.Fatal("camera stop left a track/subscription")
 	}
+}
+
+func TestEngineConfigurableCapacity(t *testing.T) {
+	t.Setenv("MINIMEETING_MAX_PEERS", "50")
+	t.Setenv("MMR_MEDIA_MAX_LEASES", "256")
+	t.Setenv("MMR_MEDIA_SLOTS", "128")
+	t.Setenv("MMR_MEDIA_PORT_MIN", "50000")
+	t.Setenv("MMR_MEDIA_PORT_MAX", "50100")
+
+	e, err := newEngine(testKey)
+	if err != nil {
+		t.Fatalf("failed to init engine with config: %v", err)
+	}
+	defer e.close()
+
+	if e.maxPeers != 5000 {
+		t.Fatalf("expected maxPeers=5000, got %d", e.maxPeers)
+	}
+	if e.maxLeases != 256 {
+		t.Fatalf("expected maxLeases=256, got %d", e.maxLeases)
+	}
+	if cap(e.slots) != 128 {
+		t.Fatalf("expected slots cap=128, got %d", cap(e.slots))
+	}
+
+	// Verify adding multiple leases up to 50 works without panic or leak
+	for i := 1; i <= 50; i++ {
+		pId := fmt.Sprintf("p-%d", i)
+		control(t, e, controlRequest{Operation: "renew", Room: "room-50", Participant: pId, Generation: 1, TTLMillis: 5000})
+	}
+
+	e.mu.Lock()
+	if len(e.leases) != 50 {
+		t.Fatalf("expected 50 leases, got %d", len(e.leases))
+	}
+	e.mu.Unlock()
+
+	// Revoke some and verify no leak
+	for i := 1; i <= 25; i++ {
+		pId := fmt.Sprintf("p-%d", i)
+		control(t, e, controlRequest{Operation: "revoke", Room: "room-50", Participant: pId, Generation: 1})
+	}
+
+	e.mu.Lock()
+	if len(e.leases) != 25 {
+		t.Fatalf("expected 25 leases remaining, got %d", len(e.leases))
+	}
+	e.mu.Unlock()
 }

@@ -6,12 +6,10 @@ import client.network.NetworkMonitor;
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
-import javafx.scene.chart.*;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Window;
 import javafx.util.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -21,8 +19,6 @@ public final class NetworkStatsDialog extends Dialog<Void> {
     private final Timeline ticker;
     private final Label latency = value("latency"), jitter = value("jitter"), bitrate = value("bitrate");
     private final Label status = Ui.label("", "strong"), traffic = Ui.label("", "caption"), errors = Ui.label("", "caption");
-    private final NumberAxis x = new NumberAxis(0, 30, 5);
-    private final LineChart<Number, Number> chart;
 
     public NetworkStatsDialog(Window owner, NetworkMonitor monitor) {
         this.monitor = Objects.requireNonNull(monitor);
@@ -43,15 +39,11 @@ public final class NetworkStatsDialog extends Dialog<Void> {
             Label name = Ui.label(names[i], "eyebrow"); name.setWrapText(true);
             VBox cell = Ui.column(6, name, values[i]); cell.setMinWidth(0); metrics.add(cell, i % 3, i / 3);
         }
-        NumberAxis y = new NumberAxis(); y.setLabel("ms"); y.setForceZeroInRange(true);
-        x.setLabel("Thời gian (giây)"); x.setAutoRanging(false); x.setForceZeroInRange(false);
-        chart = new LineChart<>(x, y); chart.setId("network-chart"); chart.setLegendVisible(false);
-        chart.setCreateSymbols(false); chart.setAnimated(false); chart.setMinWidth(0); chart.setPrefSize(490, 200);
         status.setId("network-status"); traffic.setId("network-traffic"); errors.setId("network-errors");
         traffic.setWrapText(true); errors.setWrapText(true);
         Label unavailable = Ui.label("Packet loss: không khả dụng qua TCP. Chưa có luồng video để đo FPS và độ phân giải.", "caption");
         unavailable.setWrapText(true);
-        VBox content = Ui.column(16, metrics, Ui.row(12, Ui.label("Phản hồi máy chủ · 30 giây gần nhất", "strong"), Ui.spacer(), status), chart,
+        VBox content = Ui.column(16, metrics, Ui.row(12, Ui.label("Phản hồi máy chủ · 30 giây gần nhất", "strong"), Ui.spacer(), status),
                 Ui.column(6, traffic, errors, unavailable));
         content.setPrefWidth(490); getDialogPane().setContent(content);
         getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
@@ -83,16 +75,6 @@ public final class NetworkStatsDialog extends Dialog<Void> {
                 + " · Tổng: " + bytes(sample.bytesSent() + sample.bytesReceived()));
         errors.setText(sample.requests() == 0 ? "Chưa có yêu cầu hoàn tất."
                 : String.format(Locale.ROOT, "Yêu cầu lỗi: %d/%d (%.1f%%) · 30 giây gần nhất", sample.failures(), sample.requests(), sample.failurePercent()));
-        List<XYChart.Series<Number, Number>> segments = new ArrayList<>();
-        XYChart.Series<Number, Number> segment = null;
-        double previous = -1;
-        for (NetworkMonitor.Sample point : sample.history()) {
-            if (point.rttMillis() == null) { segment = null; continue; }
-            if (segment == null || point.second() - previous > 3) { segment = new XYChart.Series<>(); segments.add(segment); }
-            segment.getData().add(new XYChart.Data<>(point.second(), point.rttMillis())); previous = point.second();
-        }
-        chart.getData().setAll(segments);
-        x.setLowerBound(Math.max(0, sample.elapsedSeconds() - 30)); x.setUpperBound(Math.max(30, sample.elapsedSeconds()));
     }
     private static String rate(double bits) {
         if (bits >= 1_000_000) return String.format(Locale.ROOT, "%.1f Mbps", bits / 1_000_000);
