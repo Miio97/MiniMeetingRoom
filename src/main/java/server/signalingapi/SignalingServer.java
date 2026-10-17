@@ -35,15 +35,20 @@ public final class SignalingServer implements AutoCloseable {
         SignalMessage handle(Connection connection, SignalMessage request) throws Exception;
         void disconnected(Connection connection, String reason) throws Exception;
         default void validated(Connection connection) { }
+        default void bindServer(SignalingServer server) { }
     }
 
-    public record Options(int maxConnections, int maxFrameBytes, int requestsPerSecond) {
+    public record Options(int maxConnections, int maxFrameBytes, int requestsPerSecond, int maxParticipants) {
+        public Options(int maxConnections, int maxFrameBytes, int requestsPerSecond) {
+            this(maxConnections, maxFrameBytes, requestsPerSecond, 20);
+        }
         public Options {
             if (maxConnections < 1 || maxConnections > 512 || maxFrameBytes < 16384
-                    || maxFrameBytes > 1048576 || requestsPerSecond < 1 || requestsPerSecond > 100)
+                    || maxFrameBytes > 1048576 || requestsPerSecond < 1 || requestsPerSecond > 100
+                    || maxParticipants < 2 || maxParticipants > 50)
                 throw new IllegalArgumentException("SIGNALING_LIMITS");
         }
-        public static Options defaults() { return new Options(64, SignalWire.DEFAULT_MAX_BYTES, 20); }
+        public static Options defaults() { return new Options(256, SignalWire.DEFAULT_MAX_BYTES, 50, 20); }
     }
 
     private final SSLServerSocket listener;
@@ -80,6 +85,7 @@ public final class SignalingServer implements AutoCloseable {
     public SignalingServer(SSLContext tls, InetSocketAddress address, SessionValidator validator,
             Handler handler, String epoch, Options options) throws IOException {
         this.validator = validator; this.handler = handler; this.epoch = epoch; this.options = options;
+        if (handler != null) handler.bindServer(this);
         admission = new Semaphore(options.maxConnections());
         listener = (SSLServerSocket) tls.getServerSocketFactory().createServerSocket();
         try {
@@ -210,6 +216,7 @@ public final class SignalingServer implements AutoCloseable {
                 Thread.ofVirtual().name("meeting-writer").start(() -> writeLoop(output));
                 JsonObject body = new JsonObject(); body.addProperty("maxFrameBytes", options.maxFrameBytes());
                 body.addProperty("protocolVersion", 1);
+                body.addProperty("maxParticipants", options.maxParticipants());
                 send(message("SERVER_WELCOME", null, null, null, body));
                 while (!closed.get()) {
                     SignalMessage request = SignalWire.read(input, options.maxFrameBytes());
@@ -259,7 +266,13 @@ public final class SignalingServer implements AutoCloseable {
                                     JsonObject authenticated = new JsonObject();
                                     authenticated.addProperty("expiresAt", principal.expiresAt().toString());
                                     authenticated.addProperty("selfDisplayName", principal.displayName());
+                                    authenticated.addProperty("maxParticipants", options.maxParticipants());
                                     response = message("AUTHENTICATED", request.requestId(), null, null, authenticated);
+                                } else if ("NETWORK_STATS".equals(request.type())) {
+                                    if (principal == null || closed.get()) {
+                                        terminate("SESSION_INVALID"); throw new SignalException("SESSION_INVALID");
+                                    }
+                                    response = handler.handle(Connection.this, request);
                                 } else {
                                     Optional<SessionPrincipal> live = validator.validateHash(principal.tokenHash());
                                     if (live.isEmpty() || closed.get()) {
@@ -394,7 +407,8 @@ public final class SignalingServer implements AutoCloseable {
                     "SET_MEDIA_STATE", "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
                     "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
                     "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH",
-                    "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE" -> type;
+                    "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE",
+                    "CHAT_SEND", "CHAT_HISTORY", "NETWORK_STATS" -> type;
             default -> "OTHER";
         };
     }

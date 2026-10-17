@@ -331,3 +331,32 @@
     -fx-opacity: 1; -fx-background-color: -bg-elevated; -fx-text-fill: -text-disabled;
     -fx-border-color: -border; -fx-cursor: default;
 }
+
+.network-signal-button {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-padding: 4 8;
+    -fx-background-radius: 6;
+    -fx-cursor: hand;
+}
+.network-signal-button:hover {
+    -fx-background-color: -bg-hover;
+}
+.light-mode .network-signal-button:hover {
+    -fx-background-color: -bg-hover;
+}
+
+.network-popover {
+    -fx-background-color: -bg-surface;
+    -fx-padding: 12 16;
+    -fx-background-radius: 10;
+    -fx-border-color: -border;
+    -fx-border-radius: 10;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,.35), 16, 0, 0, 4);
+}
+.light-mode .network-popover {
+    -fx-background-color: -bg-surface;
+    -fx-border-color: -border;
+    -fx-effect: dropshadow(gaussian, rgba(30,40,70,.14), 16, 0, 0, 4);
+}
+

@@ -13,7 +13,7 @@ public final class LegacyCreateRoomDialog extends Dialog<LegacyCreateRoomDialog.
         TextField name = new TextField(); name.setPromptText("Ví dụ: Họp nhóm sản phẩm");
         PasswordField pin = new PasswordField(); pin.setPromptText("PIN gồm 4–6 chữ số");
         Label error = Ui.label("", "error-text");
-        Spinner<Integer> capacity = new Spinner<>(2, 16, 10); capacity.setEditable(false); capacity.setMaxWidth(Double.MAX_VALUE); capacity.setAccessibleText("Số người tối đa trong phòng");
+        Spinner<Integer> capacity = new Spinner<>(2, 50, 10); capacity.setEditable(false); capacity.setMaxWidth(Double.MAX_VALUE); capacity.setAccessibleText("Số người tối đa trong phòng");
         VBox content = Ui.column(16, Ui.field("Tên phòng", name), Ui.field("PIN", pin), Ui.field("Số người tối đa (bao gồm chủ phòng)", capacity), error); content.setPrefWidth(400);
         getDialogPane().setContent(content);
         ButtonType create = new ButtonType("Tạo phòng", ButtonBar.ButtonData.OK_DONE); getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL, create);

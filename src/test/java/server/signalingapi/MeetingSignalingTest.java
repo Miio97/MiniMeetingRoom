@@ -17,6 +17,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -41,6 +42,8 @@ class MeetingSignalingTest {
     private SignalingServer server;
     private final List<SignalingClient> clients = new ArrayList<>();
     private final java.util.concurrent.atomic.AtomicInteger snapshotRequests = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger sessionDbQueries = new java.util.concurrent.atomic.AtomicInteger();
+    private server.meeting.NetworkStatsService statsService;
 
     @BeforeAll static void certificates() throws Exception { tls = RoomTestFixture.certificates(temporary); }
 
@@ -50,22 +53,57 @@ class MeetingSignalingTest {
                 .replaceAll("(?m)^--[^\\r\\n]*", "")
                 .replace("CHARACTER SET ascii COLLATE ascii_bin", "").replace("ENGINE=InnoDB", "");
         for (String statement : migration.split(";")) if (!statement.isBlank()) fixture.execute(statement);
+        fixture.execute("""
+                CREATE TABLE IF NOT EXISTS Tin_Nhan (
+                    Ma_Tin_Nhan BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    Ma_Phong BIGINT NOT NULL REFERENCES Phong_Hop(Ma_Phong) ON DELETE CASCADE,
+                    Ma_Nguoi_Gui BIGINT NOT NULL REFERENCES Nguoi_Dung(Ma_Nguoi_Dung),
+                    Loai_Tin_Nhan VARCHAR(20) NOT NULL DEFAULT 'VAN_BAN',
+                    Noi_Dung TEXT,
+                    Ngay_Gui TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    Ngay_Chinh_Sua TIMESTAMP NULL,
+                    Ngay_Xoa TIMESTAMP NULL
+                )
+                """);
+        fixture.execute("""
+                CREATE TABLE IF NOT EXISTS Thong_Ke_Ket_Noi (
+                    Ma_Thong_Ke BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    Ma_Phong BIGINT NOT NULL REFERENCES Phong_Hop(Ma_Phong) ON DELETE CASCADE,
+                    Ma_Nguoi_Dung BIGINT NOT NULL REFERENCES Nguoi_Dung(Ma_Nguoi_Dung),
+                    Do_Tre_Ms DECIMAL(8,2),
+                    Do_Rung_Ms DECIMAL(8,2),
+                    Ty_Le_Mat_Goi_Tin DECIMAL(5,2),
+                    Bitrate_Kbps INT,
+                    FPS SMALLINT,
+                    Chieu_Rong SMALLINT,
+                    Chieu_Cao SMALLINT,
+                    Trang_Thai_Ket_Noi VARCHAR(20),
+                    Thoi_Diem_Lay_Mau TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """);
+        statsService = new server.meeting.NetworkStatsService(fixture::connection, Clock.systemUTC());
+        statsService.start();
         AtomicReference<SignalingServer> current = new AtomicReference<>();
         rooms = new RoomService(new RoomRepository(fixture::connection), Clock.systemUTC(), "test-instance",
-                new byte[32], 10, event -> {
+                new byte[32], 20, event -> {
                     SignalingServer target = current.get();
                     if (target != null) target.event(event.recipientConnectionId(), event.type(), event.roomId(),
                             event.revision(), JSON.toJsonTree(event.body()).getAsJsonObject());
                 });
         rooms.start();
+        server.auth.ConnectionProvider countingProvider = () -> {
+            sessionDbQueries.incrementAndGet();
+            return fixture.connection();
+        };
         server = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
-                new SessionValidator(fixture::connection, Clock.systemUTC()), new SignalingServer.Handler() {
-                    private final MeetingHandler delegate = new MeetingHandler(rooms);
+                new SessionValidator(countingProvider, Clock.systemUTC()), new SignalingServer.Handler() {
+                    private final MeetingHandler delegate = new MeetingHandler(rooms, null, statsService);
                     public SignalMessage handle(SignalingServer.Connection connection, SignalMessage request) throws Exception {
                         if (request.type().equals("GET_ROOM")) snapshotRequests.incrementAndGet();
                         return delegate.handle(connection, request);
                     }
                     public void disconnected(SignalingServer.Connection connection, String reason) { delegate.disconnected(connection, reason); }
+                    @Override public void bindServer(SignalingServer s) { delegate.bindServer(s); }
                 },
                 rooms.serverEpoch(), SignalingServer.Options.defaults());
         current.set(server); server.start();
@@ -74,6 +112,7 @@ class MeetingSignalingTest {
     @AfterEach void close() throws Exception {
         clients.forEach(SignalingClient::close);
         if (server != null) server.close();
+        if (statsService != null) statsService.close();
         if (rooms != null) rooms.close();
         if (fixture != null) fixture.close();
     }
@@ -379,6 +418,295 @@ class MeetingSignalingTest {
             assertEquals(9, cleanupCount.get());
             await(() -> futures.stream().allMatch(java.util.concurrent.CompletableFuture::isDone));
         } finally { release.countDown(); }
+    }
+
+    @Test void twoClientsChatRealtimeHistoryAndNoExtraGetRoom() throws Exception {
+        List<SignalMessage> hostEvents = new CopyOnWriteArrayList<>();
+        List<SignalMessage> guestEvents = new CopyOnWriteArrayList<>();
+        SignalingClient host = login("hostChat", hostEvents);
+        SignalingClient guest = login("guestChat", guestEvents);
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+        join(guest, room, "1234", UUID.randomUUID().toString());
+
+        await(() -> hostEvents.stream().anyMatch(e -> "PARTICIPANT_JOINED".equals(e.type())));
+        snapshotRequests.set(0);
+
+        JsonObject send1 = new JsonObject();
+        send1.addProperty("content", "Hello from host");
+        SignalMessage res1 = request(host, "CHAT_SEND", room.roomId(), send1);
+        assertEquals("CHAT_SENT", res1.type());
+        assertTrue(res1.body().get("ok").getAsBoolean());
+        long id1 = res1.body().get("id").getAsLong();
+
+        await(() -> hostEvents.stream().anyMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+        await(() -> guestEvents.stream().anyMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+
+        SignalMessage hostMsg1 = hostEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).findFirst().orElseThrow();
+        SignalMessage guestMsg1 = guestEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).findFirst().orElseThrow();
+        assertEquals("Hello from host", hostMsg1.body().get("content").getAsString());
+        assertEquals(hostMsg1.body().get("content").getAsString(), guestMsg1.body().get("content").getAsString());
+        assertEquals(id1, hostMsg1.body().get("id").getAsLong());
+        assertEquals(id1, guestMsg1.body().get("id").getAsLong());
+
+        JsonObject send2 = new JsonObject();
+        send2.addProperty("content", "Hi back from guest");
+        SignalMessage res2 = request(guest, "CHAT_SEND", room.roomId(), send2);
+        assertEquals("CHAT_SENT", res2.type());
+        long id2 = res2.body().get("id").getAsLong();
+
+        await(() -> hostEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).count() >= 2);
+        await(() -> guestEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).count() >= 2);
+
+        // History query
+        JsonObject histReq = new JsonObject();
+        histReq.addProperty("limit", 10);
+        SignalMessage histRes = request(guest, "CHAT_HISTORY", room.roomId(), histReq);
+        assertEquals("CHAT_HISTORY_RESULT", histRes.type());
+        var msgs = histRes.body().getAsJsonArray("messages");
+        assertEquals(2, msgs.size());
+        assertEquals(id1, msgs.get(0).getAsJsonObject().get("id").getAsLong());
+        assertEquals("Hello from host", msgs.get(0).getAsJsonObject().get("content").getAsString());
+        assertEquals(id2, msgs.get(1).getAsJsonObject().get("id").getAsLong());
+        assertEquals("Hi back from guest", msgs.get(1).getAsJsonObject().get("content").getAsString());
+
+        // Verify that chat events produced NO extra GET_ROOM requests
+        assertEquals(0, snapshotRequests.get(), "Chat messaging must not trigger extra GET_ROOM requests");
+    }
+
+    @Test void chatRejectedWhenNotMemberRateLimitOrContentTooLong() throws Exception {
+        SignalingClient host = login("hostReject", new CopyOnWriteArrayList<>());
+        SignalingClient outsider = login("outsider", new CopyOnWriteArrayList<>());
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+
+        // Outsider cannot send chat
+        JsonObject msg = new JsonObject();
+        msg.addProperty("content", "I am outsider");
+        code("NOT_A_MEMBER", () -> request(outsider, "CHAT_SEND", room.roomId(), msg));
+        code("NOT_A_MEMBER", () -> request(outsider, "CHAT_HISTORY", room.roomId(), new JsonObject()));
+
+        // Content too long (> 2000 chars)
+        JsonObject longMsg = new JsonObject();
+        longMsg.addProperty("content", "A".repeat(2001));
+        code("INVALID_REQUEST", () -> request(host, "CHAT_SEND", room.roomId(), longMsg));
+
+        // Empty content
+        JsonObject emptyMsg = new JsonObject();
+        emptyMsg.addProperty("content", "   \t\n   ");
+        code("INVALID_REQUEST", () -> request(host, "CHAT_SEND", room.roomId(), emptyMsg));
+
+        // Rapid rate limit test (burst is 10)
+        JsonObject rapid = new JsonObject();
+        rapid.addProperty("content", "spam");
+        boolean rateLimited = false;
+        for (int i = 0; i < 20; i++) {
+            try {
+                request(host, "CHAT_SEND", room.roomId(), rapid);
+            } catch (Exception ex) {
+                Throwable cause = ex instanceof ExecutionException ? ex.getCause() : ex;
+                if (cause instanceof SignalException se && "RATE_LIMIT".equals(se.code())) {
+                    rateLimited = true;
+                    break;
+                }
+            }
+        }
+        assertTrue(rateLimited, "Burst of >10 messages in zero time must trigger RATE_LIMIT");
+    }
+
+    @Test void userWhoLeftRoomDoesNotReceiveChat() throws Exception {
+        List<SignalMessage> hostEvents = new CopyOnWriteArrayList<>();
+        List<SignalMessage> guestEvents = new CopyOnWriteArrayList<>();
+        SignalingClient host = login("hostLeft", hostEvents);
+        SignalingClient guest = login("guestLeft", guestEvents);
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+        join(guest, room, "1234", UUID.randomUUID().toString());
+
+        await(() -> hostEvents.stream().anyMatch(e -> "PARTICIPANT_JOINED".equals(e.type())));
+
+        // Guest leaves room
+        request(guest, "LEAVE_ROOM", room.roomId(), new JsonObject());
+
+        // Host sends a message
+        JsonObject msg = new JsonObject();
+        msg.addProperty("content", "Only host should see this");
+        request(host, "CHAT_SEND", room.roomId(), msg);
+
+        await(() -> hostEvents.stream().anyMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+        Thread.sleep(100);
+
+        // Guest did not receive CHAT_MESSAGE
+        assertTrue(guestEvents.stream().noneMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+    }
+
+    @Test void networkStatsValidationAndRateLimit() throws Exception {
+        SignalingClient host = login("hostStatsVal", new CopyOnWriteArrayList<>());
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+
+        // Test out-of-range bounds
+        JsonObject badRtt = new JsonObject(); badRtt.addProperty("rtt", 60001.0);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badRtt));
+
+        JsonObject badNegRtt = new JsonObject(); badNegRtt.addProperty("rtt", -1.0);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badNegRtt));
+
+        JsonObject badJitter = new JsonObject(); badJitter.addProperty("jitter", 10001.0);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badJitter));
+
+        JsonObject badLoss = new JsonObject(); badLoss.addProperty("loss", 101.0);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badLoss));
+
+        JsonObject badBitrate = new JsonObject(); badBitrate.addProperty("bitrate", 100001);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badBitrate));
+
+        JsonObject badFps = new JsonObject(); badFps.addProperty("fps", 121);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badFps));
+
+        JsonObject badWidth = new JsonObject(); badWidth.addProperty("width", 7681);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badWidth));
+
+        JsonObject badHeight = new JsonObject(); badHeight.addProperty("height", 7681);
+        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badHeight));
+
+        // Valid sample
+        JsonObject valid = new JsonObject();
+        valid.addProperty("rtt", 45.0);
+        valid.addProperty("jitter", 12.0);
+        valid.addProperty("loss", 0.5);
+        valid.addProperty("bitrate", 600);
+        valid.addProperty("fps", 30);
+        valid.addProperty("width", 640);
+        valid.addProperty("height", 480);
+        SignalMessage res1 = request(host, "NETWORK_STATS", room.roomId(), valid);
+        assertEquals("NETWORK_STATS_ACK", res1.type());
+        assertTrue(res1.body().get("ok").getAsBoolean());
+        assertFalse(res1.body().has("dropped") && res1.body().get("dropped").getAsBoolean());
+
+        // Rapid sample sent immediately (< 1s) must be dropped
+        SignalMessage res2 = request(host, "NETWORK_STATS", room.roomId(), valid);
+        assertEquals("NETWORK_STATS_ACK", res2.type());
+        assertTrue(res2.body().get("ok").getAsBoolean());
+        assertTrue(res2.body().has("dropped") && res2.body().get("dropped").getAsBoolean(),
+                "Burst sample within 1s must be dropped");
+    }
+
+    @Test void networkStatsOverTlsWritesCorrectUserAndRoomEvenIfClientSpoofsRoomIdAndNoSessionDbQueries() throws Exception {
+        SignalingClient host = login("hostStatsTls", new CopyOnWriteArrayList<>());
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+
+        long storedRoomId = rooms.storedRoomId(room.roomId());
+
+        // Reset session query counter
+        sessionDbQueries.set(0);
+
+        // Host sends NETWORK_STATS with spoofed room ID in request
+        JsonObject sample = new JsonObject();
+        sample.addProperty("rtt", 50.0);
+        sample.addProperty("jitter", 10.0);
+        sample.addProperty("loss", 0.2);
+        sample.addProperty("bitrate", 500);
+        sample.addProperty("fps", 25);
+        sample.addProperty("width", 640);
+        sample.addProperty("height", 480);
+
+        SignalMessage res = request(host, "NETWORK_STATS", "spoofed_room_id", sample);
+        assertEquals("NETWORK_STATS_ACK", res.type());
+        assertTrue(res.body().get("ok").getAsBoolean());
+
+        // Verify NO database query was made for session validation during NETWORK_STATS
+        assertEquals(0, sessionDbQueries.get(), "NETWORK_STATS must rely on validatedAt without DB session query");
+
+        // Flush batch to H2 database
+        int inserted = statsService.flushBatch();
+        assertEquals(1, inserted);
+
+        // Verify database row has genuine room and genuine user
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi WHERE Ma_Phong = " + storedRoomId));
+        assertEquals(0, fixture.count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi WHERE Ma_Phong != " + storedRoomId));
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi WHERE Ma_Phong = " + storedRoomId + " AND Trang_Thai_Ket_Noi = 'TOT'"));
+
+        // In contrast, GET_ROOM MUST issue a session validation DB query
+        request(host, "GET_ROOM", room.roomId(), new JsonObject());
+        assertTrue(sessionDbQueries.get() > 0, "Non-stats request must validate session against DB");
+    }
+
+    @Test void twentyParticipantsSignalingBenchmarkAndStateSync() throws Exception {
+        // 1. Verify host connects and receives maxParticipants = 20 from SERVER_WELCOME and AUTHENTICATED
+        List<SignalMessage> hostEvents = new CopyOnWriteArrayList<>();
+        SignalingClient host = login("benchHost", hostEvents);
+        assertEquals(20, host.serverMaxParticipants(), "Host client must read maxParticipants = 20 from server");
+
+        // Host creates room with capacity 20
+        RoomSnapshot room = create(host, 20, UUID.randomUUID().toString());
+        assertEquals(20, room.capacity());
+
+        // Host joins
+        join(host, room, "", UUID.randomUUID().toString());
+
+        // 2. Concurrently connect and join 19 more participants
+        List<SignalingClient> guests = new CopyOnWriteArrayList<>();
+        List<List<SignalMessage>> guestEvents = new CopyOnWriteArrayList<>();
+        int guestCount = 19;
+        for (int i = 0; i < guestCount; i++) {
+            guestEvents.add(new CopyOnWriteArrayList<>());
+        }
+
+        long startNanos = System.nanoTime();
+
+        // Connect all 19 guests
+        List<CompletableFuture<SignalingClient>> loginFutures = new ArrayList<>();
+        for (int i = 0; i < guestCount; i++) {
+            final int index = i;
+            loginFutures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    return login("guestBench" + index, guestEvents.get(index));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+        for (var future : loginFutures) {
+            guests.add(future.get(10, TimeUnit.SECONDS));
+        }
+
+        // All 19 guests join concurrently
+        List<CompletableFuture<SignalMessage>> joinFutures = new ArrayList<>();
+        for (int i = 0; i < guestCount; i++) {
+            final SignalingClient guest = guests.get(i);
+            joinFutures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    return join(guest, room, "1234", UUID.randomUUID().toString());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+        for (var future : joinFutures) {
+            future.get(10, TimeUnit.SECONDS);
+        }
+
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+        // Verify total join benchmark duration is well under 5 seconds (5000 ms)
+        assertTrue(durationMs < 5000, "Signaling join for 20 clients must complete in under 5s, took: " + durationMs + "ms");
+
+        // Verify room state is fully synchronized across all 20 participants
+        assertEquals(20, rooms.participantCount());
+        RoomSnapshot hostView = get(host, room.roomId());
+        assertEquals(20, hostView.participants().size());
+
+        // Verify each guest sees 20 participants and received PARTICIPANT_JOINED
+        for (SignalingClient guest : guests) {
+            RoomSnapshot guestView = get(guest, room.roomId());
+            assertEquals(20, guestView.participants().size());
+        }
+
+        // Host received participant joined events for guests
+        long joinedEventsReceived = hostEvents.stream().filter(e -> "PARTICIPANT_JOINED".equals(e.type())).count();
+        assertEquals(19, joinedEventsReceived, "Host must receive PARTICIPANT_JOINED for all 19 guests");
     }
 
     private SignalingClient login(String user, List<SignalMessage> events) throws Exception {

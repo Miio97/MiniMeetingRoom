@@ -1,19 +1,94 @@
 package server.signalingapi;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import common.meeting.CreateRoomParams;
 import common.signaling.SignalException;
 import common.signaling.SignalMessage;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import server.auth.ConnectionProvider;
 import server.meeting.RoomService;
 
 /** Typed room control dispatch. Client identity and host role always come from server state. */
-public final class MeetingHandler implements SignalingServer.Handler {
+public final class MeetingHandler implements SignalingServer.Handler, AutoCloseable {
     private static final Gson JSON = new Gson();
     private final RoomService rooms;
     private final server.media.VideoCoordinator video;
-    public MeetingHandler(RoomService rooms) { this(rooms, null); }
-    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video) { this.rooms = rooms; this.video = video; }
+    private final ConnectionProvider connections;
+    private volatile ChatDispatcher dispatcher;
+    private final ConcurrentHashMap<String, ChatRateLimiter> chatLimits = new ConcurrentHashMap<>();
+    private final ThreadPoolExecutor chatExecutor = new ThreadPoolExecutor(
+            2, 2, 0, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(256),
+            Thread.ofPlatform().daemon().name("meeting-chat-", 0).factory());
+
+    @FunctionalInterface
+    public interface ChatDispatcher {
+        void sendChat(String connectionId, String roomId, JsonObject body);
+    }
+
+    private static final class ChatRateLimiter {
+        private final double capacity = 10.0;
+        private final double refillRate = 5.0; // 5 per second
+        private double tokens = 10.0;
+        private long lastNanos = System.nanoTime();
+
+        synchronized boolean tryConsume() {
+            long now = System.nanoTime();
+            double elapsed = (now - lastNanos) / 1_000_000_000.0;
+            lastNanos = now;
+            tokens = Math.min(capacity, tokens + elapsed * refillRate);
+            if (tokens >= 1.0) {
+                tokens -= 1.0;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    private record SavedChatMessage(long id, Instant sentAt) { }
+    private record HistoryChatMessage(long id, long userId, String displayName, String content, Instant sentAt) { }
+    private final ConcurrentHashMap<String, Long> lastStatsSampleTimesNanos = new ConcurrentHashMap<>();
+    private volatile server.meeting.NetworkStatsService stats;
+
+    public MeetingHandler(RoomService rooms) { this(rooms, null, null, null, null); }
+    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video) { this(rooms, video, null, null, null); }
+    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video, server.meeting.NetworkStatsService stats) { this(rooms, video, null, null, stats); }
+    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video, ConnectionProvider connections, ChatDispatcher dispatcher) {
+        this(rooms, video, connections, dispatcher, null);
+    }
+    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video, ConnectionProvider connections, ChatDispatcher dispatcher, server.meeting.NetworkStatsService stats) {
+        this.rooms = rooms;
+        this.video = video;
+        this.connections = connections != null ? connections : rooms.connectionProvider();
+        this.dispatcher = dispatcher;
+        this.stats = stats;
+    }
+
+    public void setNetworkStatsService(server.meeting.NetworkStatsService stats) { this.stats = stats; }
+
+    public void setDispatcher(ChatDispatcher dispatcher) { this.dispatcher = dispatcher; }
+    public void bindSignaling(SignalingServer signaling) {
+        this.dispatcher = (connId, rId, body) -> signaling.event(connId, "CHAT_MESSAGE", rId, null, body);
+    }
+    @Override public void bindServer(SignalingServer server) {
+        bindSignaling(server);
+    }
 
     @Override public SignalMessage handle(SignalingServer.Connection connection, SignalMessage request) throws Exception {
         JsonObject body = request.body();
@@ -25,6 +100,136 @@ public final class MeetingHandler implements SignalingServer.Handler {
                     rooms.assertMember(connection.id(), request.roomId());
                     if (video == null) throw new SignalException("MEDIA_NOT_READY");
                     response = video.handle(connection, request); type = request.type().substring(0, request.type().indexOf('_')) + "_REPLY";
+                }
+                case "CHAT_SEND" -> {
+                    rooms.assertMember(connection.id(), request.roomId());
+                    ChatRateLimiter limiter = chatLimits.computeIfAbsent(connection.id(), ignored -> new ChatRateLimiter());
+                    if (!limiter.tryConsume()) throw new SignalException("RATE_LIMIT");
+                    String raw = text(body, "content", 4000);
+                    String content = raw.replaceAll("[\\p{Cntrl}&&[^\r\n\t]]", "").strip();
+                    if (content.isEmpty() || content.length() > 2000) throw new SignalException("INVALID_REQUEST");
+                    long storedRoomId = rooms.storedRoomId(request.roomId());
+                    var principal = connection.principal();
+                    long userId = principal.userId();
+                    String displayName = principal.displayName();
+                    String participantId = rooms.participantId(connection.id());
+                    CompletableFuture<SavedChatMessage> future = new CompletableFuture<>();
+                    try {
+                        chatExecutor.execute(() -> {
+                            try {
+                                future.complete(insertChatMessage(storedRoomId, userId, content));
+                            } catch (Exception failure) { future.completeExceptionally(failure); }
+                        });
+                    } catch (RejectedExecutionException full) {
+                        throw new SignalException("CHAT_BUSY");
+                    }
+                    SavedChatMessage saved;
+                    try { saved = future.get(5, TimeUnit.SECONDS); }
+                    catch (TimeoutException timeout) { throw new SignalException("CHAT_BUSY"); }
+                    catch (ExecutionException failure) { throw new SignalException("CHAT_FAILED"); }
+                    JsonObject eventBody = new JsonObject();
+                    eventBody.addProperty("id", saved.id());
+                    eventBody.addProperty("participantId", participantId);
+                    eventBody.addProperty("userId", userId);
+                    eventBody.addProperty("displayName", displayName);
+                    eventBody.addProperty("content", content);
+                    eventBody.addProperty("sentAt", saved.sentAt().toString());
+                    if (dispatcher != null) {
+                        for (String connId : rooms.roomConnections(request.roomId())) {
+                            dispatcher.sendChat(connId, request.roomId(), eventBody);
+                        }
+                    }
+                    response.addProperty("ok", true);
+                    response.addProperty("id", saved.id());
+                    response.addProperty("sentAt", saved.sentAt().toString());
+                    type = "CHAT_SENT";
+                }
+                case "CHAT_HISTORY" -> {
+                    rooms.assertMember(connection.id(), request.roomId());
+                    Long beforeId = body.has("beforeId") && !body.get("beforeId").isJsonNull() ? body.get("beforeId").getAsLong() : null;
+                    int limit = body.has("limit") && !body.get("limit").isJsonNull() ? Math.min(100, Math.max(1, body.get("limit").getAsInt())) : 50;
+                    long storedRoomId = rooms.storedRoomId(request.roomId());
+                    CompletableFuture<List<HistoryChatMessage>> future = new CompletableFuture<>();
+                    try {
+                        chatExecutor.execute(() -> {
+                            try {
+                                future.complete(queryChatHistory(storedRoomId, beforeId, limit));
+                            } catch (Exception failure) { future.completeExceptionally(failure); }
+                        });
+                    } catch (RejectedExecutionException full) {
+                        throw new SignalException("CHAT_BUSY");
+                    }
+                    List<HistoryChatMessage> history;
+                    try { history = future.get(5, TimeUnit.SECONDS); }
+                    catch (TimeoutException timeout) { throw new SignalException("CHAT_BUSY"); }
+                    catch (ExecutionException failure) { throw new SignalException("CHAT_FAILED"); }
+                    JsonArray array = new JsonArray();
+                    for (HistoryChatMessage item : history) {
+                        JsonObject msg = new JsonObject();
+                        msg.addProperty("id", item.id());
+                        msg.addProperty("userId", item.userId());
+                        msg.addProperty("displayName", item.displayName());
+                        msg.addProperty("content", item.content());
+                        msg.addProperty("sentAt", item.sentAt().toString());
+                        array.add(msg);
+                    }
+                    response.add("messages", array);
+                    type = "CHAT_HISTORY_RESULT";
+                }
+                case "NETWORK_STATS" -> {
+                    Double rtt = optDouble(body, "rtt");
+                    if (rtt != null && (rtt < 0.0 || rtt > 60000.0)) throw new SignalException("INVALID_REQUEST");
+
+                    Double jitter = optDouble(body, "jitter");
+                    if (jitter != null && (jitter < 0.0 || jitter > 10000.0)) throw new SignalException("INVALID_REQUEST");
+
+                    Double loss = optDouble(body, "loss");
+                    if (loss != null && (loss < 0.0 || loss > 100.0)) throw new SignalException("INVALID_REQUEST");
+
+                    Integer bitrate = optInt(body, "bitrate");
+                    if (bitrate != null && (bitrate < 0 || bitrate > 100000)) throw new SignalException("INVALID_REQUEST");
+
+                    Integer fps = optInt(body, "fps");
+                    if (fps != null && (fps < 0 || fps > 120)) throw new SignalException("INVALID_REQUEST");
+
+                    Integer width = optInt(body, "width");
+                    if (width != null && (width < 0 || width > 7680)) throw new SignalException("INVALID_REQUEST");
+
+                    Integer height = optInt(body, "height");
+                    if (height != null && (height < 0 || height > 7680)) throw new SignalException("INVALID_REQUEST");
+
+                    long nowNanos = System.nanoTime();
+                    Long lastNanos = lastStatsSampleTimesNanos.get(connection.id());
+                    if (lastNanos != null && nowNanos - lastNanos < TimeUnit.MILLISECONDS.toNanos(900)) {
+                        response.addProperty("ok", true);
+                        response.addProperty("dropped", true);
+                        type = "NETWORK_STATS_ACK";
+                        break;
+                    }
+                    lastStatsSampleTimesNanos.put(connection.id(), nowNanos);
+
+                    Long storedRoomId = rooms.currentStoredRoomIdForConnection(connection.id());
+                    if (storedRoomId == null) {
+                        response.addProperty("ok", false);
+                        response.addProperty("reason", "NOT_IN_ROOM");
+                        type = "NETWORK_STATS_ACK";
+                        break;
+                    }
+
+                    long userId = connection.principal().userId();
+
+                    if (rtt != null || jitter != null || loss != null || bitrate != null || fps != null || width != null || height != null) {
+                        String quality = server.meeting.NetworkStatsService.calculateQuality(rtt, jitter, loss);
+                        Instant sampledAt = rooms.clock().instant();
+                        if (stats != null) {
+                            stats.record(new server.meeting.NetworkStatsService.StatsRecord(
+                                    storedRoomId, userId, rtt, jitter, loss, bitrate, fps, width, height, quality, sampledAt
+                            ));
+                        }
+                    }
+
+                    response.addProperty("ok", true);
+                    type = "NETWORK_STATS_ACK";
                 }
                 case "CREATE_ROOM" -> {
                     var params = new CreateRoomParams(text(body, "name", 100), text(body, "pin", 6),
@@ -87,13 +292,92 @@ public final class MeetingHandler implements SignalingServer.Handler {
         return connection.message(type, request.requestId(), request.roomId(), null, response);
     }
 
+    private SavedChatMessage insertChatMessage(long roomId, long userId, String content) throws SQLException {
+        Instant now = rooms.clock().instant();
+        String sql = "INSERT INTO Tin_Nhan (Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Noi_Dung, Ngay_Gui) VALUES (?, ?, 'VAN_BAN', ?, ?)";
+        try (var conn = connections.getConnection();
+             var ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, roomId);
+            ps.setLong(2, userId);
+            ps.setString(3, content);
+            ps.setTimestamp(4, Timestamp.from(now));
+            ps.executeUpdate();
+            try (var rs = ps.getGeneratedKeys()) {
+                if (rs.next()) return new SavedChatMessage(rs.getLong(1), now);
+            }
+        }
+        throw new SQLException("Failed to retrieve generated message key");
+    }
+
+    private List<HistoryChatMessage> queryChatHistory(long roomId, Long beforeId, int limit) throws SQLException {
+        StringBuilder sql = new StringBuilder(
+                "SELECT t.Ma_Tin_Nhan, t.Ma_Nguoi_Gui, u.Ten_Hien_Thi, t.Noi_Dung, t.Ngay_Gui " +
+                "FROM Tin_Nhan t " +
+                "JOIN Nguoi_Dung u ON t.Ma_Nguoi_Gui = u.Ma_Nguoi_Dung " +
+                "WHERE t.Ma_Phong = ? AND t.Ngay_Xoa IS NULL AND t.Loai_Tin_Nhan != 'TEP' "
+        );
+        if (beforeId != null) sql.append("AND t.Ma_Tin_Nhan < ? ");
+        sql.append("ORDER BY t.Ma_Tin_Nhan DESC LIMIT ?");
+        List<HistoryChatMessage> list = new ArrayList<>();
+        try (var conn = connections.getConnection();
+             var ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            ps.setLong(idx++, roomId);
+            if (beforeId != null) ps.setLong(idx++, beforeId);
+            ps.setInt(idx, limit);
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong(1);
+                    long userId = rs.getLong(2);
+                    String displayName = rs.getString(3);
+                    String content = rs.getString(4);
+                    Instant sentAt = rs.getTimestamp(5).toInstant();
+                    list.add(new HistoryChatMessage(id, userId, displayName, content, sentAt));
+                }
+            }
+        }
+        Collections.reverse(list);
+        return list;
+    }
+
     @Override public void disconnected(SignalingServer.Connection connection, String reason) {
+        chatLimits.remove(connection.id());
+        lastStatsSampleTimesNanos.remove(connection.id());
         if (video != null) video.revoke(connection.id());
         rooms.leave(connection.id(), "SERVER_SHUTDOWN".equals(reason) ? "PHONG_DONG" : "MAT_KET_NOI");
         common.diagnostics.Diagnostics.current().event("meeting.state", java.util.Map.of(
                 "room_count", rooms.roomCount(), "participant_count", rooms.participantCount()));
     }
     @Override public void validated(SignalingServer.Connection connection) { if (video != null) video.validated(connection); }
+
+    @Override public void close() {
+        chatExecutor.shutdownNow();
+        try { chatExecutor.awaitTermination(1, TimeUnit.SECONDS); }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+    }
+
+    private static Double optDouble(JsonObject body, String field) throws SignalException {
+        if (!body.has(field) || body.get(field).isJsonNull()) return null;
+        var value = body.get(field);
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) throw new SignalException("INVALID_REQUEST");
+        try {
+            double v = value.getAsDouble();
+            return Double.isFinite(v) ? v : null;
+        } catch (Exception e) {
+            throw new SignalException("INVALID_REQUEST");
+        }
+    }
+
+    private static Integer optInt(JsonObject body, String field) throws SignalException {
+        if (!body.has(field) || body.get(field).isJsonNull()) return null;
+        var value = body.get(field);
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) throw new SignalException("INVALID_REQUEST");
+        try {
+            return value.getAsBigDecimal().intValueExact();
+        } catch (Exception e) {
+            throw new SignalException("INVALID_REQUEST");
+        }
+    }
 
     private static String text(JsonObject body, String field, int maximum) throws SignalException {
         var value = body.get(field);

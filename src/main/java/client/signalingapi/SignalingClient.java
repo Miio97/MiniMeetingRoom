@@ -50,6 +50,7 @@ public final class SignalingClient implements AutoCloseable {
     private volatile SSLSocket socket;
     private SignalMessage welcome;
     private volatile int negotiatedMaxBytes;
+    private volatile int serverMaxParticipants = 20;
 
     public SignalingClient(Consumer<SignalMessage> listener) throws IOException {
         this(Settings.load(), null, listener);
@@ -63,6 +64,7 @@ public final class SignalingClient implements AutoCloseable {
     public State state() { return state; }
     public long generation() { return welcome == null ? 0 : welcome.generation(); }
     public String connectionId() { return welcome == null ? null : welcome.connectionId(); }
+    public int serverMaxParticipants() { return serverMaxParticipants; }
 
     public synchronized void connect(String token) throws IOException {
         if (state != State.NEW || closed.get()) throw new SignalException("CONNECTION_STATE");
@@ -89,13 +91,21 @@ public final class SignalingClient implements AutoCloseable {
                     || welcome.connectionId() == null || welcome.generation() <= 0) throw new SignalException("INVALID_WELCOME");
             int remoteLimit = welcome.body().get("maxFrameBytes").getAsBigDecimal().intValueExact();
             if (remoteLimit < 16384 || remoteLimit > 1048576) throw new SignalException("INVALID_WELCOME");
+            if (welcome.body().has("maxParticipants")) {
+                int srvMax = welcome.body().get("maxParticipants").getAsInt();
+                if (srvMax >= 2 && srvMax <= 50) serverMaxParticipants = srvMax;
+            }
             negotiatedMaxBytes = Math.min(remoteLimit, settings.maxBytes());
             state = State.AUTHENTICATING;
             Thread.ofVirtual().name("signal-client-writer").start(() -> writeLoop(output));
             Thread.ofVirtual().name("signal-client-events").start(this::eventLoop);
             Thread.ofVirtual().name("signal-client-reader").start(() -> readLoop(input));
             JsonObject body = new JsonObject(); body.addProperty("token", token); body.addProperty("maxFrameBytes", settings.maxBytes());
-            request("AUTHENTICATE", null, body).get(15, TimeUnit.SECONDS);
+            SignalMessage authReply = request("AUTHENTICATE", null, body).get(15, TimeUnit.SECONDS);
+            if (authReply.body() != null && authReply.body().has("maxParticipants")) {
+                int srvMax = authReply.body().get("maxParticipants").getAsInt();
+                if (srvMax >= 2 && srvMax <= 50) serverMaxParticipants = srvMax;
+            }
             synchronized (admission) {
                 if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
                 state = State.CONNECTED;

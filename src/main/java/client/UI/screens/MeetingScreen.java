@@ -22,18 +22,17 @@ import java.util.List;
 /** Main meeting layout; video rooms borrow the session media owner and keep the file panel. */
 public final class MeetingScreen extends BorderPane {
     private final client.network.NetworkMonitor network;
-    private final NetworkBadge networkBadge;
-    private NetworkStatsDialog networkDialog;
     private final ChatPanel chatPanel;
     private final ObservableList<common.meeting.Participant> managedPeople = FXCollections.observableArrayList();
     private ParticipantPanel participantPanel;
     private common.meeting.RoomResponse managedState;
     public client.network.NetworkMonitor networkMonitor() { return network; }
-    public void refreshNetwork() { if (!disposed) networkBadge.quality(network.snapshot().quality()); }
-    private void networkStats() {
-        if (disposed || networkDialog != null) return;
-        networkDialog = new NetworkStatsDialog(manager.stage(), network);
-        try { networkDialog.showAndWait(); } finally { networkDialog.dispose(); networkDialog = null; }
+    public void refreshNetwork() {
+        if (disposed) return;
+        client.media.NetworkStatsCalculator.CalculatedSample sample = (videoRoom && mediaController != null)
+                ? mediaController.latestStats()
+                : null;
+        networkSignal.update(sample, network != null ? network.snapshot() : null);
     }
     private final SceneManager manager;
     private final ObservableList<MockData.Participant> people;
@@ -61,10 +60,12 @@ public final class MeetingScreen extends BorderPane {
     private final boolean videoRoom;
     private final client.meeting.MeetingSession mediaSession;
     private final client.media.VideoCallController mediaController;
+    private final NetworkSignalWidget networkSignal;
+    private javafx.beans.value.ChangeListener<client.media.NetworkStatsCalculator.CalculatedSample> statsListener;
+    public NetworkSignalWidget networkSignal() { return networkSignal; }
     private Label nativeStatus;
     private CameraSettingsDialog cameraSettings;
     private DeviceSettingsDialog managementSettings;
-    private javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> managementListener;
     private AudioControls audioControls;
     private ScreenSourceDialog screenPicker;
     private javafx.scene.image.ImageView screenImage;
@@ -89,10 +90,11 @@ public final class MeetingScreen extends BorderPane {
         IconButton copy = new IconButton("copy", "Sao chép mã phòng");
         copy.setOnAction(e -> { ClipboardContent content = new ClipboardContent(); content.putString(manager.room().code()); Clipboard.getSystemClipboard().setContent(content); copy.setIcon("check"); PauseTransition reset = new PauseTransition(Duration.seconds(1.5)); reset.setOnFinished(done -> copy.setIcon("copy")); reset.play(); });
         network = manager.authClient().startNetworkMonitoring();
-        networkBadge = new NetworkBadge(this::networkStats);
-        Button badge = networkBadge;
+        networkSignal = new NetworkSignalWidget();
+        networkSignal.update(null, network.snapshot());
+        HBox statusLine = Ui.row(8, networkSignal); statusLine.setAlignment(Pos.CENTER_LEFT);
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
-        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, badge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
+        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
         participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand,
                 person -> sharingScreen(person.userId()), this::stopScreen);
         Tab participants = new Tab("Thành viên", participantPanel);
@@ -110,27 +112,30 @@ public final class MeetingScreen extends BorderPane {
                 this::toggleMic, this::toggleCamera, this::toggleShare, () -> togglePanel(1), () -> togglePanel(0),
                 this::deviceSettings, this::leave);
         controls.users.active(true);
-        Label demo = Ui.label(videoRoom ? "Video, âm thanh, chat, tệp và chia sẻ màn hình dùng cùng phòng."
-                : "Thành viên và tệp đồng bộ từ máy chủ • Camera, mic, chia sẻ và chat đang mô phỏng.", "caption"); demo.setWrapText(true);
+        Label demo = Ui.label("Thành viên và tệp đồng bộ từ máy chủ • Camera, mic, chia sẻ và chat đang mô phỏng.", "caption"); demo.setWrapText(true);
         roomError.setWrapText(true); roomError.setId("meeting-room-error");
-        MeetingToolbar bottom = new MeetingToolbar(controls, demo, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
+        MeetingToolbar bottom = videoRoom
+                ? new MeetingToolbar(controls, roomError)
+                : new MeetingToolbar(controls, demo, roomError);
+        bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
         if (videoRoom) {
             var video = manager.sfuSession().video();
             nativeStatus = Ui.label("", "caption");
             nativeStatus.textProperty().bind(video.statusProperty());
-            Button management = Ui.button("Quản lý phòng", "secondary", this::roomSettings); management.setId("room-management");
-            management.setVisible(manager.sfuSession().isHost()); management.setManaged(management.isVisible());
-            managementListener = (observable, before, after) -> {
-                if (!disposed) { management.setVisible(manager.sfuSession().isHost()); management.setManaged(management.isVisible()); }
-            };
-            manager.sfuSession().roomProperty().addListener(managementListener);
-            bottom.content().getChildren().addAll(nativeStatus, management);
+            statusLine.getChildren().setAll(networkSignal, nativeStatus);
             audioControls = new AudioControls(video.audio(), null, false);
             video.audio().requestedProperty().addListener(micListener); controls.mic(video.audio().requestedProperty().get());
             audioControls.setManaged(false);audioControls.setVisible(false);bottom.content().getChildren().add(audioControls);
             audioControls.errorProperty().addListener(audioErrorListener); video.screen().statusProperty().addListener(audioErrorListener);
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
             video.cameraRequestedProperty().addListener(cameraListener);
+            statsListener = (observable, before, after) -> {
+                if (!disposed) networkSignal.update(after, network != null ? network.snapshot() : null);
+            };
+            video.statsProperty().addListener(statsListener);
+            if (video.latestStats() != null) {
+                networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
+            }
             manager.sfuSession().roomProperty().addListener(videoRoomListener); renderNativeParticipants();
         }
         people.addListener((ListChangeListener<MockData.Participant>) change -> {
@@ -374,17 +379,17 @@ public final class MeetingScreen extends BorderPane {
     }
     public void dispose() {
         chatPanel.dispose(); manager.authClient().stopNetworkMonitoring(network);
-        if (networkDialog != null) { networkDialog.dispose(); networkDialog.close(); }
         if(screenPicker!=null) screenPicker.close();
         if(screenImage!=null) screenImage.imageProperty().unbind();
         if (cameraSettings != null) { cameraSettings.close(); cameraSettings = null; }
         if (managementSettings != null) { managementSettings.close(); managementSettings = null; }
         disposed = true; filePanel.close(); clock.stop(); roomPoll.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose);
+        networkSignal.dispose();
         if (nativeStatus != null) nativeStatus.textProperty().unbind();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.
+            if (statsListener != null) mediaController.statsProperty().removeListener(statsListener);
             mediaSession.roomProperty().removeListener(videoRoomListener);
-            if (managementListener != null) mediaSession.roomProperty().removeListener(managementListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);
             mediaController.audio().requestedProperty().removeListener(micListener); audioControls.errorProperty().removeListener(audioErrorListener); audioControls.dispose();
             mediaController.screen().requestedProperty().removeListener(shareListener); mediaController.screen().statusProperty().removeListener(audioErrorListener);

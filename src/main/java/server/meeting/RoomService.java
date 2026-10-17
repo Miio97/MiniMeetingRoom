@@ -44,20 +44,26 @@ public final class RoomService implements AutoCloseable {
     private final ArrayDeque<List<RoomEvent>> outbound = new ArrayDeque<>();
     private LegacyRoomService legacy;
     private final Map<Long, Long> pendingTransfers = new LinkedHashMap<>();
+    public static final int DEFAULT_MAX_PARTICIPANTS = 20;
+    public static final int HARD_CAP_PARTICIPANTS = 50;
     public RoomService() { this(server.database.DatabaseConnection::getConnection, Clock.systemUTC()); }
     public RoomService(server.auth.ConnectionProvider connections, Clock clock) {
-        this(new RoomRepository(connections), clock, "legacy", new byte[32], 16, event -> { });
+        this(new RoomRepository(connections), clock, "legacy", new byte[32], DEFAULT_MAX_PARTICIPANTS, event -> { });
         legacy = new LegacyRoomService(connections, clock);
     }
     private ScheduledExecutorService cleanup;
     private boolean started, closed;
+
+    public RoomService(RoomRepository repository, Clock clock, String instanceId, byte[] receiptKey, Consumer<RoomEvent> listener) {
+        this(repository, clock, instanceId, receiptKey, DEFAULT_MAX_PARTICIPANTS, listener);
+    }
 
     public RoomService(RoomRepository repository, Clock clock, String instanceId, byte[] receiptKey,
             int maxParticipants, Consumer<RoomEvent> listener) {
         this.repository = Objects.requireNonNull(repository); this.clock = Objects.requireNonNull(clock);
         if (instanceId == null || !instanceId.matches("[A-Za-z0-9_-]{1,64}")) throw new IllegalArgumentException("Invalid instance identifier");
         if (receiptKey == null || receiptKey.length < 32) throw new IllegalArgumentException("Receipt key must contain at least 32 bytes");
-        if (maxParticipants < 2 || maxParticipants > 250) throw new IllegalArgumentException("Invalid participant policy");
+        if (maxParticipants < 2 || maxParticipants > HARD_CAP_PARTICIPANTS) throw new IllegalArgumentException("Invalid participant policy");
         this.instanceId = instanceId; this.receiptKey = receiptKey.clone(); this.maxParticipants = maxParticipants;
         this.listener = Objects.requireNonNull(listener); this.epoch = opaque("e_");
     }
@@ -195,6 +201,41 @@ public final class RoomService implements AutoCloseable {
             return new MemberAuthorization(member.roomId, member.participantId, member.generation, member.role, member.media);
         }
     }
+    public List<String> roomConnections(String roomId) {
+        synchronized (lock) {
+            available();
+            LiveRoom room = requireRoom(roomId);
+            return room.members.values().stream().map(m -> m.connectionId).toList();
+        }
+    }
+    public long storedRoomId(String roomId) {
+        synchronized (lock) {
+            available();
+            return requireRoom(roomId).stored.id();
+        }
+    }
+    public String participantId(String connectionId) {
+        synchronized (lock) {
+            Member member = connections.get(connectionId);
+            return member != null ? member.participantId : null;
+        }
+    }
+    public Long currentStoredRoomIdForConnection(String connectionId) {
+        synchronized (lock) {
+            Member member = connections.get(connectionId);
+            if (member == null) return null;
+            LiveRoom room = rooms.get(member.roomId);
+            return room != null ? room.stored.id() : null;
+        }
+    }
+    public String currentRoomIdForConnection(String connectionId) {
+        synchronized (lock) {
+            Member member = connections.get(connectionId);
+            return member != null ? member.roomId : null;
+        }
+    }
+    public Clock clock() { return clock; }
+    public server.auth.ConnectionProvider connectionProvider() { return repository.connections(); }
     public RoomSnapshot setMediaState(String connectionId, boolean mic, boolean camera, boolean share) {
         RoomSnapshot reply;
         synchronized (lock) {
