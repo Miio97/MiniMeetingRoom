@@ -36,6 +36,8 @@ public final class MeetingServerMain {
                                     event.revision(), json.toJsonTree(event.body()).getAsJsonObject());
                         })) {
                     rooms.start(); // Preflight/reconcile only; never creates tables.
+                    var chatRetention = new server.meeting.ChatRetentionService(rooms.connectionProvider(), rooms.clock());
+                    chatRetention.start();
                     var transferConfig = server.filetransfer.TransferConfig.load();
                     if (transferConfig.enabled()) {
                         try (var connection = server.database.DatabaseConnection.getConnection(); var statement = connection.createStatement()) {
@@ -73,7 +75,10 @@ public final class MeetingServerMain {
                                         try { if (files != null) files.close(); }
                                         catch (java.io.IOException failure) {
                                             Diagnostics.current().failure("meeting.files.close_failed", failure, Map.of("phase", "close"));
-                                        } finally { rooms.close(); video.close(); media.close(); server.database.DatabaseConnection.close(); }
+                                        } finally {
+                                            try { chatRetention.close(); } catch (Exception ignored) { }
+                                            rooms.close(); video.close(); media.close(); server.database.DatabaseConnection.close();
+                                        }
                                     }
                                 }
                             }, "meeting-shutdown");

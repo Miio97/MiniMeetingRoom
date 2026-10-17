@@ -35,6 +35,7 @@ public final class SignalingServer implements AutoCloseable {
         SignalMessage handle(Connection connection, SignalMessage request) throws Exception;
         void disconnected(Connection connection, String reason) throws Exception;
         default void validated(Connection connection) { }
+        default void bindServer(SignalingServer server) { }
     }
 
     public record Options(int maxConnections, int maxFrameBytes, int requestsPerSecond) {
@@ -80,6 +81,7 @@ public final class SignalingServer implements AutoCloseable {
     public SignalingServer(SSLContext tls, InetSocketAddress address, SessionValidator validator,
             Handler handler, String epoch, Options options) throws IOException {
         this.validator = validator; this.handler = handler; this.epoch = epoch; this.options = options;
+        if (handler != null) handler.bindServer(this);
         admission = new Semaphore(options.maxConnections());
         listener = (SSLServerSocket) tls.getServerSocketFactory().createServerSocket();
         try {
@@ -394,7 +396,8 @@ public final class SignalingServer implements AutoCloseable {
                     "SET_MEDIA_STATE", "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
                     "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
                     "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH",
-                    "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE" -> type;
+                    "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE",
+                    "CHAT_SEND", "CHAT_HISTORY" -> type;
             default -> "OTHER";
         };
     }

@@ -50,6 +50,18 @@ class MeetingSignalingTest {
                 .replaceAll("(?m)^--[^\\r\\n]*", "")
                 .replace("CHARACTER SET ascii COLLATE ascii_bin", "").replace("ENGINE=InnoDB", "");
         for (String statement : migration.split(";")) if (!statement.isBlank()) fixture.execute(statement);
+        fixture.execute("""
+                CREATE TABLE IF NOT EXISTS Tin_Nhan (
+                    Ma_Tin_Nhan BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    Ma_Phong BIGINT NOT NULL REFERENCES Phong_Hop(Ma_Phong) ON DELETE CASCADE,
+                    Ma_Nguoi_Gui BIGINT NOT NULL REFERENCES Nguoi_Dung(Ma_Nguoi_Dung),
+                    Loai_Tin_Nhan VARCHAR(20) NOT NULL DEFAULT 'VAN_BAN',
+                    Noi_Dung TEXT,
+                    Ngay_Gui TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    Ngay_Chinh_Sua TIMESTAMP NULL,
+                    Ngay_Xoa TIMESTAMP NULL
+                )
+                """);
         AtomicReference<SignalingServer> current = new AtomicReference<>();
         rooms = new RoomService(new RoomRepository(fixture::connection), Clock.systemUTC(), "test-instance",
                 new byte[32], 10, event -> {
@@ -66,6 +78,7 @@ class MeetingSignalingTest {
                         return delegate.handle(connection, request);
                     }
                     public void disconnected(SignalingServer.Connection connection, String reason) { delegate.disconnected(connection, reason); }
+                    @Override public void bindServer(SignalingServer s) { delegate.bindServer(s); }
                 },
                 rooms.serverEpoch(), SignalingServer.Options.defaults());
         current.set(server); server.start();
@@ -380,6 +393,127 @@ class MeetingSignalingTest {
             await(() -> futures.stream().allMatch(java.util.concurrent.CompletableFuture::isDone));
         } finally { release.countDown(); }
     }
+
+    @Test void twoClientsChatRealtimeHistoryAndNoExtraGetRoom() throws Exception {
+        List<SignalMessage> hostEvents = new CopyOnWriteArrayList<>();
+        List<SignalMessage> guestEvents = new CopyOnWriteArrayList<>();
+        SignalingClient host = login("hostChat", hostEvents);
+        SignalingClient guest = login("guestChat", guestEvents);
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+        join(guest, room, "1234", UUID.randomUUID().toString());
+
+        await(() -> hostEvents.stream().anyMatch(e -> "PARTICIPANT_JOINED".equals(e.type())));
+        snapshotRequests.set(0);
+
+        JsonObject send1 = new JsonObject();
+        send1.addProperty("content", "Hello from host");
+        SignalMessage res1 = request(host, "CHAT_SEND", room.roomId(), send1);
+        assertEquals("CHAT_SENT", res1.type());
+        assertTrue(res1.body().get("ok").getAsBoolean());
+        long id1 = res1.body().get("id").getAsLong();
+
+        await(() -> hostEvents.stream().anyMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+        await(() -> guestEvents.stream().anyMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+
+        SignalMessage hostMsg1 = hostEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).findFirst().orElseThrow();
+        SignalMessage guestMsg1 = guestEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).findFirst().orElseThrow();
+        assertEquals("Hello from host", hostMsg1.body().get("content").getAsString());
+        assertEquals(hostMsg1.body().get("content").getAsString(), guestMsg1.body().get("content").getAsString());
+        assertEquals(id1, hostMsg1.body().get("id").getAsLong());
+        assertEquals(id1, guestMsg1.body().get("id").getAsLong());
+
+        JsonObject send2 = new JsonObject();
+        send2.addProperty("content", "Hi back from guest");
+        SignalMessage res2 = request(guest, "CHAT_SEND", room.roomId(), send2);
+        assertEquals("CHAT_SENT", res2.type());
+        long id2 = res2.body().get("id").getAsLong();
+
+        await(() -> hostEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).count() >= 2);
+        await(() -> guestEvents.stream().filter(e -> "CHAT_MESSAGE".equals(e.type())).count() >= 2);
+
+        // History query
+        JsonObject histReq = new JsonObject();
+        histReq.addProperty("limit", 10);
+        SignalMessage histRes = request(guest, "CHAT_HISTORY", room.roomId(), histReq);
+        assertEquals("CHAT_HISTORY_RESULT", histRes.type());
+        var msgs = histRes.body().getAsJsonArray("messages");
+        assertEquals(2, msgs.size());
+        assertEquals(id1, msgs.get(0).getAsJsonObject().get("id").getAsLong());
+        assertEquals("Hello from host", msgs.get(0).getAsJsonObject().get("content").getAsString());
+        assertEquals(id2, msgs.get(1).getAsJsonObject().get("id").getAsLong());
+        assertEquals("Hi back from guest", msgs.get(1).getAsJsonObject().get("content").getAsString());
+
+        // Verify that chat events produced NO extra GET_ROOM requests
+        assertEquals(0, snapshotRequests.get(), "Chat messaging must not trigger extra GET_ROOM requests");
+    }
+
+    @Test void chatRejectedWhenNotMemberRateLimitOrContentTooLong() throws Exception {
+        SignalingClient host = login("hostReject", new CopyOnWriteArrayList<>());
+        SignalingClient outsider = login("outsider", new CopyOnWriteArrayList<>());
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+
+        // Outsider cannot send chat
+        JsonObject msg = new JsonObject();
+        msg.addProperty("content", "I am outsider");
+        code("NOT_A_MEMBER", () -> request(outsider, "CHAT_SEND", room.roomId(), msg));
+        code("NOT_A_MEMBER", () -> request(outsider, "CHAT_HISTORY", room.roomId(), new JsonObject()));
+
+        // Content too long (> 2000 chars)
+        JsonObject longMsg = new JsonObject();
+        longMsg.addProperty("content", "A".repeat(2001));
+        code("INVALID_REQUEST", () -> request(host, "CHAT_SEND", room.roomId(), longMsg));
+
+        // Empty content
+        JsonObject emptyMsg = new JsonObject();
+        emptyMsg.addProperty("content", "   \t\n   ");
+        code("INVALID_REQUEST", () -> request(host, "CHAT_SEND", room.roomId(), emptyMsg));
+
+        // Rapid rate limit test (burst is 10)
+        JsonObject rapid = new JsonObject();
+        rapid.addProperty("content", "spam");
+        boolean rateLimited = false;
+        for (int i = 0; i < 20; i++) {
+            try {
+                request(host, "CHAT_SEND", room.roomId(), rapid);
+            } catch (Exception ex) {
+                Throwable cause = ex instanceof ExecutionException ? ex.getCause() : ex;
+                if (cause instanceof SignalException se && "RATE_LIMIT".equals(se.code())) {
+                    rateLimited = true;
+                    break;
+                }
+            }
+        }
+        assertTrue(rateLimited, "Burst of >10 messages in zero time must trigger RATE_LIMIT");
+    }
+
+    @Test void userWhoLeftRoomDoesNotReceiveChat() throws Exception {
+        List<SignalMessage> hostEvents = new CopyOnWriteArrayList<>();
+        List<SignalMessage> guestEvents = new CopyOnWriteArrayList<>();
+        SignalingClient host = login("hostLeft", hostEvents);
+        SignalingClient guest = login("guestLeft", guestEvents);
+        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
+        join(host, room, "", UUID.randomUUID().toString());
+        join(guest, room, "1234", UUID.randomUUID().toString());
+
+        await(() -> hostEvents.stream().anyMatch(e -> "PARTICIPANT_JOINED".equals(e.type())));
+
+        // Guest leaves room
+        request(guest, "LEAVE_ROOM", room.roomId(), new JsonObject());
+
+        // Host sends a message
+        JsonObject msg = new JsonObject();
+        msg.addProperty("content", "Only host should see this");
+        request(host, "CHAT_SEND", room.roomId(), msg);
+
+        await(() -> hostEvents.stream().anyMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+        Thread.sleep(100);
+
+        // Guest did not receive CHAT_MESSAGE
+        assertTrue(guestEvents.stream().noneMatch(e -> "CHAT_MESSAGE".equals(e.type())));
+    }
+
 
     private SignalingClient login(String user, List<SignalMessage> events) throws Exception {
         return connect(fixture.account(user, user).token(), events);

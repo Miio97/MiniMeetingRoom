@@ -195,6 +195,27 @@ public final class RoomService implements AutoCloseable {
             return new MemberAuthorization(member.roomId, member.participantId, member.generation, member.role, member.media);
         }
     }
+    public List<String> roomConnections(String roomId) {
+        synchronized (lock) {
+            available();
+            LiveRoom room = requireRoom(roomId);
+            return room.members.values().stream().map(m -> m.connectionId).toList();
+        }
+    }
+    public long storedRoomId(String roomId) {
+        synchronized (lock) {
+            available();
+            return requireRoom(roomId).stored.id();
+        }
+    }
+    public String participantId(String connectionId) {
+        synchronized (lock) {
+            Member member = connections.get(connectionId);
+            return member != null ? member.participantId : null;
+        }
+    }
+    public Clock clock() { return clock; }
+    public server.auth.ConnectionProvider connectionProvider() { return repository.connections(); }
     public RoomSnapshot setMediaState(String connectionId, boolean mic, boolean camera, boolean share) {
         RoomSnapshot reply;
         synchronized (lock) {

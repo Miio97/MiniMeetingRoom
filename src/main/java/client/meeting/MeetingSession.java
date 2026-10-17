@@ -11,6 +11,7 @@ import javafx.beans.property.*;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -66,6 +67,18 @@ public final class MeetingSession implements AutoCloseable {
     }
     public MeetingSession(String token, Instant expiresAt, TransportFactory transports) {
         this(token, expiresAt, transports, session -> new client.media.VideoCallController(session::videoRequest, session::snapshot, session::selfParticipantId));
+    }
+    public interface ChatListener {
+        void onChatMessage(common.chat.ChatMessage message);
+        default void onChatCleared() { }
+    }
+    private final List<ChatListener> chatListeners = new CopyOnWriteArrayList<>();
+    public void addChatListener(ChatListener listener) { chatListeners.add(listener); }
+    public void removeChatListener(ChatListener listener) { chatListeners.remove(listener); }
+    private void clearChat() {
+        for (ChatListener listener : chatListeners) {
+            listener.onChatCleared();
+        }
     }
     public MeetingSession(String token, Instant expiresAt, TransportFactory transports,
                           java.util.function.Function<MeetingSession, client.media.VideoCallController> mediaFactory) {
@@ -178,11 +191,37 @@ public final class MeetingSession implements AutoCloseable {
         return submit(() -> { RoomSnapshot value = decode(command(type, requireRoom().roomId(), body, UUID.randomUUID().toString()), "room", RoomSnapshot.class);
             snapshot = value; publish(State.CONNECTED, "Trạng thái được máy chủ xác nhận; chưa phát media."); return value; });
     }
+    public CompletableFuture<Void> sendChat(String content) {
+        JsonObject body = new JsonObject(); body.addProperty("content", content);
+        return submit(() -> { command("CHAT_SEND", requireRoom().roomId(), body, UUID.randomUUID().toString()); return null; });
+    }
+    public CompletableFuture<java.util.List<common.chat.ChatMessage>> chatHistory(Long beforeId, Integer limit) {
+        JsonObject body = new JsonObject();
+        if (beforeId != null) body.addProperty("beforeId", beforeId);
+        if (limit != null) body.addProperty("limit", limit);
+        return submit(() -> {
+            SignalMessage reply = command("CHAT_HISTORY", requireRoom().roomId(), body, UUID.randomUUID().toString());
+            java.util.List<common.chat.ChatMessage> list = new java.util.ArrayList<>();
+            if (reply.body().has("messages") && reply.body().get("messages").isJsonArray()) {
+                var array = reply.body().getAsJsonArray("messages");
+                for (var elem : array) {
+                    JsonObject obj = elem.getAsJsonObject();
+                    long id = obj.get("id").getAsLong();
+                    long uId = obj.has("userId") && !obj.get("userId").isJsonNull() ? obj.get("userId").getAsLong() : 0;
+                    String name = obj.has("displayName") ? obj.get("displayName").getAsString() : "";
+                    String text = obj.has("content") ? obj.get("content").getAsString() : "";
+                    String sentAt = obj.has("sentAt") ? obj.get("sentAt").getAsString() : Instant.now().toString();
+                    list.add(new common.chat.ChatMessage(id, 0, uId, name, text, sentAt));
+                }
+            }
+            return list;
+        });
+    }
     public CompletableFuture<Void> leave() {
         closeVideo();
         return submit(() -> {
             try { if (snapshot != null) command("LEAVE_ROOM", snapshot.roomId(), new JsonObject(), UUID.randomUUID().toString()); }
-            finally { snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); }
+            finally { snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); }
             return null;
         });
     }
@@ -218,7 +257,7 @@ public final class MeetingSession implements AutoCloseable {
         if (closed.get() || connection == null || !Objects.equals(message.connectionId(), connection.connectionId())
                 || message.generation() != connection.generation()) return;
         if ("CONNECTION_CLOSED".equals(message.type()) || "SESSION_ENDED".equals(message.type())) {
-            submit(() -> { if (currentConnection(message)) { closeVideo(); snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); } return null; }); return;
+            submit(() -> { if (currentConnection(message)) { closeVideo(); snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); clearChat(); } return null; }); return;
         }
         RoomSnapshot active = snapshot;
         String expectedRoom = active != null ? active.roomId() : preview == null ? null : preview.roomId();
@@ -228,10 +267,23 @@ public final class MeetingSession implements AutoCloseable {
                 RoomSnapshot current = snapshot;
                 String currentRoom = current != null ? current.roomId() : preview == null ? null : preview.roomId();
                 if (currentConnection(message) && Objects.equals(currentRoom, message.roomId())) {
-                    closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng.");
+                    closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); clearChat();
                 }
                 return null;
             }); return;
+        }
+        if ("CHAT_MESSAGE".equals(message.type())) {
+            JsonObject b = message.body();
+            long id = b.get("id").getAsLong();
+            long uId = b.has("userId") && !b.get("userId").isJsonNull() ? b.get("userId").getAsLong() : 0;
+            String name = b.has("displayName") ? b.get("displayName").getAsString() : "";
+            String text = b.has("content") ? b.get("content").getAsString() : "";
+            String sentAt = b.has("sentAt") ? b.get("sentAt").getAsString() : Instant.now().toString();
+            common.chat.ChatMessage chatMsg = new common.chat.ChatMessage(id, 0, uId, name, text, sentAt);
+            for (ChatListener listener : chatListeners) {
+                listener.onChatMessage(chatMsg);
+            }
+            return;
         }
         if (active != null && message.revision() != null && message.revision() <= active.revision()) return;
         if (message.body().has("room")) {
