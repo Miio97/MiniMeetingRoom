@@ -53,6 +53,26 @@ public final class MeetingScreen extends BorderPane {
     private final Label lockLabel = Ui.label("", "caption");
     private final Label participantCount = Ui.label("", "caption");
     private final Label roomError = Ui.label("", "error-text");
+    private final Label adaptiveStatus = Ui.label("", "caption");
+    private final Label connectionStatus = Ui.label("", "caption");
+    private boolean reconnecting;
+    private final javafx.beans.value.ChangeListener<client.meeting.MeetingSession.State> connectionListener =
+            (observable, before, after) -> connectionState(after);
+    private void connectionState(client.meeting.MeetingSession.State state) {
+        if (disposed) return;
+        boolean waiting = state == client.meeting.MeetingSession.State.RECONNECTING;
+        controls.mic.setDisable(waiting); controls.camera.setDisable(waiting); controls.share.setDisable(waiting);
+        tabs.setDisable(waiting);
+        if (waiting && !reconnecting) {
+            if (cameraSettings != null) cameraSettings.close();
+            if (screenPicker != null) screenPicker.close();
+            pauseFileTransfers();
+        } else if (!waiting && reconnecting && state == client.meeting.MeetingSession.State.CONNECTED) {
+            restoreFileTransfers();
+            roomError.setText("Đã kết nối lại. Bạn có thể bật lại camera và mic.");
+        }
+        reconnecting = waiting;
+    }
     private List<RoomParticipant> participantSnapshot = List.of();
     private boolean disposed, polling, leaving;
     private boolean sharing, panelOpen = true;
@@ -99,6 +119,19 @@ public final class MeetingScreen extends BorderPane {
         networkSignal = new NetworkSignalWidget();
         networkSignal.update(null, network.snapshot());
         HBox statusLine = Ui.row(8, networkSignal); statusLine.setAlignment(Pos.CENTER_LEFT);
+        if (videoRoom) {
+            connectionStatus.setId("meeting-connection-status");
+            connectionStatus.textProperty().bind(mediaSession.noticeProperty());
+            connectionStatus.visibleProperty().bind(mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
+            connectionStatus.managedProperty().bind(connectionStatus.visibleProperty());
+            statusLine.getChildren().add(0, connectionStatus);
+            adaptiveStatus.setId("adaptive-video-status");
+            adaptiveStatus.textProperty().bind(javafx.beans.binding.Bindings.createStringBinding(
+                    () -> mediaController.qualityProperty().get().label, mediaController.qualityProperty()));
+            adaptiveStatus.visibleProperty().bind(mediaController.qualityProperty().isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.NORMAL));
+            adaptiveStatus.managedProperty().bind(adaptiveStatus.visibleProperty());
+            statusLine.getChildren().add(0, adaptiveStatus);
+        }
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
         participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand,
@@ -141,6 +174,7 @@ public final class MeetingScreen extends BorderPane {
                 networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
             }
             manager.sfuSession().roomProperty().addListener(videoRoomListener); renderNativeParticipants();
+            mediaSession.stateProperty().addListener(connectionListener); connectionState(mediaSession.stateProperty().get());
         }
         people.addListener((ListChangeListener<MockData.Participant>) change -> {
             peakPeople = Math.max(peakPeople, people.size());
@@ -163,7 +197,7 @@ public final class MeetingScreen extends BorderPane {
             p.userId() != selfId || !manager.mic(), p.userId() == selfId && manager.camera(), MockData.avatarColor(p.displayName()))).toList());
     }
     private void refreshRoom() {
-        if (disposed || polling || leaving) return;
+        if (disposed || polling || leaving || reconnecting) return;
         if (videoRoom) {
             polling = true;
             manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> {
@@ -205,6 +239,7 @@ public final class MeetingScreen extends BorderPane {
         manager.camera(!manager.camera()); controls.camera(manager.camera()); updateSelf();
     }
     private void deviceSettings() {
+        if (reconnecting) return;
         if (disposed) return;
         if (videoRoom) {
             if (cameraSettings != null && cameraSettings.isShowing()) return;
@@ -394,6 +429,9 @@ public final class MeetingScreen extends BorderPane {
         networkSignal.dispose();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.
+            mediaSession.stateProperty().removeListener(connectionListener);
+            connectionStatus.textProperty().unbind(); connectionStatus.visibleProperty().unbind(); connectionStatus.managedProperty().unbind();
+            adaptiveStatus.textProperty().unbind(); adaptiveStatus.visibleProperty().unbind(); adaptiveStatus.managedProperty().unbind();
             if (statsListener != null) mediaController.statsProperty().removeListener(statsListener);
             mediaSession.roomProperty().removeListener(videoRoomListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);

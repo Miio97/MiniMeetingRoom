@@ -20,6 +20,112 @@ public class VideoCallIntegrationTest {
     @TempDir static Path temporary;
     private static RoomTestFixture.Tls tls;
     @BeforeAll static void runtime() throws Exception { FxTestRuntime.start(); tls = RoomTestFixture.certificates(temporary); }
+    @Test void transportRecoveryKeepsMembershipAndBorrowedMediaOwnerWithoutReopeningCapture() throws Exception {
+        try (VideoTestFixture fixture = new VideoTestFixture(tls, temporary.resolve("recovery"))) {
+            var transport = new java.util.concurrent.atomic.AtomicReference<client.signalingapi.SignalingClient>();
+            var account = fixture.database.account("recoverMediaHost", "Host");
+            var host = fixture.session(account, transport::set);
+            var guest = fixture.session(fixture.database.account("recoverMediaGuest", "Guest"));
+            VideoCallController h = null, g = null;
+            try {
+                var room = host.create(new CreateRoomParams("Recovery", "1234", 2, false)).get(10, TimeUnit.SECONDS);
+                host.join(false, false).get(10, TimeUnit.SECONDS);
+                guest.lookup(room.joinCode(), "1234").get(10, TimeUnit.SECONDS); guest.join(false, false).get(10, TimeUnit.SECONDS);
+                h = host.video(); g = guest.video(); var camera = h; var receiver = g;
+                String participant = host.selfParticipantId(); long storedRoom = host.snapshot().collaborationRoom().id();
+                h.publishPreparedCamera().get(10, TimeUnit.SECONDS); g.publishPreparedCamera().get(10, TimeUnit.SECONDS);
+                h.startInput(() -> new GeneratedCamera(0)).get(15, TimeUnit.SECONDS);
+                g.startInput(() -> new GeneratedCamera(1)).get(15, TimeUnit.SECONDS);
+                h.audio().access(true).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.call(h.audio()::toggle).get(15, TimeUnit.SECONDS);
+                FxTestRuntime.call(() -> camera.screen().toggleInput(GeneratedScreen::new)).get(15, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> receiver.frames(participant).receivedFrames() > 3
+                        && receiver.audio().receivedSamples(participant) > 4800 && receiver.screen().frames(participant).receivedFrames() > 3);
+                var bad = new AdaptiveVideoPolicy.Evidence(800.0, 100.0, 15.0);
+                long seed = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
+                for (int second = 0; second <= 18; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, bad).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
+                transport.get().close();
+                FxTestRuntime.await(() -> host.stateProperty().get() == MeetingSession.State.RECONNECTING);
+                FxTestRuntime.await(() -> host.stateProperty().get() == MeetingSession.State.CONNECTED);
+                assertSame(camera, host.video()); assertEquals(participant, host.selfParticipantId()); assertTrue(host.isHost());
+                assertEquals(2, fixture.database.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+                assertEquals(2, fixture.database.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+                new server.filetransfer.FileMetadataRepository(fixture.database::connection).authorize(account.user().id(), storedRoom);
+                FxTestRuntime.await(() -> !camera.cameraRequestedProperty().get() && !camera.audio().requestedProperty().get() && !camera.screen().requestedProperty().get());
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.NORMAL);
+                long beforeReceive = camera.frames(guest.selfParticipantId()).receivedFrames();
+                FxTestRuntime.await(() -> camera.frames(guest.selfParticipantId()).receivedFrames() > beforeReceive + 3);
+                camera.startInput(() -> new GeneratedCamera(0)).get(15, TimeUnit.SECONDS);
+                FxTestRuntime.call(camera.audio()::toggle).get(15, TimeUnit.SECONDS);
+                long beforeVideo = receiver.frames(participant).receivedFrames(); long beforeAudio = receiver.audio().receivedSamples(participant);
+                FxTestRuntime.await(() -> receiver.frames(participant).receivedFrames() > beforeVideo + 3 && receiver.audio().receivedSamples(participant) > beforeAudio + 4800);
+            } finally {
+                host.close(); guest.close();
+                if (h != null) h.closeComplete().get(15, TimeUnit.SECONDS); if (g != null) g.closeComplete().get(15, TimeUnit.SECONDS);
+            }
+        }
+    }
+    @Test void adaptiveVideoReducesResolutionProtectsVoiceAndRespectsManualCameraOff() throws Exception {
+        try (VideoTestFixture fixture = new VideoTestFixture(tls, temporary.resolve("adaptive"))) {
+            var host = fixture.session(fixture.database.account("adaptiveHost", "Host"));
+            var guest = fixture.session(fixture.database.account("adaptiveGuest", "Guest"));
+            VideoCallController h = null, g = null;
+            try {
+                var room = host.create(new CreateRoomParams("Adaptive", "1234", 2, false)).get(10, TimeUnit.SECONDS);
+                host.join(false, false).get(10, TimeUnit.SECONDS);
+                guest.lookup(room.joinCode(), "1234").get(10, TimeUnit.SECONDS); guest.join(false, false).get(10, TimeUnit.SECONDS);
+                h = host.video(); g = guest.video(); var camera = h; var other = g;
+                h.publishPreparedCamera().get(10, TimeUnit.SECONDS); g.publishPreparedCamera().get(10, TimeUnit.SECONDS);
+                h.startInput(() -> new GeneratedCamera(0)).get(15, TimeUnit.SECONDS);
+                g.startInput(() -> new GeneratedCamera(1)).get(15, TimeUnit.SECONDS);
+                h.audio().access(true).get(5, TimeUnit.SECONDS); g.audio().access(true).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.call(h.audio()::toggle).get(15, TimeUnit.SECONDS); FxTestRuntime.call(g.audio()::toggle).get(15, TimeUnit.SECONDS);
+                var videoReceived = g.frames(host.selfParticipantId());
+                FxTestRuntime.await(() -> videoReceived.receivedFrames() > 3 && other.audio().receivedSamples(host.selfParticipantId()) > 4800);
+                assertTrue(camera.audio().networkQuality().known(), "Actual Opus peers must supply voice quality measurements");
+                FxTestRuntime.call(() -> camera.screen().toggleInput(GeneratedScreen::new)).get(15, TimeUnit.SECONDS);
+                var screenReceived = other.screen().frames(host.selfParticipantId());
+                FxTestRuntime.await(() -> screenReceived.receivedFrames() > 3);
+                long seed = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
+                var bad = new AdaptiveVideoPolicy.Evidence(800.0, 100.0, 15.0);
+                var good = new AdaptiveVideoPolicy.Evidence(40.0, 5.0, 0.0);
+                for (int second = 0; second <= 10; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, good).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.LOW);
+                FxTestRuntime.await(() -> videoReceived.imageProperty().get() != null && videoReceived.imageProperty().get().getWidth() <= 128);
+                for (int second = 11; second <= 18; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, bad).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
+                assertTrue(FxTestRuntime.call(() -> camera.cameraRequestedProperty().get()), "Network pause preserves user intent");
+                Thread.sleep(1000); long beforePause = videoReceived.receivedFrames();
+                long screenBeforePause = screenReceived.receivedFrames();
+                long audioBefore = other.audio().receivedSamples(host.selfParticipantId());
+                long incomingAudioBefore = camera.audio().receivedSamples(guest.selfParticipantId());
+                Thread.sleep(1500);
+                assertTrue(videoReceived.receivedFrames() <= beforePause + 1, "Video RTP must stop while voice continues");
+                assertTrue(screenReceived.receivedFrames() <= screenBeforePause + 1, "Screen RTP must also stop to protect voice");
+                assertTrue(other.audio().receivedSamples(host.selfParticipantId()) > audioBefore + 4800);
+                assertTrue(camera.audio().receivedSamples(guest.selfParticipantId()) > incomingAudioBefore + 4800);
+                for (int second = 19; second <= 58; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), good, good).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.NORMAL && videoReceived.receivedFrames() > beforePause + 3);
+                FxTestRuntime.await(() -> screenReceived.receivedFrames() > screenBeforePause + 3);
+                FxTestRuntime.await(() -> videoReceived.imageProperty().get() != null && videoReceived.imageProperty().get().getWidth() == 320);
+                for (int second = 59; second <= 78; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, bad).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
+                FxTestRuntime.call(() -> camera.toggleInput(() -> new GeneratedCamera(0), false)).get(10, TimeUnit.SECONDS);
+                FxTestRuntime.call(() -> camera.screen().toggleInput(GeneratedScreen::new)).get(10, TimeUnit.SECONDS);
+                for (int second = 79; second <= 118; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), good, good).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.NORMAL && !camera.cameraRequestedProperty().get());
+                assertNoVideoSource(host, host.selfParticipantId());
+                assertFalse(host.videoRequest("SCREEN_STATE", new com.google.gson.JsonObject(), UUID.randomUUID().toString()).get(10, TimeUnit.SECONDS).getAsJsonObject("sources").has(host.selfParticipantId()));
+            } finally {
+                host.close(); guest.close();
+                if (h != null) h.closeComplete().get(15, TimeUnit.SECONDS); if (g != null) g.closeComplete().get(15, TimeUnit.SECONDS);
+            }
+        }
+    }
+    private static void assertNoVideoSource(MeetingSession session, String participant) throws Exception {
+        assertFalse(session.videoRequest("VIDEO_STATE", new com.google.gson.JsonObject(), UUID.randomUUID().toString()).get(10, TimeUnit.SECONDS).getAsJsonObject("sources").has(participant));
+    }
     @Test void rapidCameraPressesCancelAnOpeningCaptureAndFinishAtTheLastChoice() throws Exception {
         try (VideoTestFixture fixture = new VideoTestFixture(tls, temporary.resolve("rapid-toggle"))) {
             var account = fixture.database.account("rapidHost", "Rapid Host");

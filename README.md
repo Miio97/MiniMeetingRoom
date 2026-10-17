@@ -1,5 +1,9 @@
 # MiniMeetingRoom
 
+Camera tự giảm bitrate, FPS và kích thước theo thống kê WebRTC; chỉ tạm dừng truyền/nhận video và chia sẻ khi chất lượng thoại bị ảnh hưởng kéo dài. Mạng ổn định sẽ khôi phục dần, giữ nguyên lựa chọn tắt camera/mic/chia sẻ của người dùng. Không thêm migration. Xem [chất lượng video tự động](docs/adaptive-video.md).
+
+Mất kết nối signaling sẽ giữ thành viên và vai trò chủ phòng tối đa **2 phút** để client tự kết nối lại cùng phiên. Hết hạn, giao diện tự thoát cuộc họp; kết nối lại thành công giữ quyền gửi tệp. Camera/mic/chia sẻ cần bật lại bằng tay sau mất kết nối. Cần build và khởi động lại cả server lẫn client, không thêm migration. Xem [khôi phục kết nối phòng](docs/meeting-recovery.md).
+
 Cập nhật điều khiển phòng: sảnh tự cập nhật khoảng 2 giây/lần; quản lý phòng nằm trong Cài đặt; tab Chờ duyệt bên phải dành cho host, bật khi phòng yêu cầu duyệt, yêu cầu hết hạn sau 5 phút; host chọn người kế nhiệm hoặc đóng phòng khi rời; icon mắt ẩn/hiện thanh công cụ. Không cần migration mới. Xem [luồng và kiểm thử](docs/room-controls.md).
 
 Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên, video call và chia sẻ tệp đã kết nối backend. Form tạo/tham gia có sẵn dùng signaling TCP/TLS cho phòng mới; dữ liệu tệp dùng dịch vụ TCP/TLS riêng với cùng membership. Chat văn bản thời gian thực, duyệt thành viên, khóa phòng, mời ra và chuyển chủ dùng cùng phòng với video và tệp. Khi chủ phòng chủ động rời, giao diện yêu cầu chọn người kế nhiệm hoặc đóng cả phòng; mất kết nối đột ngột vẫn dùng cơ chế chuyển chủ dự phòng. Phòng mới có voice chat Opus và chia sẻ màn hình/cửa sổ VP8 độc lập camera.

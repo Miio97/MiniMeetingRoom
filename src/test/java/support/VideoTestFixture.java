@@ -71,8 +71,13 @@ public final class VideoTestFixture implements AutoCloseable {
     }
     public client.auth.AuthClient client() { return new client.auth.AuthClient("localhost", collaboration.port(), clientTls, 5000); }
     public MeetingSession session(AuthResponse account) {
-        return new MeetingSession(account.token(), Instant.parse(account.expiresAt()), listener -> new SignalingClient(
-                new SignalingClient.Settings("localhost", signaling.port(), null, SignalWire.DEFAULT_MAX_BYTES), tls.client(), listener),
+        return session(account, ignored -> { });
+    }
+    public MeetingSession session(AuthResponse account, java.util.function.Consumer<SignalingClient> created) {
+        return new MeetingSession(account.token(), Instant.parse(account.expiresAt()), listener -> {
+            var transport = new SignalingClient(new SignalingClient.Settings("localhost", signaling.port(), null, SignalWire.DEFAULT_MAX_BYTES), tls.client(), listener);
+            created.accept(transport); return transport;
+        },
                 session -> new client.media.VideoCallController(session::videoRequest, session::snapshot, session::selfParticipantId,
                         new client.media.CameraConsentStore(diagnosticDirectory.getParent().resolve("camera-" + UUID.randomUUID() + ".properties")), List::of, true, new client.media.MicrophoneConsentStore(diagnosticDirectory.getParent().resolve("mic-" + UUID.randomUUID() + ".properties"))));
     }
