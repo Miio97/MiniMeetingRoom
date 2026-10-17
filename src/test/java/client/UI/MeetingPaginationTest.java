@@ -154,7 +154,7 @@ class MeetingPaginationTest {
         return null;
     }
 
-    @Test void meetingScreenBottomBarContainsNetworkSignalWidget() throws Exception {
+    @Test void meetingScreenContainsNetworkSignalWidgetInTopBar() throws Exception {
         FxTestRuntime.call(() -> {
             Stage stage = new Stage();
             SceneManager manager = new SceneManager(stage, new AuthClient(), new FileTransferClient());
@@ -168,6 +168,8 @@ class MeetingPaginationTest {
             Scene scene = new Scene(screen, 1280, 720);
             stage.setScene(scene);
             screen.layout();
+
+            assertNull(screen.lookup("#room-management"), "Room management button should be removed");
 
             Node signalNode = screen.lookup("#network-signal");
             assertNotNull(signalNode, "Expected #network-signal in MeetingScreen");

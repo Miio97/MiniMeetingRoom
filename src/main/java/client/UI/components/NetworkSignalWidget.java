@@ -193,7 +193,22 @@ public final class NetworkSignalWidget extends Button {
             double w = popoverContent.prefWidth(-1);
             double h = popoverContent.prefHeight(-1);
             double x = bounds.getMinX() + (bounds.getWidth() - w) / 2.0;
-            double y = bounds.getMinY() - h - 6;
+            double screenRight = window.getX() + window.getWidth();
+            if (x + w > screenRight - 12) {
+                x = screenRight - w - 12;
+            }
+            if (x < window.getX() + 12) {
+                x = window.getX() + 12;
+            }
+
+            double y;
+            if (bounds.getMinY() - h - 6 < window.getY() + 10) {
+                // Near the top of the window, show below the widget
+                y = bounds.getMaxY() + 6;
+            } else {
+                // Near the bottom, show above the widget
+                y = bounds.getMinY() - h - 6;
+            }
             popover.show(window, Math.max(10, x), Math.max(10, y));
         } else if (window.isShowing()) {
             popover.show(window);
