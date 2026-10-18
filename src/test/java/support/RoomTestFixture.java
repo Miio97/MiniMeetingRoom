@@ -77,11 +77,25 @@ public final class RoomTestFixture implements AutoCloseable {
                     Tham_Gia_Luc TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     Roi_Phong_Luc TIMESTAMP NULL, Ly_Do_Roi VARCHAR(30))
                 """);
+        execute("""
+                CREATE TABLE Lich_Hen (
+                    Ma_Lich_Hen BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    Ma_Nguoi_Tao BIGINT NOT NULL REFERENCES Nguoi_Dung(Ma_Nguoi_Dung),
+                    Tieu_De VARCHAR(100) NOT NULL,
+                    Mo_Ta VARCHAR(1000) NULL,
+                    Bat_Dau_Luc TIMESTAMP NOT NULL,
+                    Ket_Thuc_Luc TIMESTAMP NOT NULL,
+                    Lap_Lai VARCHAR(20) NOT NULL DEFAULT 'KHONG',
+                    Ma_Phong BIGINT NULL REFERENCES Phong_Hop(Ma_Phong),
+                    Ngay_Tao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    Ngay_Xoa TIMESTAMP NULL)
+                """);
         Clock clock = Clock.systemUTC();
         PasswordHasher hasher = new PasswordHasher();
         ApplicationService application = new ApplicationService(
                 new AuthService(this::connection, hasher, clock, Duration.ofHours(24)),
-                new RoomService(this::connection, hasher, clock));
+                new RoomService(this::connection, hasher, clock),
+                new server.schedule.ScheduleService(this::connection, clock));
         server = new AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0), request -> {
             beforeRequest.accept(request);
             return application.handle(request);

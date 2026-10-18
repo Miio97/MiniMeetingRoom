@@ -30,7 +30,9 @@ public class IconButton extends Button {
         Map.entry("arrow", "M5 12h14 M13 6l6 6-6 6"),
         Map.entry("check", "M4 12l5 5L20 6"),
         Map.entry("eye", "M2 12Q12 -2 22 12Q12 26 2 12Z M15 12A3 3 0 1 0 9 12A3 3 0 1 0 15 12"),
-        Map.entry("eye-off", "M2 12Q12 -2 22 12Q12 26 2 12 M15 12A3 3 0 1 0 9 12 M2 2L22 22")
+        Map.entry("eye-off", "M2 12Q12 -2 22 12Q12 26 2 12 M15 12A3 3 0 1 0 9 12 M2 2L22 22"),
+        Map.entry("calendar", "M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"),
+        Map.entry("trash", "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M10 11v6 M14 11v6")
     );
     public IconButton(String icon, String tooltip) {
         getStyleClass().add("icon-button"); setIcon(icon); setTooltip(new Tooltip(tooltip)); setAccessibleText(tooltip);

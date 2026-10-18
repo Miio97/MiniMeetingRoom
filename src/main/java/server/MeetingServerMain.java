@@ -48,6 +48,9 @@ public final class MeetingServerMain {
                             statement.executeQuery("SELECT Ma_Tin_Nhan, Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Ngay_Xoa FROM Tin_Nhan WHERE 1=0").close();
                         }
                     }
+                    try (var connection = server.database.DatabaseConnection.getConnection(); var statement = connection.createStatement()) {
+                        statement.executeQuery("SELECT Ma_Lich_Hen, Ma_Nguoi_Tao, Tieu_De, Mo_Ta, Bat_Dau_Luc, Ket_Thuc_Luc, Lap_Lai, Ma_Phong, Ngay_Tao, Ngay_Xoa FROM Lich_Hen WHERE 1=0").close();
+                    }
                     char[] password = ServerConfig.get("auth.keystorePassword", "changeit-local-only").toCharArray();
                     javax.net.ssl.SSLContext tls;
                     try { tls = TlsSupport.server(Path.of(ServerConfig.get("auth.keystore", "config/auth-dev.p12")), password); }

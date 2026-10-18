@@ -96,6 +96,33 @@ class RoomServiceTest {
         other = session("Other", "Khách hai");
     }
 
+    @Test
+    void paginatesOwnRoomsThreeThenTenUntilExhausted() throws Exception {
+        for (int i = 0; i < 27; i++) {
+            execute("INSERT INTO Phong_Hop (Ma_Phong_Tham_Gia, Ten_Phong, Ma_Chu_Phong) VALUES ('MMR-PAGE" + i
+                    + "', 'Page room " + i + "', " + host.userId() + ")");
+        }
+        Set<Long> ids = new HashSet<>();
+        int offset = 0;
+        for (int size : new int[] {3, 10, 10, 10}) {
+            AuthResponse page = service.handle(new AuthRequest("LIST_ROOMS", null, null, null, null,
+                    host.token(), RoomRequest.page(offset, size)));
+            assertTrue(page.success(), page::message);
+            assertEquals(Math.min(size, 27 - offset), page.rooms().size());
+            for (RoomInfo room : page.rooms()) assertTrue(ids.add(room.id()), "Duplicate across pages");
+            offset += page.rooms().size();
+            assertEquals(offset < 27, page.hasMoreRooms());
+        }
+        assertEquals(27, ids.size());
+        AuthResponse empty = service.handle(new AuthRequest("LIST_ROOMS", null, null, null, null,
+                other.token(), RoomRequest.page(0, 3)));
+        assertTrue(empty.rooms().isEmpty());
+        assertFalse(empty.hasMoreRooms());
+        AuthResponse invalid = service.handle(new AuthRequest("LIST_ROOMS", null, null, null, null,
+                host.token(), RoomRequest.page(-1, 10)));
+        assertFalse(invalid.success());
+    }
+
     @AfterEach
     void clearDatabase() throws SQLException {
         execute("DROP ALL OBJECTS");

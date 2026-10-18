@@ -95,7 +95,7 @@ public final class RoomService {
                     case "CREATE_ROOM" -> create(connection, userId, request.room());
                     case "REOPEN_ROOM" -> reopen(connection, userId, request.room());
                     case "JOIN_ROOM" -> join(connection, userId, request.room());
-                    case "LIST_ROOMS" -> list(connection, userId);
+                    case "LIST_ROOMS" -> list(connection, userId, request.room());
                     case "GET_ROOM" -> get(connection, userId, request.room());
                     case "LEAVE_ROOM" -> leave(connection, userId, request.room());
                     default -> throw new IllegalStateException("Unsupported room action");
@@ -221,23 +221,27 @@ public final class RoomService {
         return AuthResponse.roomOk("Đã mở lại phòng.", snapshot(connection, findRoom(connection, room.id()), true));
     }
 
-    private AuthResponse list(Connection connection, long userId) throws SQLException {
+    private AuthResponse list(Connection connection, long userId, RoomRequest request) throws SQLException {
+        int offset = request == null ? 0 : request.offset();
+        int limit = request == null ? 20 : request.limit();
         List<RoomInfo> rooms = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + ROOM_COLUMNS + ", (SELECT COUNT(DISTINCT t.Ma_Nguoi_Dung) FROM Thanh_Vien_Phong t "
                         + "WHERE t.Ma_Phong = p.Ma_Phong AND t.Roi_Phong_Luc IS NULL) AS So_Thanh_Vien "
                         + "FROM Phong_Hop p WHERE (p.Ma_Chu_Phong = ? OR EXISTS "
                         + "(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong = p.Ma_Phong AND h.Ma_Nguoi_Dung = ?)) "
-                        + "ORDER BY p.Ngay_Tao DESC, p.Ma_Phong DESC LIMIT 20")) {
+                        + "ORDER BY p.Ngay_Tao DESC, p.Ma_Phong DESC LIMIT ? OFFSET ?")) {
             statement.setLong(1, userId);
             statement.setLong(2, userId);
+            statement.setInt(3, limit + 1);
+            statement.setInt(4, offset);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
                     rooms.add(toInfo(readRoom(result), result.getInt("So_Thanh_Vien"), List.of()));
                 }
             }
         }
-        return AuthResponse.roomsOk("Đã tải danh sách phòng.", List.copyOf(rooms));
+        return AuthResponse.roomsPage(List.copyOf(rooms.subList(0, Math.min(limit, rooms.size()))), rooms.size() > limit);
     }
 
     private AuthResponse get(Connection connection, long userId, RoomRequest request) throws SQLException {
@@ -297,6 +301,9 @@ public final class RoomService {
 
     private static String validate(String action, RoomRequest request) {
         if ("LIST_ROOMS".equals(action)) {
+            if (request != null && (request.offset() < 0 || request.limit() < 1 || request.limit() > 20)) {
+                return "Phân trang phòng không hợp lệ.";
+            }
             return null;
         }
         if (request == null) {

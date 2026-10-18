@@ -60,10 +60,10 @@ class EmailOtpTransportTest {
             assertTrue(client.resetPassword("otp@example.invalid", "975304", "Replacement-password-7!").success());
 
             assertEquals(List.of(
-                    new AuthRequest("REGISTER", "KhoaOtp", "Initial-password-9!", "Trần Khoa", "otp@example.invalid", null, null, null),
+                    new AuthRequest("REGISTER", "KhoaOtp", "Initial-password-9!", "Trần Khoa", "otp@example.invalid", null, null),
                     new AuthRequest("VERIFY_REGISTRATION", null, null, null, "otp@example.invalid", null, null, "482061", CHALLENGE),
                     new AuthRequest("RESEND_REGISTRATION_OTP", null, null, null, "otp@example.invalid", null, null, null, CHALLENGE),
-                    new AuthRequest("REQUEST_PASSWORD_RESET", null, null, null, "otp@example.invalid", null, null, null),
+                    new AuthRequest("REQUEST_PASSWORD_RESET", null, null, null, "otp@example.invalid", null, null),
                     new AuthRequest("RESET_PASSWORD", null, "Replacement-password-7!", null, "otp@example.invalid", null, null, "975304")
             ), received);
         }
