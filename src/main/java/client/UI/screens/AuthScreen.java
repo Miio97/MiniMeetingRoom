@@ -179,6 +179,11 @@ public final class AuthScreen extends HBox {
         showStatus("Tạo tài khoản thành công. Bạn có thể đăng nhập ngay.", true); inputs.get(1).field.requestFocus();
     }
 
+    /** Open the existing recovery form after the manager has revoked any authenticated session. */
+    public void showPasswordReset() {
+        showResetEmail();
+    }
+
     private void showResetEmail() {
         if (pending || disposed) return;
         pendingEmail = ""; pendingUsername = ""; pendingRegistrationChallenge = ""; beginStep(Step.RESET_EMAIL);

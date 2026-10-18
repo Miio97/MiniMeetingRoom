@@ -229,6 +229,15 @@ public final class SceneManager {
     public String user() { return authenticatedUser == null ? "" : authenticatedUser.displayName(); }
     public String username() { return authenticatedUser == null ? "" : authenticatedUser.username(); }
     public String email() { return authenticatedUser == null || authenticatedUser.email() == null ? "" : authenticatedUser.email(); }
+    private final ReadOnlyBooleanWrapper emailVerified = new ReadOnlyBooleanWrapper(false);
+    public boolean emailVerified() { return emailVerified.get(); }
+    public ReadOnlyBooleanProperty emailVerifiedProperty() { return emailVerified.getReadOnlyProperty(); }
+    public void updateAccount(AuthUser user) {
+        if (authenticatedUser == null || user == null || user.id() != authenticatedUser.id())
+            throw new IllegalArgumentException("Thông tin tài khoản không khớp phiên đăng nhập.");
+        authenticatedUser = user;
+        emailVerified.set(user.emailVerified());
+    }
     public ReadOnlyBooleanProperty logoutPendingProperty() { return logoutPending.getReadOnlyProperty(); }
     public void acceptSession(AuthResponse response) {
         if (!response.success() || response.user() == null || response.token() == null || response.token().isBlank()) {
@@ -236,6 +245,7 @@ public final class SceneManager {
         }
         recentRooms = null; recentRoomsAt = 0;
         authenticatedUser = response.user(); sessionToken = response.token(); pendingToken = null;
+        emailVerified.set(authenticatedUser.emailVerified());
         sessionExpiresAt = response.expiresAt() == null ? java.time.Instant.EPOCH : java.time.Instant.parse(response.expiresAt());
     }
     /** Gửi mạng ngoài luồng JavaFX; chỉ cập nhật màn hình khi ứng dụng còn hoạt động. */
@@ -317,8 +327,21 @@ public final class SceneManager {
         return "Không thể kết nối máy chủ. Kiểm tra kết nối và khởi động server rồi thử lại.";
     }
     public void logout() {
+        logout(false);
+    }
+    /** Recovery entered from settings first follows the normal confirmed server logout flow. */
+    public void forgotPassword() {
         if (closing || logoutPending.get()) return;
-        if (sessionToken == null) { clearSession(); auth(); return; }
+        if (sessionToken == null) { auth(); openPasswordReset(); return; }
+        logout(true);
+    }
+    private void openPasswordReset() {
+        if (!closing && stage.getScene() != null && stage.getScene().getRoot() instanceof AuthScreen screen)
+            screen.showPasswordReset();
+    }
+    private void logout(boolean resetAfterLogout) {
+        if (closing || logoutPending.get()) return;
+        if (sessionToken == null) { clearSession(); auth(); if (resetAfterLogout) openPasswordReset(); return; }
         boolean videoWasOpen = hasVideoRoom();
         closeSfuSession();
         logoutPending.set(true); stage.getScene().getRoot().setDisable(true);
@@ -338,8 +361,8 @@ public final class SceneManager {
         }, response -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
             if (leftRoom.get()) { roomJoined = false; pendingRoomId = -1; }
-            if (sessionExpired(response)) return;
-            if (response.success()) { clearSession(); auth(); }
+            if (sessionExpired(response)) { if (resetAfterLogout) openPasswordReset(); return; }
+            if (response.success()) { clearSession(); auth(); if (resetAfterLogout) openPasswordReset(); }
             else { restoreAfterLogoutFailure(leftRoom.get()); logoutError(response.message()); }
         }, error -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
@@ -354,6 +377,7 @@ public final class SceneManager {
         if (current instanceof MeetingScreen && roomJoined) meeting();
         else if (current instanceof PreJoinScreen && roomJoined) preJoin(roomInfo);
         else if (current instanceof LobbyScreen) lobby();
+        else if (current instanceof SettingsScreen) settingsAccount();
     }
     private void logoutError(String message) {
         Alert alert = new Alert(Alert.AlertType.ERROR); alert.initOwner(stage); alert.setTitle("Chưa thể đăng xuất");
@@ -365,6 +389,7 @@ public final class SceneManager {
         recentRooms = null; recentRoomsAt = 0;
         closeSfuSession(); sessionExpiresAt = null;
         authenticatedUser = null; sessionToken = null; preferences.clear(); meetingState = null;
+        emailVerified.set(false);
         roomInfo = null; roomJoined = false; pendingRoomId = -1;
         mic = true; camera = true; locked = false; room = MockData.rooms().getFirst();
     }

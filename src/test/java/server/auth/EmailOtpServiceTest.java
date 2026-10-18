@@ -71,20 +71,20 @@ class EmailOtpServiceTest {
         AuthResponse response = register("Khoa", "  KHOA@example.com ");
         assertTrue(response.success()); assertEquals("OTP_REQUIRED", response.code());
         assertTrue(response.registrationChallenge().matches("[A-Za-z0-9_-]{43}"));
-        assertNotEquals(response.registrationChallenge(), scalar("SELECT Registration_Challenge_Hash FROM Auth_Email_OTP"));
+        assertNotEquals(response.registrationChallenge(), scalar("SELECT Registration_Challenge_Hash FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
         assertFalse(response.toString().contains(response.registrationChallenge()));
         assertEquals(0, count("Nguoi_Dung")); assertEquals(0, count("Phien_Dang_Nhap"));
         assertEquals("khoa@example.com", mail.last().email());
         assertTrue(mail.last().code().matches("[0-9]{6}"));
         assertNull(response.user()); assertNull(response.token()); assertFalse(response.message().contains(mail.last().code()));
         assertFalse(login(PASSWORD).success());
-        assertNotEquals(mail.last().code(), scalar("SELECT Code_Hash FROM Auth_Email_OTP"));
-        String pendingHash = scalar("SELECT Pending_Password_Hash FROM Auth_Email_OTP");
+        assertNotEquals(mail.last().code(), scalar("SELECT Code_Hash FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
+        String pendingHash = scalar("SELECT Pending_Password_Hash FROM Auth_Email_OTP WHERE Purpose='REGISTER'");
         assertNotEquals(PASSWORD, pendingHash); assertTrue(passwords.verify(PASSWORD, pendingHash));
         assertTrue(verify("khoa@example.com", mail.last().code()).success());
         assertEquals(1, count("Nguoi_Dung")); assertEquals(0, count("Phien_Dang_Nhap"));
-        assertNull(scalar("SELECT Code_Hash FROM Auth_Email_OTP"));
-        assertNull(scalar("SELECT Pending_Password_Hash FROM Auth_Email_OTP"));
+        assertNull(scalar("SELECT Code_Hash FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
+        assertNull(scalar("SELECT Pending_Password_Hash FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
         assertTrue(login(PASSWORD).success());
     }
 
@@ -106,11 +106,11 @@ class EmailOtpServiceTest {
         }
         service = newService();
         assertEquals("OTP_LOCKED", verify("khoa@example.com", good).code());
-        assertEquals("5", scalar("SELECT Attempts FROM Auth_Email_OTP"));
+        assertEquals("5", scalar("SELECT Attempts FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
         assertEquals(0, count("Nguoi_Dung"));
         clock.advance(Duration.ofSeconds(60));
         assertEquals("OTP_REQUIRED", resend().code());
-        assertEquals("0", scalar("SELECT Attempts FROM Auth_Email_OTP"));
+        assertEquals("0", scalar("SELECT Attempts FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
         assertTrue(verify("khoa@example.com", mail.last().code()).success());
     }
 
@@ -260,7 +260,7 @@ class EmailOtpServiceTest {
         register("Khoa", "khoa@example.com"); String code = mail.last().code();
         assertTrue(legacy.handle(request("REGISTER", "Khoa", PASSWORD, "Other", "other@example.com", null)).success());
         assertEquals("USERNAME_TAKEN", verify("khoa@example.com", code).code());
-        assertEquals("FALSE", scalar("SELECT Consumed FROM Auth_Email_OTP"));
+        assertEquals("FALSE", scalar("SELECT Consumed FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
         assertEquals(1, count("Nguoi_Dung"));
     }
 
@@ -311,7 +311,7 @@ class EmailOtpServiceTest {
         assertEquals("OTP_INVALID", service.handle(new AuthRequest("VERIFY_REGISTRATION", null, null, null,
                 "khoa@example.com", null, null, oldCode, oldFlow)).code());
         assertEquals(0, count("Nguoi_Dung")); assertEquals(2, mail.sent.size());
-        assertEquals("0", scalar("SELECT Attempts FROM Auth_Email_OTP"));
+        assertEquals("0", scalar("SELECT Attempts FROM Auth_Email_OTP WHERE Purpose='REGISTER'"));
         assertEquals("OTP_INVALID", service.handle(request("VERIFY_REGISTRATION", null, null, null,
                 "khoa@example.com", mail.last().code())).code(), "Email OTP alone cannot activate another registration flow");
         assertTrue(service.handle(new AuthRequest("VERIFY_REGISTRATION", null, null, null,

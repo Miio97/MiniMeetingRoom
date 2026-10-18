@@ -48,7 +48,9 @@ Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy tr�
 
 Tại đăng nhập, chọn **Quên mật khẩu?** để nhận OTP qua email đã đăng ký, nhập mã và mật khẩu mới. Đặt lại thành công thu hồi các phiên đăng nhập cũ. OTP hết hạn sau 5 phút, tối đa 5 lần nhập sai; gửi lại cách nhau 60 giây, tối đa 5 lần mỗi giờ cho một email/mục đích.
 
-Trước khi dùng OTP, chạy [script MySQL 002-email-otp.sql](database/migrations/002-email-otp.sql) trên database hiện có; script chỉ thêm hai bảng OTP, không sửa tài khoản/phòng. Database mới cũng cần migration này sau `schema.sql`. SMTP chỉ cấu hình trên server trong `config/mail.private.properties` (Git bỏ qua), theo [hướng dẫn email OTP](docs/email-otp.md). Thông tin tài khoản trong Cài đặt vẫn chỉ đọc; đổi tên và đổi mật khẩu trực tiếp trong Cài đặt chưa được thêm.
+Trước khi dùng OTP, chạy [script MySQL 002-email-otp.sql](database/migrations/002-email-otp.sql) trên database hiện có; script chỉ thêm hai bảng OTP, không sửa tài khoản/phòng. Database mới cũng cần migration này sau `schema.sql`. SMTP chỉ cấu hình trên server trong `config/mail.private.properties` (Git bỏ qua), theo [hướng dẫn email OTP](docs/email-otp.md).
+
+Trong **Cài đặt → Tài khoản**, bạn có thể sửa tên đăng nhập, tên hiển thị và email rồi chọn **Lưu thay đổi**. Tên đăng nhập/email phải chưa được tài khoản khác sử dụng; email hồ sơ vẫn có thể bỏ trống. Tên đăng nhập mới được dùng cho lần đăng nhập tiếp theo. **Đổi mật khẩu** yêu cầu mật khẩu hiện tại, mật khẩu mới đủ độ phức tạp và nhập lại khớp nhau; đổi thành công giữ phiên hiện tại và thu hồi các phiên khác. Giao diện chỉ bật nút khi server xác nhận email đã được kiểm chứng bằng OTP; sửa sang email khác sẽ vô hiệu hóa nút. Chọn **Quên mật khẩu** tại cài đặt sẽ đăng xuất phiên hiện tại rồi mở luồng khôi phục bằng OTP. Nút xác thực riêng khi đang đăng nhập vẫn dành cho bước bổ sung sau; đăng ký và khôi phục bằng OTP đã hoạt động. Các thay đổi dùng cùng TCP/TLS và hai bảng OTP hiện có, không thêm migration cho bản ghép. Xem [chi tiết chức năng tài khoản](docs/account-settings.md).
 
 ## Tạo và tham gia phòng
 

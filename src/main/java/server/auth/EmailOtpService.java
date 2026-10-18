@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
@@ -29,7 +30,7 @@ public final class EmailOtpService {
     private static final Pattern CODE = Pattern.compile("[0-9]{6}");
     private static final Duration VALIDITY = Duration.ofMinutes(5);
     private static final Duration COOLDOWN = Duration.ofSeconds(60);
-    private static final String REGISTER = "REGISTER", RESET = "RESET";
+    private static final String REGISTER = "REGISTER", RESET = "RESET", VERIFIED = "VERIFIED";
     private static final String RESET_MESSAGE = "Nếu email thuộc tài khoản đang hoạt động, mã OTP đã được gửi. Mã có hiệu lực 5 phút.";
     private final ConnectionProvider connections;
     private final PasswordHasher passwords;
@@ -171,15 +172,26 @@ public final class EmailOtpService {
                 Pending pending = row.pending();
                 AuthResponse duplicate = AuthService.duplicateAccount(connection, pending.username(), email);
                 if (duplicate != null) { connection.rollback(); return duplicate; }
+                long accountId;
                 try (PreparedStatement statement = connection.prepareStatement("""
                         INSERT INTO Nguoi_Dung (Ten_Dang_Nhap, Mat_Khau_Bam, Ten_Hien_Thi, Email) VALUES (?, ?, ?, ?)
-                        """)) {
+                        """, Statement.RETURN_GENERATED_KEYS)) {
                     statement.setString(1, pending.username());
                     statement.setString(2, pending.passwordHash());
                     statement.setString(3, pending.displayName());
                     statement.setString(4, email);
                     statement.executeUpdate();
+                    try (ResultSet keys = statement.getGeneratedKeys()) {
+                        if (!keys.next()) throw new SQLException("The verified account identity was not returned.");
+                        accountId = keys.getLong(1);
+                    }
                 }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE Auth_Email_OTP SET Account_Id=? WHERE Email=? AND Purpose=?")) {
+                    statement.setLong(1, accountId); statement.setString(2, email); statement.setString(3, REGISTER);
+                    statement.executeUpdate();
+                }
+                storeVerification(connection, accountId, email, true);
                 consume(connection, email, REGISTER);
                 connection.commit();
                 return AuthResponse.ok("Xác thực email và đăng ký thành công. Hãy đăng nhập bằng tài khoản mới.", null, null, null);
@@ -207,12 +219,19 @@ public final class EmailOtpService {
         String newHash = passwords.hash(password);
         List<String> revoked = new ArrayList<>();
         try (Connection connection = connections.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             connection.setAutoCommit(false);
             try {
+                // Profile updates and password changes lock the account first. Resolve the bound
+                // challenge without locking, then use the same order and recheck it under its lock.
+                Challenge previous = read(connection, email, RESET, false);
+                Long accountId = previous == null ? null : previous.accountId();
+                boolean activeAccount = accountId != null && lockActiveAccount(connection, accountId, email);
+                if (accountId != null && !activeAccount) { connection.rollback(); return invalidCode(); }
                 Challenge row = lock(connection, email, RESET);
                 AuthResponse validation = validateAndCount(connection, email, RESET, row, code);
                 if (validation != null) { connection.commit(); return validation; }
-                if (row.accountId() == null || !lockActiveAccount(connection, row.accountId(), email)) {
+                if (!activeAccount || !accountId.equals(row.accountId())) {
                     connection.rollback(); return invalidCode();
                 }
                 try (PreparedStatement statement = connection.prepareStatement("UPDATE Nguoi_Dung SET Mat_Khau_Bam=? WHERE Ma_Nguoi_Dung=?")) {
@@ -229,6 +248,7 @@ public final class EmailOtpService {
                     statement.setLong(2, row.accountId());
                     statement.executeUpdate();
                 }
+                storeVerification(connection, row.accountId(), email, true);
                 consume(connection, email, RESET);
                 connection.commit();
             } catch (SQLException | RuntimeException failure) { rollback(connection, failure); throw failure; }
@@ -238,6 +258,77 @@ public final class EmailOtpService {
             catch (RuntimeException ignored) { /* Already committed; periodic session checks provide a fallback. */ }
         }
         return AuthResponse.ok("Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại.", null, null, null);
+    }
+
+    /**
+     * Uses a separate purpose in the existing OTP table so requesting a new reset cannot
+     * erase an already verified email. The caller holds the account lock, never a challenge lock.
+     */
+    boolean isEmailVerified(Connection connection, long accountId, String rawEmail) throws SQLException {
+        String email = normalizedEmail(rawEmail);
+        if (email.isEmpty()) return false;
+        try {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT Email, Account_Id, Consumed FROM Auth_Email_OTP WHERE Email=? AND Purpose=?")) {
+                statement.setString(1, email); statement.setString(2, VERIFIED);
+                try (ResultSet row = statement.executeQuery()) {
+                    // False proof rows are tombstones after profile changes; do not revive older OTPs.
+                    if (row.next()) return sameMailbox(row.getString("Email"), email)
+                            && row.getLong("Account_Id") == accountId && row.getBoolean("Consumed");
+                }
+            }
+            // Successful old resets carry a trustworthy account binding. Historical registrations
+            // without Account_Id cannot be linked by username alone after an email transfer/recreation.
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT Email FROM Auth_Email_OTP WHERE Email=? AND Account_Id=?
+                    AND Consumed=TRUE AND Purpose IN ('REGISTER', 'RESET')
+                    """)) {
+                statement.setString(1, email); statement.setLong(2, accountId);
+                try (ResultSet row = statement.executeQuery()) {
+                    if (!row.next() || !sameMailbox(row.getString("Email"), email)) return false;
+                }
+            }
+            storeVerification(connection, accountId, email, true);
+            return true;
+        } catch (SQLException failure) {
+            if (missingOtpSchema(failure)) return false;
+            throw failure;
+        }
+    }
+
+    /** Email updates retire reset codes and proof without touching a registration flow. */
+    void clearEmailVerification(Connection connection, long accountId, String oldEmail, String newEmail) throws SQLException {
+        try {
+            // Deterministic proof-row order also covers concurrent updates on different accounts.
+            for (String email : java.util.stream.Stream.of(normalizedEmail(oldEmail), normalizedEmail(newEmail))
+                    .filter(value -> !value.isEmpty()).distinct().sorted().toList()) {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE Auth_Email_OTP SET Consumed=TRUE, Code_Hash=NULL
+                        WHERE Email=? AND Purpose=? AND Account_Id=?
+                        """)) {
+                    statement.setString(1, email); statement.setString(2, RESET);
+                    statement.setLong(3, accountId); statement.executeUpdate();
+                }
+                storeVerification(connection, accountId, email, false);
+            }
+        } catch (SQLException failure) {
+            if (!missingOtpSchema(failure)) throw failure;
+        }
+    }
+
+    private static void storeVerification(Connection connection, long accountId, String email, boolean verified) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO Auth_Email_OTP (Email, Purpose, Account_Id, Consumed) VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE Account_Id=VALUES(Account_Id), Consumed=VALUES(Consumed)
+                """)) {
+            statement.setString(1, email); statement.setString(2, VERIFIED);
+            statement.setLong(3, accountId); statement.setBoolean(4, verified); statement.executeUpdate();
+        }
+    }
+
+    private static boolean missingOtpSchema(SQLException failure) {
+        return failure.getSQLState() != null && failure.getSQLState().startsWith("42")
+                && failure.getMessage() != null && failure.getMessage().toLowerCase(Locale.ROOT).contains("auth_email_otp");
     }
 
     private AuthResponse validateAndCount(Connection connection, String email, String purpose,

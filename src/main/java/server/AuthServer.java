@@ -433,7 +433,8 @@ public final class AuthServer implements AutoCloseable {
             case "REGISTER" -> "REGISTER";
             case "LOGIN" -> "LOGIN";
             case "LOGOUT" -> "LOGOUT";
-            case "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET", "RESET_PASSWORD" -> action.toUpperCase(Locale.ROOT);
+            case "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET", "RESET_PASSWORD",
+                    "UPDATE_PROFILE", "CHANGE_PASSWORD" -> action.toUpperCase(Locale.ROOT);
             case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM" -> action.toUpperCase(Locale.ROOT);
             default -> "OTHER";
         };
@@ -443,7 +444,7 @@ public final class AuthServer implements AutoCloseable {
         if (code == null) return "OTHER";
         return switch (code) {
             case "OK", "INVALID_REQUEST", "INVALID_CREDENTIALS", "VALIDATION_ERROR", "USERNAME_TAKEN",
-                    "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR", "SESSION_EXPIRED", "ROOM_NOT_FOUND",
+                    "EMAIL_TAKEN", "WRONG_PASSWORD", "DATABASE_UNAVAILABLE", "SERVER_ERROR", "SESSION_EXPIRED", "ROOM_NOT_FOUND",
                     "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN", "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE",
                     "OTP_REQUIRED", "OTP_INVALID", "OTP_EXPIRED", "OTP_LOCKED", "OTP_COOLDOWN", "OTP_RATE_LIMIT", "OTP_UNAVAILABLE", "MAIL_UNAVAILABLE", "DB_MIGRATION_REQUIRED" -> code;
             default -> "OTHER";

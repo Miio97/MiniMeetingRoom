@@ -29,7 +29,15 @@ Hàng challenge khóa bằng InnoDB `FOR UPDATE` và upsert, nên nhiều tiến
 
 `AuthService()` và `AuthService(SessionRevocationListener)` trong máy chủ thật luôn bật OTP. Constructor tiêm 4/5 tham số cũ chỉ giữ đăng ký trực tiếp để tương thích **fixture kiểm thử nội bộ**; không dùng chúng làm cấu hình production. Test OTP dùng constructor 6 tham số với `EmailOtpService` và mail giả, không gửi thư thật và không kết nối Railway.
 
-Các bản ghi pending có thể chứa tên/email/tên hiển thị; coi database là dữ liệu riêng tư. Các hàng lịch sử gửi cũ được xóa theo email/mục đích khi có lần gửi mới; quản trị có thể định kỳ xóa thêm lịch sử `Auth_Email_OTP_Send` cũ hơn 1 ngày và challenge đã hết hạn lâu theo chính sách lưu dữ liệu. Không xóa challenge đang dùng nếu có tiến trình gửi/xác minh.
+Các bản ghi pending có thể chứa tên/email/tên hiển thị; coi database là dữ liệu riêng tư. Các hàng lịch sử gửi cũ được xóa theo email/mục đích khi có lần gửi mới; quản trị có thể định kỳ xóa thêm lịch sử `Auth_Email_OTP_Send` cũ hơn 1 ngày và challenge `REGISTER`/`RESET` đã hết hạn lâu theo chính sách lưu dữ liệu. Không xóa challenge đang dùng nếu có tiến trình gửi/xác minh. Giữ các hàng `Purpose='VERIFIED'`: đây là bằng chứng xác thực email hoặc dấu vô hiệu hóa bằng chứng cũ, không phải mã OTP hết hạn.
+
+## Tích hợp cài đặt tài khoản
+
+Đăng ký hoặc đặt lại mật khẩu bằng OTP thành công lưu bằng chứng `VERIFIED` gắn với ID tài khoản và email trong bảng `Auth_Email_OTP` hiện có. Server dùng bằng chứng này cho `AuthUser.emailVerified`; yêu cầu gửi reset mới không làm mất trạng thái đã xác thực. Không cần thêm bảng/cột hoặc chạy migration mới ngoài `002-email-otp.sql`.
+
+Đổi tên đăng nhập/tên hiển thị giữ trạng thái xác thực. Đổi hoặc xóa email hủy bằng chứng và mã reset đang chờ của tài khoản trong cùng transaction. Đổi email trở lại địa chỉ cũ không tự khôi phục bằng chứng hoặc mã đã hủy. Các đăng ký lịch sử chưa ràng buộc `Account_Id` không được tự suy ra đã xác thực; người dùng vẫn đăng nhập và có thể xác thực qua luồng khôi phục OTP mới.
+
+Trong cài đặt, **Đổi mật khẩu** xác minh mật khẩu hiện tại, giữ phiên đang dùng và thu hồi những phiên khác. **Quên mật khẩu** đăng xuất qua server rồi mở form khôi phục; hoàn thành reset sẽ thu hồi toàn bộ phiên cũ. Nếu đăng xuất lỗi, giao diện giữ phiên và cho phép thử lại. Xem [cài đặt tài khoản](account-settings.md).
 
 ## Kiểm chứng ngày 18/10/2026
 
