@@ -110,7 +110,9 @@ public final class SignalingClient implements AutoCloseable {
                 if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
                 state = State.CONNECTED;
                 timer.scheduleAtFixedRate(() -> {
-                    if (!closed.get()) request("HEARTBEAT", null, new JsonObject());
+                    if (!closed.get()) request("HEARTBEAT", null, new JsonObject()).whenComplete((reply, failure) -> {
+                        if (failure != null && !closed.get()) failConnection(new SignalException("HEARTBEAT_TIMEOUT"));
+                    });
                 }, 5, 5, TimeUnit.SECONDS);
             }
             Diagnostics.current().event("signaling.client.connected", Map.of("transport", "tcp_tls",

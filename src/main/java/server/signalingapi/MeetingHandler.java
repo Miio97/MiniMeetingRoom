@@ -259,6 +259,12 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                 case "GET_ROOM" -> {
                     response.add("room", JSON.toJsonTree(rooms.getRoom(connection.id(), request.roomId()))); type = "ROOM_SNAPSHOT";
                 }
+                case "RESUME_ROOM" -> {
+                    var resumed = rooms.resume(connection.principal(), connection.id(), connection.generation(),
+                            request.roomId(), text(body, "participantId", 96));
+                    if (video != null && !connection.id().equals(resumed.previousConnectionId())) video.revoke(resumed.previousConnectionId());
+                    response.add("join", JSON.toJsonTree(resumed.join())); type = "ROOM_RESUMED";
+                }
                 case "LEAVE_ROOM" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     if (body.has("closeRoom")) rooms.leaveByChoice(connection.id(), request.roomId(),
@@ -352,7 +358,8 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
         chatLimits.remove(connection.id());
         lastStatsSampleTimesNanos.remove(connection.id());
         if (video != null) video.revoke(connection.id());
-        rooms.leave(connection.id(), "SERVER_SHUTDOWN".equals(reason) ? "PHONG_DONG" : "MAT_KET_NOI");
+        if (java.util.Set.of("MAT_KET_NOI", "REQUEST_TIMEOUT").contains(reason)) rooms.suspend(connection.id());
+        else rooms.leave(connection.id(), "SERVER_SHUTDOWN".equals(reason) ? "PHONG_DONG" : "MAT_KET_NOI");
         common.diagnostics.Diagnostics.current().event("meeting.state", java.util.Map.of(
                 "room_count", rooms.roomCount(), "participant_count", rooms.participantCount()));
     }

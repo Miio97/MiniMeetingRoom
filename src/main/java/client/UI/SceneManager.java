@@ -55,6 +55,7 @@ public final class SceneManager {
         recentRooms = java.util.List.copyOf(rooms); recentRoomsAt = System.nanoTime();
     }
     private final ReadOnlyBooleanWrapper logoutPending = new ReadOnlyBooleanWrapper();
+    private client.UI.dialogs.AccountPasswordResetDialog passwordRecovery;
     private AuthUser authenticatedUser;
     private String sessionToken;
     private java.time.Instant sessionExpiresAt;
@@ -66,6 +67,7 @@ public final class SceneManager {
         if (!usingSfuRoom || closing) return;
         if (after != null && after.collaborationRoom() != null) updateRoom(after.collaborationRoom());
         else if (after == null && !leavingSfuRoom && roomJoined) {
+            if (sfuSession != null) endReason = sfuSession.noticeProperty().get();
             int count = roomInfo == null ? 0 : roomInfo.people();
             long seconds = sfuSession == null ? 0 : sfuSession.elapsedSeconds();
             roomJoined = false; pendingRoomId = -1; usingSfuRoom = false; invitationPin = "";
@@ -228,6 +230,15 @@ public final class SceneManager {
     public String user() { return authenticatedUser == null ? "" : authenticatedUser.displayName(); }
     public String username() { return authenticatedUser == null ? "" : authenticatedUser.username(); }
     public String email() { return authenticatedUser == null || authenticatedUser.email() == null ? "" : authenticatedUser.email(); }
+    private final ReadOnlyBooleanWrapper emailVerified = new ReadOnlyBooleanWrapper(false);
+    public boolean emailVerified() { return emailVerified.get(); }
+    public ReadOnlyBooleanProperty emailVerifiedProperty() { return emailVerified.getReadOnlyProperty(); }
+    public void updateAccount(AuthUser user) {
+        if (authenticatedUser == null || user == null || user.id() != authenticatedUser.id())
+            throw new IllegalArgumentException("Thông tin tài khoản không khớp phiên đăng nhập.");
+        authenticatedUser = user;
+        emailVerified.set(user.emailVerified());
+    }
     public ReadOnlyBooleanProperty logoutPendingProperty() { return logoutPending.getReadOnlyProperty(); }
     public void acceptSession(AuthResponse response) {
         if (!response.success() || response.user() == null || response.token() == null || response.token().isBlank()) {
@@ -235,6 +246,7 @@ public final class SceneManager {
         }
         recentRooms = null; recentRoomsAt = 0;
         authenticatedUser = response.user(); sessionToken = response.token(); pendingToken = null;
+        emailVerified.set(authenticatedUser.emailVerified());
         sessionExpiresAt = response.expiresAt() == null ? java.time.Instant.EPOCH : java.time.Instant.parse(response.expiresAt());
     }
     /** Gửi mạng ngoài luồng JavaFX; chỉ cập nhật màn hình khi ứng dụng còn hoạt động. */
@@ -316,6 +328,21 @@ public final class SceneManager {
         return "Không thể kết nối máy chủ. Kiểm tra kết nối và khởi động server rồi thử lại.";
     }
     public void logout() {
+        performLogout();
+    }
+    /** Settings recovery proves the saved email by OTP and keeps the current server session. */
+    public void forgotPassword() {
+        if (closing || logoutPending.get()) return;
+        if (sessionToken == null) { auth(); openPasswordReset(); return; }
+        if (passwordRecovery != null && passwordRecovery.isShowing()) return;
+        passwordRecovery = new client.UI.dialogs.AccountPasswordResetDialog(this);
+        passwordRecovery.show();
+    }
+    private void openPasswordReset() {
+        if (!closing && stage.getScene() != null && stage.getScene().getRoot() instanceof AuthScreen screen)
+            screen.showPasswordReset();
+    }
+    private void performLogout() {
         if (closing || logoutPending.get()) return;
         if (sessionToken == null) { clearSession(); auth(); return; }
         boolean videoWasOpen = hasVideoRoom();
@@ -353,6 +380,7 @@ public final class SceneManager {
         if (current instanceof MeetingScreen && roomJoined) meeting();
         else if (current instanceof PreJoinScreen && roomJoined) preJoin(roomInfo);
         else if (current instanceof LobbyScreen) lobby();
+        else if (current instanceof SettingsScreen) settingsAccount();
     }
     private void logoutError(String message) {
         Alert alert = new Alert(Alert.AlertType.ERROR); alert.initOwner(stage); alert.setTitle("Chưa thể đăng xuất");
@@ -364,6 +392,7 @@ public final class SceneManager {
         recentRooms = null; recentRoomsAt = 0;
         closeSfuSession(); sessionExpiresAt = null;
         authenticatedUser = null; sessionToken = null; preferences.clear(); meetingState = null;
+        emailVerified.set(false);
         roomInfo = null; roomJoined = false; pendingRoomId = -1;
         mic = true; camera = true; locked = false; room = MockData.rooms().getFirst();
     }
@@ -421,7 +450,7 @@ public final class SceneManager {
         stage.setMinWidth(0); stage.setMinHeight(0);
         stage.setFullScreen(false); stage.setMaximized(false);
         AuthScreen view = new AuthScreen(this); view.setPrefSize(960, 600);
-        show(view, 960, 600, false, () -> { });
+        show(view, 960, 600, false, view::dispose);
         if (restoreWindow) stage.show();
         // Window manager khôi phục cửa sổ sau khi thoát fullscreen/maximized.
         // Đặt lại kích thước theo form khi sự kiện đó đã được xử lý.
@@ -618,5 +647,8 @@ public final class SceneManager {
         FadeTransition fade = new FadeTransition(Duration.millis(200), root); fade.setToValue(1);
         transition = new ParallelTransition(fade); transition.play();
     }
-    public void dispose() { cleanup.run(); cleanup = () -> { }; if (transition != null) transition.stop(); }
+    public void dispose() {
+        if (passwordRecovery != null) { passwordRecovery.close(); passwordRecovery = null; }
+        cleanup.run(); cleanup = () -> { }; if (transition != null) transition.stop();
+    }
 }

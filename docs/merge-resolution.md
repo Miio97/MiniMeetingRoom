@@ -73,3 +73,35 @@ Kết quả kiểm chứng bản ghép:
 - Go: 7 bài top-level cùng các subtest đạt, binary được build lại (`target/merge-audio-go.txt`). Maven đã tạo lại `target/MiniMeetingRoom-1.0-SNAPSHOT.jar`.
 
 Tổng hai lượt Java: **319 ca, 317 đạt, 2 bỏ qua có điều kiện**. Dùng JDK 22.0.1, compile release 21; chưa nghiệm thu lại thiết bị vật lý, nhiều máy LAN hoặc cuộc gọi dài. Test dùng H2/TLS cục bộ, không sửa dữ liệu MySQL hay cấu hình riêng. Các file được giải quyết không còn conflict marker và Git không còn unmerged path.
+
+## Ghép OTP với cài đặt tài khoản — 18/10/2026
+
+Thư mục `D:/MiniMeetingRoom`, nhánh `Khoa`: ghép thay đổi từ `3b26a3d` vào `dfb33c2`. Trước khi xử lý, đã sao lưu 18 file thay đổi cùng Git index và thông tin merge tại `.tools/merge-backup-20261018-b0e4ea98/`. Các bản sao lưu và stash từ lần ghép trước vẫn được giữ.
+
+Giữ đăng ký email OTP, gửi lại mã với challenge riêng cho từng luồng, quên mật khẩu và thu hồi toàn bộ phiên sau reset của Khoa. Đồng thời giữ cập nhật tên đăng nhập/tên hiển thị/email, hộp thoại đổi mật khẩu bằng mật khẩu hiện tại, giữ phiên đang dùng và thu hồi các phiên khác từ main. Không cần chọn bỏ chức năng bên nào. Cấu hình client vẫn là localhost, TLS vẫn kiểm tra chứng chỉ và tên máy chủ.
+
+`AuthRequest` giữ riêng OTP, registration challenge và mật khẩu mới. Hai nhánh có constructor cùng tám tham số nhưng ý nghĩa tham số cuối khác nhau; constructor tương thích phân biệt theo action, và lời gọi đổi mật khẩu mới truyền tường minh từng trường. Allowlist phía client/server và chẩn đoán giữ đủ lệnh của cả hai nhánh, không ghi secret trong `toString()`.
+
+Server trả `emailVerified` dựa trên bằng chứng OTP gắn đúng tài khoản/email, dùng `Purpose='VERIFIED'` trong bảng OTP hiện có. Đổi tên giữ xác thực; đổi/xóa email hủy bằng chứng và mã reset cũ. Yêu cầu reset mới không xóa bằng chứng đã có. Các transaction khóa tài khoản/email trước bằng chứng để tránh đảo thứ tự khóa khi đăng ký, cập nhật hồ sơ và reset chạy đồng thời. Bằng chứng đăng ký lịch sử thiếu `Account_Id` không được tự suy đoán thuộc tài khoản hiện tại; người dùng vẫn đăng nhập và dùng khôi phục OTP để tạo bằng chứng mới.
+
+Nút quên mật khẩu tại đăng nhập mở form OTP hiện có. Trong cài đặt tài khoản, nút này đăng xuất qua server rồi mở cùng form; nếu đăng xuất lỗi, giữ phiên và dựng lại cài đặt để có thể thử lại. Nút xác thực email mới trực tiếp trong cài đặt vẫn là chức năng chưa triển khai của main; tooltip được làm rõ để không nhầm với đăng ký/khôi phục OTP đã hoạt động.
+
+Bản ghép không thêm bảng/cột hoặc script migration. Database đã có `002-email-otp.sql` không cần chạy thêm script; chưa áp dụng migration hay ghi dữ liệu Railway trong quá trình giải quyết conflict. Kiểm thử dùng H2, TLS localhost và hộp thư giả.
+
+Kết quả mới nhất theo từng lớp: **444 ca, 442 đạt, 0 thất bại, 0 lỗi, 2 bỏ qua có điều kiện**, tổng hợp tại `target/merge-account-result-summary.json` từ 61 lớp của bộ Java thông thường. Hai ca bỏ qua vẫn là benchmark tệp cần opt-in và symbolic link Windows. Lượt toàn bộ ban đầu có 442 ca và một lỗi lookup trong kiểm thử hộp thoại; sau đó đã bổ sung thêm hai ca và chạy lại nhóm xác thực 121 ca. Nhóm này đạt 119 ca, còn hai lỗi do giao diện ẩn chưa được layout sau điều hướng; sửa helper kiểm thử rồi chạy lại cả lớp liên quan.
+
+Lượt cuối `MeetingPaginationTest` và `OtpAccountSettingsUiTest` đạt **6/6**, Maven **BUILD SUCCESS** và tạo `target/MiniMeetingRoom-1.0-SNAPSHOT.jar` (`target/merge-account-ui-final.txt`). Lượt này cũng xác minh dọn bộ hẹn giờ và worker của fixture phân trang, tránh ảnh hưởng lớp UI kế tiếp; fixture dùng endpoint offline thay vì server cấu hình thật. Các log trước được giữ tại `target/merge-account-full.txt` và `target/merge-account-final-validation.txt`; tổng hợp lấy kết quả mới nhất từng lớp, không cộng lượt chạy lặp. Nhóm backend cuối đạt 18 ca tài khoản, 25 ca OTP và 8 ca kết hợp, gồm các tình huống cạnh tranh đăng ký/cập nhật email/reset.
+
+Đã kiểm tra ảnh tab tài khoản tại `target/qa/account-settings.png`, không còn conflict marker hoặc unmerged path. Không chạy lại media native, webcam, SMTP gửi thư thật hoặc thử nhiều máy vì thay đổi lần này thuộc xác thực và tài khoản. Merge được hoàn tất bằng commit cục bộ; chưa push lên remote. Cần khởi động lại cả server và client sau khi build để dùng cùng phiên bản giao thức.
+
+## Ghép lịch hẹn/phân trang với OTP, tài khoản và media — 18/10/2026
+
+Tại `D:/LTMMT/MiniMeeting/MiniMeetingRoom`, nhánh `Miio`: giải quyết 6 file xung đột khi merge `origin/main`. Bản sao nguyên trạng cùng ba phiên bản Git của từng file nằm tại `.tools/merge-backup-20261018-schedule-otp/`.
+
+Giữ lịch hẹn, lịch tháng, nhắc hẹn, giờ Việt Nam và phân trang danh sách phòng từ nhánh hiện tại; giữ OTP đăng ký/xác thực/khôi phục, sửa hồ sơ, đổi mật khẩu, phục hồi kết nối và video thích ứng của đồng đội. `AuthRequest` tách riêng `schedule`, `otp`, `registrationChallenge`, `newPassword`; `AuthResponse` giữ dữ liệu lịch, phân trang và challenge. Allowlist client/server gộp các lệnh và mã lỗi của cả hai bên. Các lời gọi kiểm thử OTP với tham số null được làm rõ để tránh nhập nhằng giữa constructor OTP và lịch hẹn; giữ nguyên dữ liệu kiểm thử.
+
+Cài đặt vẫn có 2 tab. Tab Thiết bị giữ theme, chất lượng video, camera, chọn/test mic/loa và các tùy chọn thông báo/tự tắt mic/camera của đồng đội. Tab Tài khoản dùng `AccountSettingsPane` mới, giữ các thao tác OTP/hồ sơ/mật khẩu. Khi đóng màn hình, dọn cả tác vụ tài khoản lẫn kiểm tra tín hiệu microphone.
+
+Người dùng chọn `localhost` thay cho `192.168.1.42`; giữ signaling localhost:8444 từ main. Hai migration lịch hẹn có sẵn nhưng chưa được track được đưa vào bản gộp cùng migration OTP riêng. Không chạy migration hoặc ghi database thật. Kiểm thử dùng H2/TLS localhost và hộp thư giả. Chưa tạo merge commit hoặc push.
+
+Xác minh bản gộp: bộ Java thông thường chạy **487 ca, 485 đạt, 0 thất bại, 0 lỗi, 2 bỏ qua có điều kiện**, Maven **BUILD SUCCESS**. Log: `target/merge-schedule-regression.log`. Có kiểm thử mới xác nhận dữ liệu lịch hẹn, phân trang, OTP và mật khẩu mới cùng tồn tại qua giao thức dùng chung. Hai ca bỏ qua thuộc benchmark truyền tệp cần opt-in và symbolic link Windows. Đã kiểm tra ảnh Cài đặt 2 tab tại `target/qa/themes/settings-light-0.png`. Chưa chạy riêng profile media native, webcam, SMTP thật hoặc LAN nhiều máy. Git không còn unmerged path hoặc conflict marker; các thay đổi được stage, chờ merge commit.

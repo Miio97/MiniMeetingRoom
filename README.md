@@ -1,5 +1,9 @@
 # MiniMeetingRoom
 
+Camera tự giảm bitrate, FPS và kích thước theo thống kê WebRTC; chỉ tạm dừng truyền/nhận video và chia sẻ khi chất lượng thoại bị ảnh hưởng kéo dài. Mạng ổn định sẽ khôi phục dần, giữ nguyên lựa chọn tắt camera/mic/chia sẻ của người dùng. Không thêm migration. Xem [chất lượng video tự động](docs/adaptive-video.md).
+
+Mất kết nối signaling sẽ giữ thành viên và vai trò chủ phòng tối đa **2 phút** để client tự kết nối lại cùng phiên. Hết hạn, giao diện tự thoát cuộc họp; kết nối lại thành công giữ quyền gửi tệp. Camera/mic/chia sẻ cần bật lại bằng tay sau mất kết nối. Cần build và khởi động lại cả server lẫn client, không thêm migration. Xem [khôi phục kết nối phòng](docs/meeting-recovery.md).
+
 Cập nhật điều khiển phòng: sảnh tự cập nhật khoảng 2 giây/lần; quản lý phòng nằm trong Cài đặt; tab Chờ duyệt bên phải dành cho host, bật khi phòng yêu cầu duyệt, yêu cầu hết hạn sau 5 phút; host chọn người kế nhiệm hoặc đóng phòng khi rời; icon mắt ẩn/hiện thanh công cụ. Không cần migration mới. Xem [luồng và kiểm thử](docs/room-controls.md).
 
 Ứng dụng desktop Java 21/JavaFX. Xác thực, tạo/tham gia/rời phòng, danh sách thành viên, video call và chia sẻ tệp đã kết nối backend. Form tạo/tham gia có sẵn dùng signaling TCP/TLS cho phòng mới; dữ liệu tệp dùng dịch vụ TCP/TLS riêng với cùng membership. Chat văn bản thời gian thực, duyệt thành viên, khóa phòng, mời ra và chuyển chủ dùng cùng phòng với video và tệp. Khi chủ phòng chủ động rời, giao diện yêu cầu chọn người kế nhiệm hoặc đóng cả phòng; mất kết nối đột ngột vẫn dùng cơ chế chuyển chủ dự phòng. Phòng mới có voice chat Opus và chia sẻ màn hình/cửa sổ VP8 độc lập camera.
@@ -39,10 +43,14 @@ Cấu hình sử dụng hiện tại: **server Java và client JavaFX chạy tr�
 
    Trong NetBeans, **Run Project** vẫn chạy `client.Main`. Hãy khởi động server trước.
 
-4. Chọn **Đăng ký**, nhập tên đăng nhập không chứa khoảng trắng, tên hiển thị, mật khẩu từ 8 đến 128 ký tự có chữ thường, chữ hoa, chữ số và ký tự đặc biệt, rồi xác nhận. Email có thể bỏ trống. Khi tạo thành công, màn hình chuyển về đăng nhập và điền sẵn tên tài khoản. Đăng nhập phải nhập đúng chữ hoa/thường của tên đã đăng ký: `TranKhoa` khác `trankhoa`. Đăng nhập đúng sẽ mở Lobby với tên hiển thị lấy từ database.
+4. Chọn **Đăng ký**, nhập tên đăng nhập không chứa khoảng trắng, tên hiển thị, **email bắt buộc**, mật khẩu từ 8 đến 128 ký tự có chữ thường, chữ hoa, chữ số và ký tự đặc biệt, rồi xác nhận. Nhập OTP 6 số được gửi tới email; chỉ khi xác minh đúng server mới tạo tài khoản. Khi tạo thành công, màn hình chuyển về đăng nhập và điền sẵn tên tài khoản. Đăng nhập phải nhập đúng chữ hoa/thường của tên đã đăng ký: `TranKhoa` khác `trankhoa`. Đăng nhập đúng sẽ mở Lobby với tên hiển thị lấy từ database.
 5. **Đăng xuất** thu hồi phiên trên server trước khi trở lại màn hình đăng nhập. Nếu mất kết nối, giao diện báo lỗi để thử lại. Khi đóng ứng dụng, client cố gắng thu hồi phiên trong thời gian giới hạn; phiên không thu hồi được sẽ hết hạn theo cấu hình server.
 
-Thông tin tài khoản hiện chỉ đọc; chỉnh sửa tên và đổi mật khẩu sẽ được triển khai ở bước riêng.
+Tại đăng nhập, chọn **Quên mật khẩu?** để nhận OTP qua email đã đăng ký, nhập mã và mật khẩu mới. Đặt lại thành công thu hồi các phiên đăng nhập cũ. OTP hết hạn sau 5 phút, tối đa 5 lần nhập sai; gửi lại cách nhau 60 giây, tối đa 5 lần mỗi giờ cho một email/mục đích.
+
+Trước khi dùng OTP, chạy [script MySQL 002-email-otp.sql](database/migrations/002-email-otp.sql) trên database hiện có; script chỉ thêm hai bảng OTP, không sửa tài khoản/phòng. Database mới cũng cần migration này sau `schema.sql`. SMTP chỉ cấu hình trên server trong `config/mail.private.properties` (Git bỏ qua), theo [hướng dẫn email OTP](docs/email-otp.md).
+
+Trong **Cài đặt → Tài khoản**, bạn có thể sửa tên đăng nhập, tên hiển thị và email rồi chọn **Lưu thay đổi**. Tên đăng nhập/email phải chưa được tài khoản khác sử dụng; email hồ sơ vẫn có thể bỏ trống. Tên đăng nhập mới được dùng cho lần đăng nhập tiếp theo. Với tài khoản chưa xác thực, lưu email rồi chọn **Xác thực email (OTP)** → **Gửi mã OTP** → nhập mã → **Xác thực**. **Đổi mật khẩu** yêu cầu email đã xác thực, mật khẩu hiện tại, mật khẩu mới đủ độ phức tạp và nhập lại khớp nhau; đổi thành công giữ phiên hiện tại và thu hồi các phiên khác. Sửa sang email khác sẽ vô hiệu hóa nút đổi mật khẩu cho đến khi xác thực địa chỉ mới. **Quên mật khẩu** tại cài đặt mở hộp thoại OTP ngay trong tài khoản, không cần mật khẩu cũ và không đăng xuất phiên hiện tại; đặt lại thành công thu hồi các phiên khác. Luồng quên mật khẩu ở màn hình đăng nhập vẫn thu hồi toàn bộ phiên cũ. Các thay đổi dùng cùng TCP/TLS và hai bảng OTP hiện có, không thêm migration. Xem [chi tiết chức năng tài khoản](docs/account-settings.md).
 
 ## Tạo và tham gia phòng
 
@@ -139,13 +147,13 @@ Giữ cách chạy NetBeans: Run File server/Main.java rồi client/Main.java. K
   - Kiểm tra hợp lệ dữ liệu ngay tại client trước khi gửi qua TLS. Nút Lưu vô hiệu hóa trong khi gửi để tránh gửi lặp.
 
 ### 2. Tinh gọn Cài đặt (`SettingsScreen`)
-- Đã gỡ bỏ hoàn toàn tab "Giao diện & thông báo" và toàn bộ các mục demo: Microphone (demo), Loa (demo), Test mic, Test loa, ProgressBar mức mic, Âm lượng, cùng các toggle thông báo giả. Không còn bất kỳ nhãn `(demo)` nào trong màn hình Cài đặt.
-- Màn hình Cài đặt hiện chỉ còn đúng 2 tab:
+- Màn hình giữ 2 tab, không còn các mục thiết bị demo:
   1. **Thiết bị**:
-     - Bộ chọn giao diện Sáng / Tối `ThemeManager.selector()` (chuyển đổi theme ngay tại chỗ, giữ nguyên Scene).
-     - "Camera trên máy của bạn" (`CameraControls` chế độ `selectionOnly`).
-     - "Chất lượng video tối đa" (ComboBox với các mức `360p`, `720p`, `Tự động`, lưu khóa cấu hình `quality`).
-  2. **Tài khoản**: hiển thị thông tin tài khoản hiện tại.
+     - Bộ chọn giao diện Sáng / Tối `ThemeManager.selector()` (chuyển đổi ngay tại chỗ, giữ nguyên Scene).
+     - Camera trên máy (`CameraControls` chế độ `selectionOnly`) và chất lượng video tối đa (`360p`, `720p`, `Tự động`, lưu khóa `quality`).
+     - Chọn microphone/loa thật, kiểm tra mic và phát âm thử cục bộ; giữ kiểm tra tín hiệu và dọn thiết bị khi rời màn hình.
+     - Giữ các tùy chọn thông báo, tự tắt mic/camera khi vào phòng từ nhánh đồng đội, chuyển vào tab Thiết bị.
+  2. **Tài khoản**: tích hợp `AccountSettingsPane` để xem/sửa hồ sơ, xác thực email OTP, đổi và khôi phục mật khẩu. Chi tiết tại [docs/account-settings.md](docs/account-settings.md).
 
 ### 3. Database Migration & Triển khai backend
 - Bảng mới `Lich_Hen`:

@@ -26,6 +26,7 @@ import server.auth.SessionPrincipal;
 
 /** Single-server room authority. Listener must enqueue events without doing socket I/O. */
 public final class RoomService implements AutoCloseable {
+    public static final Duration RECONNECT_GRACE = Duration.ofMinutes(2);
     private static final int MAX_LIVE_CONNECTIONS = 128;
     private static final int MAX_ROOMS = 128;
     private static final String CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -367,6 +368,52 @@ public final class RoomService implements AutoCloseable {
         }
         drainEvents();
     }
+    /** Transport loss reserves the same durable membership and host role, without recording a leave. */
+    public void suspend(String connectionId) {
+        synchronized (lock) {
+            for (LiveRoom room : rooms.values()) room.waiting.values().removeIf(waiting -> waiting.connectionId.equals(connectionId));
+            Member member = connections.get(connectionId);
+            if (member != null && member.reconnectUntil == null) {
+                member.reconnectUntil = clock.instant().plus(RECONNECT_GRACE);
+                member.media = new MediaState(false, false, false, false, false, false);
+                LiveRoom room = requireRoom(member.roomId); room.revision++;
+                broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", member.media));
+            }
+        }
+        drainEvents();
+    }
+    public record ResumeReply(RoomJoinReply join, String previousConnectionId) { }
+    /** A freshly authenticated connection may reclaim only its own session's opaque participant. */
+    public ResumeReply resume(SessionPrincipal principal, String connectionId, long generation, String roomId, String participantId) {
+        checkPrincipal(principal); connectionId(connectionId);
+        if (generation < 1) throw new RoomException("INVALID_GENERATION");
+        ResumeReply reply;
+        try { synchronized (lock) {
+            available(); eventBudget(); LiveRoom room = requireRoom(roomId);
+            Member member = room.members.get(participantId);
+            if (member == null || member.principal.sessionId() != principal.sessionId()
+                    || !member.principal.tokenHash().equals(principal.tokenHash())) throw new RoomException("NOT_A_MEMBER");
+            if (member.reconnectUntil != null && !member.reconnectUntil.isAfter(clock.instant())) {
+                remove(member, "MAT_KET_NOI"); throw new RoomException("RECONNECT_EXPIRED");
+            }
+            Member existing = connections.get(connectionId);
+            if (existing != null && existing != member) throw new RoomException("ALREADY_IN_ROOM");
+            String previous = member.connectionId;
+            if (previous.equals(connectionId) ? member.generation != generation : generation <= member.generation)
+                throw new RoomException("STALE_CONNECTION");
+            // Idempotent retry must not clear media started on this same connection.
+            if (!previous.equals(connectionId) || member.generation != generation) {
+                connections.remove(previous); member.connectionId = connectionId; member.generation = generation;
+                member.media = new MediaState(false, false, false, false, false, false);
+                connections.put(connectionId, member); room.revision++;
+                broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", member.participantId, "mediaState", member.media));
+            }
+            member.reconnectUntil = null;
+            reply = new ResumeReply(new RoomJoinReply(member.participantId, snapshot(room)), previous);
+        }
+        return reply;
+        } finally { drainEvents(); }
+    }
     /** Intentional host departure: commit the chosen successor before removing the old host. */
     public void leaveByChoice(String connectionId, String roomId, String successorId, boolean closeRoom) throws SQLException {
         synchronized (lock) {
@@ -448,7 +495,8 @@ public final class RoomService implements AutoCloseable {
             Instant now = clock.instant();
             for (LiveRoom room : rooms.values()) pruneWaiting(room);
             for (Member member : new ArrayList<>(connections.values())) {
-                if (!member.principal.expiresAt().isAfter(now) && connections.containsKey(member.connectionId)) remove(member, "MAT_KET_NOI");
+                if ((!member.principal.expiresAt().isAfter(now) || member.reconnectUntil != null && !member.reconnectUntil.isAfter(now))
+                        && connections.containsKey(member.connectionId)) remove(member, "MAT_KET_NOI");
             }
             for (LiveRoom room : new ArrayList<>(rooms.values())) {
                 if (room.stored.status() == RoomStatus.READY && !room.readyDeadline.isAfter(now)) {
@@ -508,6 +556,7 @@ public final class RoomService implements AutoCloseable {
     private void eventBudget() { if (outbound.size() >= 383) throw new RoomException("BACKPRESSURE"); }
     private Member member(String connectionId) {
         Member member = connections.get(connectionId); if (member == null) throw new RoomException("NOT_A_MEMBER");
+        if (member.reconnectUntil != null) throw new RoomException("CONNECTION_RESTORING");
         checkPrincipal(member.principal); return member;
     }
     private Member host(String connectionId) {
@@ -594,7 +643,8 @@ public final class RoomService implements AutoCloseable {
         LiveRoom(RoomRepository.StoredRoom stored, Instant now) { this.stored = stored; readyDeadline = now.plus(Duration.ofMinutes(10)); }
     }
     private static final class Member {
-        final String connectionId, roomId, participantId; final long generation, membershipId;
+        String connectionId; final String roomId, participantId; long generation; final long membershipId;
+        Instant reconnectUntil;
         final SessionPrincipal principal; RoomRole role; MediaState media;
         Member(String connectionId, long generation, SessionPrincipal principal, String roomId, long membershipId,
                 String participantId, RoomRole role, MediaState media) {
@@ -628,7 +678,7 @@ public final class RoomService implements AutoCloseable {
         if (ticket == null) return null;
         for (Member member : connections.values()) {
             LiveRoom room = rooms.get(member.roomId);
-            if (room != null && room.stored.id() == roomId && member.participantId.equals(ticket)
+            if (room != null && member.reconnectUntil == null && room.stored.id() == roomId && member.participantId.equals(ticket)
                     && member.principal.sessionId() == principal.sessionId() && member.principal.tokenHash().equals(principal.tokenHash())
                     && member.principal.expiresAt().isAfter(clock.instant())) return member;
         }

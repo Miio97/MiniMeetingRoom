@@ -12,7 +12,7 @@ public final class ProfileDialog extends Dialog<Boolean> {
         TextField username = new TextField(manager.username()), name = new TextField(manager.user()), email = new TextField(manager.email());
         username.setEditable(false); name.setEditable(false); email.setEditable(false);
         VBox content = Ui.column(14, Ui.field("Tên đăng nhập", username), Ui.field("Tên hiển thị", name), Ui.field("Email", email),
-            Ui.label("Chỉnh sửa hồ sơ và đổi mật khẩu sẽ được bổ sung sau.", "caption"));
+            Ui.label("Bạn có thể chỉnh sửa hồ sơ và đổi mật khẩu tại Cài đặt → Tài khoản.", "caption"));
         content.setPrefWidth(420); getDialogPane().setContent(content);
         getDialogPane().getButtonTypes().add(new ButtonType("Đóng", ButtonBar.ButtonData.CANCEL_CLOSE));
         setResultConverter(type -> false);

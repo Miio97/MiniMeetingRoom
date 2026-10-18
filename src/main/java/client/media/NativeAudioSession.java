@@ -63,6 +63,7 @@ public final class NativeAudioSession implements AutoCloseable {
         private final Set<CompletableFuture<?>> pending = ConcurrentHashMap.newKeySet();
         private final List<RTCRtpReceiver> receivers = new CopyOnWriteArrayList<>();
         private final Object trackLifecycle = new Object();
+        private final Object statsLifecycle = new Object();
         private volatile AudioTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
         private Peer(AudioTrack track, boolean publisher, AudioTrackSink sink) {
@@ -119,6 +120,17 @@ public final class NativeAudioSession implements AutoCloseable {
             finally { pending.remove(offer); }
         }
         public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
+        public RTCStatsReport stats(long timeoutMs) {
+            CompletableFuture<RTCStatsReport> result = new CompletableFuture<>(); pending.add(result);
+            try {
+                synchronized (statsLifecycle) {
+                    if (closing.get()) return null;
+                    connection.getStats(report -> result.complete(closing.get() ? null : report));
+                }
+                return result.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (Exception ignored) { return null; }
+            finally { pending.remove(result); }
+        }
         private void set(RTCSessionDescription value, boolean remoteDescription) throws Exception {
             CompletableFuture<Void> result = new CompletableFuture<>(); pending.add(result);
             SetSessionDescriptionObserver observer = new SetSessionDescriptionObserver() {
@@ -137,7 +149,8 @@ public final class NativeAudioSession implements AutoCloseable {
                 AudioTrack received = remote; if (received != null) received.removeSink(binding);
             }
 
-            connection.close(); receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
+            synchronized (statsLifecycle) { connection.close(); }
+            receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
             peers.remove(this);
         }
     }

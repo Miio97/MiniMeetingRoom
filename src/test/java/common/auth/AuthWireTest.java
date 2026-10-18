@@ -18,6 +18,21 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class AuthWireTest {
+    @Test void verificationStateComesFromSnapshotAndDefaultsToFalseForLegacyResponses() throws IOException {
+        AuthUser legacy = AuthWire.read(input(frame(
+                "{\"id\":7,\"username\":\"user\",\"displayName\":\"Name\",\"email\":\"user@example.com\"}"
+                        .getBytes(StandardCharsets.UTF_8))), AuthUser.class);
+        assertFalse(legacy.emailVerified());
+        AuthUser verified = new AuthUser(7, "user", "Name", "user@example.com", true);
+        assertTrue(AuthWire.read(input(encode(verified)), AuthUser.class).emailVerified());
+        assertFalse(new AuthUser(7, "user", "Name", null, true).emailVerified());
+    }
+    @Test void passwordChangeRoundTripsWithoutExposingSecretsInToString() throws IOException {
+        AuthRequest request = new AuthRequest("CHANGE_PASSWORD", null, "Old-password-123!", null, null,
+                "private-token", null, "New-password-456!");
+        assertEquals(request, AuthWire.read(input(encode(request)), AuthRequest.class));
+        assertEquals("AuthRequest[action=CHANGE_PASSWORD]", request.toString());
+    }
     @Test
     void preservesVietnameseAndUsesUtf8ByteLength() throws IOException {
         AuthRequest request = new AuthRequest("REGISTER", "khoa", "bí_mật_🔐",
@@ -119,6 +134,32 @@ class AuthWireTest {
         assertTrue(bytes.length > 16 * 1024, "A full room no longer fits the original authentication-only frame size");
         assertTrue(bytes.length - Integer.BYTES <= AuthWire.MAX_FRAME_BYTES);
         assertEquals(response, AuthWire.read(input(bytes), AuthResponse.class));
+    }
+
+    @Test void schedulePagingAndOtpFieldsCoexistOnTheSharedWire() throws IOException {
+        var schedule = new common.schedule.ScheduleRequest("Planning", "Notes",
+                "2026-10-19T01:00:00Z", "2026-10-19T02:00:00Z", "KHONG", "MMR-0123ABCD");
+        var scheduled = new AuthRequest("CREATE_SCHEDULE", null, null, null, null, "session", null, schedule);
+        var registration = new AuthRequest("VERIFY_REGISTRATION", null, null, null,
+                "user@example.com", null, null, "123456", "challenge");
+        var changed = new AuthRequest("CHANGE_PASSWORD", null, "old", null, null,
+                "session", null, null, null, "new");
+        var page = new AuthRequest("LIST_ROOMS", null, null, null, null, "session", RoomRequest.page(20, 10));
+        for (var request : List.of(scheduled, registration, changed, page)) {
+            assertEquals(request, AuthWire.read(input(encode(request)), AuthRequest.class));
+        }
+        assertNull(scheduled.otp());
+        assertNull(scheduled.registrationChallenge());
+        assertNull(registration.schedule());
+        assertEquals("new", changed.newPassword());
+        assertNull(changed.otp());
+        var info = new common.schedule.ScheduleInfo(1, 7, "Planning", "Notes",
+                schedule.startsAt(), schedule.endsAt(), "KHONG", null, null, "2026-10-18T00:00:00Z");
+        for (var response : List.of(AuthResponse.scheduleOk("created", info),
+                AuthResponse.schedulesOk("listed", List.of(info)), AuthResponse.roomsPage(List.of(), true),
+                new AuthResponse(true, "OTP_REQUIRED", "sent", null, null, null, null, List.of(), "challenge"))) {
+            assertEquals(response, AuthWire.read(input(encode(response)), AuthResponse.class));
+        }
     }
 
     private static byte[] encode(Object message) throws IOException {

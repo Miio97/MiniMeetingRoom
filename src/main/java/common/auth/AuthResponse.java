@@ -7,7 +7,19 @@ import java.util.List;
 public record AuthResponse(boolean success, String code, String message,
                            AuthUser user, String token, String expiresAt,
                            RoomInfo room, List<RoomInfo> rooms,
-                           ScheduleInfo schedule, List<ScheduleInfo> schedules, Boolean hasMoreRooms) {
+                           ScheduleInfo schedule, List<ScheduleInfo> schedules, Boolean hasMoreRooms, String registrationChallenge) {
+    public AuthResponse(boolean success, String code, String message,
+                        AuthUser user, String token, String expiresAt, RoomInfo room, List<RoomInfo> rooms,
+                        ScheduleInfo schedule, List<ScheduleInfo> schedules, Boolean hasMoreRooms) {
+        this(success, code, message, user, token, expiresAt, room, rooms, schedule, schedules, hasMoreRooms, null);
+    }
+
+    public AuthResponse(boolean success, String code, String message,
+                        AuthUser user, String token, String expiresAt, RoomInfo room, List<RoomInfo> rooms,
+                        String registrationChallenge) {
+        this(success, code, message, user, token, expiresAt, room, rooms, null, List.of(), null, registrationChallenge);
+    }
+
     public AuthResponse(boolean success, String code, String message,
                         AuthUser user, String token, String expiresAt,
                         RoomInfo room, List<RoomInfo> rooms, ScheduleInfo schedule, List<ScheduleInfo> schedules) {

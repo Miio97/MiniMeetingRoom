@@ -35,14 +35,32 @@ public final class AudioCallController implements AutoCloseable {
     public ReadOnlyStringProperty statusProperty() {return status.getReadOnlyProperty();}
     private final ReadOnlyBooleanWrapper requested = new ReadOnlyBooleanWrapper();
     private final CameraSwitch microphone = new CameraSwitch(this::changed);
-    private final Map<String, Subscription> subscriptions = new HashMap<>();
+    private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
+    private final RtcQualityMonitor qualityMonitor = new RtcQualityMonitor();
+    private int qualityCursor;
     private final Map<String, AtomicLong> samplesBySource = new ConcurrentHashMap<>();
     public long receivedSamples(String participant) { var value=samplesBySource.get(participant); return value==null ? 0 : value.get(); }
     private final AtomicLong receivedSamples = new AtomicLong();
     private final CompletableFuture<Void> closeComplete = new CompletableFuture<>();
     private volatile boolean entered, active;
     private NativeAudioSession receive, capture;
-    private NativeAudioSession.Peer publisher;
+    private volatile NativeAudioSession.Peer publisher;
+    /** Called only by the video stats sampler; never stalls PCM generation on the audio owner. */
+    synchronized AdaptiveVideoPolicy.Evidence networkQuality() {
+        qualityMonitor.begin();
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+        List<NativeAudioSession.Peer> peers = new ArrayList<>();
+        NativeAudioSession.Peer current = publisher; if (current != null) peers.add(current);
+        for (Subscription subscription : subscriptions.values()) peers.add(subscription.peer());
+        int examined = 0;
+        for (; examined < peers.size(); examined++) {
+            if (closed.get() || System.nanoTime() >= deadline) break;
+            var peer = peers.get(Math.floorMod(qualityCursor + examined, peers.size()));
+            qualityMonitor.accept(peer, peer.stats(100));
+        }
+        qualityCursor = peers.isEmpty() ? 0 : Math.floorMod(qualityCursor + examined, peers.size());
+        return qualityMonitor.finish();
+    }
     private AudioDevice selectedMicrophone, selectedSpeaker;
     private ScheduledFuture<?> generated;
     public AudioCallController(VideoCallController.Signaling signaling, Supplier<RoomSnapshot> room,
@@ -84,6 +102,11 @@ public final class AudioCallController implements AutoCloseable {
         });
     }
     public void enter() { entered=true; }
+    private volatile boolean controlConnected = true;
+    public void controlConnected(boolean connected) {
+        controlConnected = connected;
+        if (!connected) submit(() -> { disconnect(); return null; });
+    }
     public CompletableFuture<Void> toggle() {
         return microphone.toggle(active, () -> submit(() -> { start(); return null; }), () -> submit(() -> { stop(true); return null; }));
     }
@@ -134,6 +157,7 @@ public final class AudioCallController implements AutoCloseable {
         if (notify && room.get()!=null) command("AUDIO_STOP",new JsonObject());
     }
     private void synchronize() throws Exception {
+        if (!controlConnected) return;
         RoomSnapshot snapshot=room.get(); if (snapshot==null) { disconnect(); return; }
         if (active && publisher==null && microphone.wanted()) {
             try { publish(); } catch (Exception | Error failure) {
@@ -173,6 +197,7 @@ public final class AudioCallController implements AutoCloseable {
         }
     }
     private JsonObject command(String type, JsonObject body) throws Exception {
+        if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");
         if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
         try { return signaling.request(type,body,UUID.randomUUID().toString()).get(16,TimeUnit.SECONDS); }
         catch (ExecutionException failure) { if (failure.getCause() instanceof Exception cause) throw cause; throw failure; }
