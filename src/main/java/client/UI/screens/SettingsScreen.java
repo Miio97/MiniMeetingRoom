@@ -1,18 +1,17 @@
 package client.UI.screens;
 
 import client.UI.SceneManager;
+import client.UI.ThemeManager;
 import client.UI.components.*;
 import client.media.AudioCallController;
 import client.media.AudioDeviceTester;
 import client.media.MicrophoneConsentStore;
 import dev.onvoid.webrtc.media.audio.AudioDevice;
-import javafx.geometry.Insets;
-import javafx.geometry.Pos;
-import javafx.application.Platform;
 import javafx.animation.PauseTransition;
+import javafx.application.Platform;
+import javafx.geometry.Insets;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
-import javafx.scene.shape.Circle;
 import javafx.util.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -35,54 +34,119 @@ public final class SettingsScreen extends BorderPane {
     private final Label speakerTestStatus = Ui.label("Phát âm thử ngắn qua loa/tai nghe đã chọn.", "caption");
     private final AtomicReference<Double> latestMicrophoneLevel = new AtomicReference<>(0.0);
     private final AtomicBoolean levelUpdateQueued = new AtomicBoolean();
-    private boolean microphoneTesting, speakerTesting; private volatile boolean disposed;
+    private boolean microphoneTesting, speakerTesting;
+    private volatile boolean disposed;
     private PauseTransition microphoneHealthCheck;
     private long microphoneTestToken, speakerTestToken;
     private boolean loadingAudioDevices;
+
     public SettingsScreen(SceneManager manager, boolean account) {
         setLeft(new Sidebar(manager, "settings"));
-        VBox main = new VBox(22); main.setPadding(new Insets(32));
-        TabPane tabs = new TabPane(); tabs.getStyleClass().add("settings-tabs"); tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+        VBox main = new VBox(22);
+        main.setPadding(new Insets(32));
+        TabPane tabs = new TabPane();
+        tabs.getStyleClass().add("settings-tabs");
+        tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+
         VBox devices = card();
         audioStatus.setWrapText(true);
-        microphoneLevel.setMaxWidth(Double.MAX_VALUE); microphoneLevel.setId("audio-settings-microphone-level");
-        microphoneTest.setId("audio-settings-test-microphone"); speakerTest.setId("audio-settings-test-speaker");
-        devices.getChildren().addAll(Ui.field("Camera trên máy của bạn", cameras),
-                Ui.field("Microphone", microphones), Ui.field("Loa", speakers),
+        microphoneLevel.setMaxWidth(Double.MAX_VALUE);
+        microphoneLevel.setId("audio-settings-microphone-level");
+        microphoneTest.setId("audio-settings-test-microphone");
+        speakerTest.setId("audio-settings-test-speaker");
+
+        devices.getChildren().addAll(
+                Ui.field("Giao diện", ThemeManager.selector()),
+                Ui.field("Camera trên máy của bạn", cameras),
+                Ui.field("Chất lượng video tối đa", device(manager, "quality", List.of("360p", "720p", "Tự động"))),
+                Ui.field("Microphone", microphones),
+                Ui.field("Loa", speakers),
                 Ui.label("Kiểm tra thiết bị ngay trên máy này; âm thử không được gửi vào cuộc họp.", "caption"),
-                Ui.row(12, microphoneTest, microphoneTestStatus), microphoneLevel,
-                Ui.row(12, speakerTest, speakerTestStatus), audioStatus);
+                Ui.row(12, microphoneTest, microphoneTestStatus),
+                microphoneLevel,
+                Ui.row(12, speakerTest, speakerTestStatus),
+                audioStatus
+        );
         loadAudioDevices();
-        VBox notifications = card();
-        notifications.getChildren().add(Ui.field("Giao diện", client.UI.ThemeManager.selector()));
-        notifications.getChildren().addAll(toggle(manager, "notification", "Âm thanh thông báo", true), toggle(manager, "muteMic", "Tự tắt mic khi vào phòng", false),
-            toggle(manager, "muteCamera", "Tự tắt camera khi vào phòng", false), Ui.field("Chất lượng video tối đa", device(manager, "quality", List.of("360p", "720p", "Tự động"))));
+
         VBox profile = card();
-        TextField username = new TextField(manager.username()), name = new TextField(manager.user()), email = new TextField(manager.email());
-        username.setEditable(false); name.setEditable(false); email.setEditable(false);
-        Button password = Ui.button("Đổi mật khẩu", "secondary", () -> { }); password.setDisable(true);
-        Button save = Ui.button("Lưu thay đổi", "primary", () -> { }); save.setDisable(true);
-        profile.getChildren().addAll(Ui.field("Tên đăng nhập", username), Ui.field("Tên hiển thị", name), Ui.field("Email", email),
-            Ui.row(12, password, save), Ui.label("Thông tin từ tài khoản đã đăng nhập. Chỉnh sửa hồ sơ và đổi mật khẩu sẽ được bổ sung sau.", "caption"));
-        tabs.getTabs().addAll(new Tab("Thiết bị", Ui.scroll(devices)), new Tab("Giao diện & thông báo", Ui.scroll(notifications)), new Tab("Tài khoản", Ui.scroll(profile)));
-        if (account) tabs.getSelectionModel().select(2);
-        VBox.setVgrow(tabs, Priority.ALWAYS); main.getChildren().addAll(Ui.label("Cài đặt", "title"), Ui.label("Thiết lập trải nghiệm họp theo cách của bạn.", "muted"), tabs); setCenter(main);
+        TextField username = new TextField(manager.username());
+        TextField name = new TextField(manager.user());
+        TextField email = new TextField(manager.email());
+        username.setEditable(false);
+        name.setEditable(false);
+        email.setEditable(false);
+        Button password = Ui.button("Đổi mật khẩu", "secondary", () -> { });
+        password.setDisable(true);
+        Button save = Ui.button("Lưu thay đổi", "primary", () -> { });
+        save.setDisable(true);
+        profile.getChildren().addAll(
+                Ui.field("Tên đăng nhập", username),
+                Ui.field("Tên hiển thị", name),
+                Ui.field("Email", email),
+                Ui.row(12, password, save),
+                Ui.label("Thông tin từ tài khoản đã đăng nhập. Chỉnh sửa hồ sơ và đổi mật khẩu sẽ được bổ sung sau.", "caption")
+        );
+
+        tabs.getTabs().addAll(
+                new Tab("Thiết bị", Ui.scroll(devices)),
+                new Tab("Tài khoản", Ui.scroll(profile))
+        );
+        if (account) {
+            tabs.getSelectionModel().select(1);
+        }
+        VBox.setVgrow(tabs, Priority.ALWAYS);
+        main.getChildren().addAll(
+                Ui.label("Cài đặt", "title"),
+                Ui.label("Thiết lập trải nghiệm họp theo cách của bạn.", "muted"),
+                tabs
+        );
+        setCenter(main);
     }
-    private VBox card() { VBox box = new VBox(20); box.getStyleClass().add("card"); VBox.setMargin(box, new Insets(18, 0, 0, 0)); box.setMaxWidth(Double.MAX_VALUE); return box; }
-    public void dispose() { disposed = true; microphoneTestToken++; speakerTestToken++; audioTester.close(); cameras.dispose(); cameraOwner.close(); }
+
+    private VBox card() {
+        VBox box = new VBox(20);
+        box.getStyleClass().add("card");
+        VBox.setMargin(box, new Insets(18, 0, 0, 0));
+        box.setMaxWidth(Double.MAX_VALUE);
+        return box;
+    }
+
+    public void dispose() {
+        disposed = true;
+        microphoneTestToken++;
+        speakerTestToken++;
+        if (microphoneHealthCheck != null) {
+            microphoneHealthCheck.stop();
+        }
+        audioTester.close();
+        cameras.dispose();
+        cameraOwner.close();
+    }
 
     private void toggleMicrophoneTest() {
-        if (microphoneTesting) { stopMicrophoneTest(); return; }
+        if (microphoneTesting) {
+            stopMicrophoneTest();
+            return;
+        }
         microphoneTesting = true;
-        microphoneTest.setDisable(true); speakerTest.setDisable(true); setAudioDeviceControlsDisabled(true);
+        microphoneTest.setDisable(true);
+        speakerTest.setDisable(true);
+        setAudioDeviceControlsDisabled(true);
         microphoneTest.setText("Đang chuẩn bị…");
         microphoneTestStatus.setText("Đang mở microphone…");
         long token = ++microphoneTestToken;
         audio.choice().whenComplete((choice, failure) -> Platform.runLater(() -> {
             if (disposed || token != microphoneTestToken) return;
-            if (failure != null) { finishMicrophoneTest(token, "Không đọc được quyền microphone."); return; }
-            if (choice.access() == MicrophoneConsentStore.Access.ALLOWED) startMicrophoneCapture(token);
-            else askMicrophonePermission(token);
+            if (failure != null) {
+                finishMicrophoneTest(token, "Không đọc được quyền microphone.");
+                return;
+            }
+            if (choice.access() == MicrophoneConsentStore.Access.ALLOWED) {
+                startMicrophoneCapture(token);
+            } else {
+                askMicrophonePermission(token);
+            }
         }));
     }
 
@@ -91,7 +155,9 @@ public final class SettingsScreen extends BorderPane {
         ButtonType deny = new ButtonType("Không cho phép", ButtonBar.ButtonData.CANCEL_CLOSE);
         Alert dialog = new Alert(Alert.AlertType.CONFIRMATION,
                 "Microphone chỉ được dùng để đo mức âm thanh trên máy này trong lúc kiểm tra.", allow, deny);
-        if (getScene() != null && getScene().getWindow() != null) dialog.initOwner(getScene().getWindow());
+        if (getScene() != null && getScene().getWindow() != null) {
+            dialog.initOwner(getScene().getWindow());
+        }
         dialog.setTitle("Quyền sử dụng microphone");
         dialog.setHeaderText("Cho phép kiểm tra microphone?");
         Ui.style(dialog);
@@ -99,9 +165,13 @@ public final class SettingsScreen extends BorderPane {
             boolean accepted = dialog.getResult() == allow;
             audio.access(accepted).whenComplete((ignored, failure) -> Platform.runLater(() -> {
                 if (disposed || token != microphoneTestToken) return;
-                if (failure != null) finishMicrophoneTest(token, "Chưa lưu được quyền microphone.");
-                else if (accepted) startMicrophoneCapture(token);
-                else finishMicrophoneTest(token, "Đã hủy kiểm tra microphone.");
+                if (failure != null) {
+                    finishMicrophoneTest(token, "Chưa lưu được quyền microphone.");
+                } else if (accepted) {
+                    startMicrophoneCapture(token);
+                } else {
+                    finishMicrophoneTest(token, "Đã hủy kiểm tra microphone.");
+                }
             }));
         });
         dialog.show();
@@ -111,9 +181,11 @@ public final class SettingsScreen extends BorderPane {
         microphoneTestStatus.setText("Đang mở microphone để đo tín hiệu…");
         audioTester.startMicrophone(microphones.getValue(), this::showMicrophoneLevel).whenComplete((ignored, failure) -> Platform.runLater(() -> {
             if (disposed || token != microphoneTestToken) return;
-            if (failure != null) finishMicrophoneTest(token, audioTestError(failure, true));
-            else {
-                microphoneTest.setText("Dừng kiểm tra mic"); microphoneTest.setDisable(false);
+            if (failure != null) {
+                finishMicrophoneTest(token, audioTestError(failure, true));
+            } else {
+                microphoneTest.setText("Dừng kiểm tra mic");
+                microphoneTest.setDisable(false);
                 microphoneTestStatus.setText("Đang chờ tiếng nói từ mic; hãy nói gần mic.");
                 checkMicrophoneSignal(token);
             }
@@ -121,7 +193,9 @@ public final class SettingsScreen extends BorderPane {
     }
 
     private void checkMicrophoneSignal(long token) {
-        if (microphoneHealthCheck != null) microphoneHealthCheck.stop();
+        if (microphoneHealthCheck != null) {
+            microphoneHealthCheck.stop();
+        }
         microphoneHealthCheck = new PauseTransition(Duration.seconds(2));
         microphoneHealthCheck.setOnFinished(event -> {
             if (disposed || token != microphoneTestToken || !microphoneTesting) return;
@@ -140,67 +214,101 @@ public final class SettingsScreen extends BorderPane {
 
     private void showMicrophoneLevel(double level) {
         latestMicrophoneLevel.set(level);
-        if (levelUpdateQueued.compareAndSet(false, true)) Platform.runLater(() -> {
-            microphoneLevel.setProgress(Math.min(1, latestMicrophoneLevel.get() * 12)); levelUpdateQueued.set(false);
-        });
+        if (levelUpdateQueued.compareAndSet(false, true)) {
+            Platform.runLater(() -> {
+                microphoneLevel.setProgress(Math.min(1, latestMicrophoneLevel.get() * 12));
+                levelUpdateQueued.set(false);
+            });
+        }
     }
 
     private void stopMicrophoneTest() {
-        if (microphoneHealthCheck != null) microphoneHealthCheck.stop();
+        if (microphoneHealthCheck != null) {
+            microphoneHealthCheck.stop();
+        }
         long token = ++microphoneTestToken;
-        microphoneTesting = false; microphoneTest.setDisable(true); speakerTest.setDisable(true); microphoneTest.setText("Đang dừng…");
+        microphoneTesting = false;
+        microphoneTest.setDisable(true);
+        speakerTest.setDisable(true);
+        microphoneTest.setText("Đang dừng…");
         audioTester.stop().whenComplete((ignored, failure) -> Platform.runLater(() -> {
             if (disposed || token != microphoneTestToken) return;
             microphoneLevel.setProgress(0);
-            microphoneTest.setText("Test mic"); microphoneTest.setDisable(false); speakerTest.setDisable(false); setAudioDeviceControlsDisabled(false);
+            microphoneTest.setText("Test mic");
+            microphoneTest.setDisable(false);
+            speakerTest.setDisable(false);
+            setAudioDeviceControlsDisabled(false);
             microphoneTestStatus.setText(failure == null ? "Đã dừng kiểm tra microphone." : client.media.CameraErrors.audioMessage(failure));
         }));
     }
 
     private void finishMicrophoneTest(long token, String message) {
         if (token != microphoneTestToken) return;
-        if (microphoneHealthCheck != null) microphoneHealthCheck.stop();
-        microphoneTesting = false; microphoneLevel.setProgress(0);
-        microphoneTest.setText("Test mic"); microphoneTest.setDisable(false); speakerTest.setDisable(false); setAudioDeviceControlsDisabled(false);
+        if (microphoneHealthCheck != null) {
+            microphoneHealthCheck.stop();
+        }
+        microphoneTesting = false;
+        microphoneLevel.setProgress(0);
+        microphoneTest.setText("Test mic");
+        microphoneTest.setDisable(false);
+        speakerTest.setDisable(false);
+        setAudioDeviceControlsDisabled(false);
         microphoneTestStatus.setText(message);
     }
 
     private void toggleSpeakerTest() {
         if (speakerTesting) {
             long token = ++speakerTestToken;
-            speakerTest.setText("Đang dừng…"); speakerTest.setDisable(true);
-            microphoneTest.setDisable(true); setAudioDeviceControlsDisabled(true);
+            speakerTest.setText("Đang dừng…");
+            speakerTest.setDisable(true);
+            microphoneTest.setDisable(true);
+            setAudioDeviceControlsDisabled(true);
             audioTester.stop().whenComplete((ignored, failure) -> Platform.runLater(() -> {
                 if (disposed || token != speakerTestToken) return;
-                speakerTesting = false; speakerTest.setText("Test loa"); speakerTest.setDisable(false); microphoneTest.setDisable(false); setAudioDeviceControlsDisabled(false);
-            speakerTestStatus.setText(failure == null ? "Đã dừng âm thử." : audioTestError(failure, false));
+                speakerTesting = false;
+                speakerTest.setText("Test loa");
+                speakerTest.setDisable(false);
+                microphoneTest.setDisable(false);
+                setAudioDeviceControlsDisabled(false);
+                speakerTestStatus.setText(failure == null ? "Đã dừng âm thử." : audioTestError(failure, false));
             }));
             return;
         }
-        speakerTesting = true; microphoneTest.setDisable(true); setAudioDeviceControlsDisabled(true);
-        speakerTest.setText("Dừng thử loa"); speakerTestStatus.setText("Đang phát âm thử 440 Hz…");
+        speakerTesting = true;
+        microphoneTest.setDisable(true);
+        setAudioDeviceControlsDisabled(true);
+        speakerTest.setText("Dừng thử loa");
+        speakerTestStatus.setText("Đang phát âm thử 440 Hz…");
         long token = ++speakerTestToken;
         audioTester.playSpeakerTest(speakers.getValue()).whenComplete((ignored, failure) -> Platform.runLater(() -> {
             if (disposed || token != speakerTestToken) return;
-            speakerTesting = false; speakerTest.setText("Test loa"); microphoneTest.setDisable(false); setAudioDeviceControlsDisabled(false);
+            speakerTesting = false;
+            speakerTest.setText("Test loa");
+            microphoneTest.setDisable(false);
+            setAudioDeviceControlsDisabled(false);
             speakerTestStatus.setText(failure == null ? "Đã phát xong âm thử." : audioTestError(failure, false));
         }));
     }
 
     private void setAudioDeviceControlsDisabled(boolean disabled) {
-        microphones.setDisable(disabled); speakers.setDisable(disabled);
+        microphones.setDisable(disabled);
+        speakers.setDisable(disabled);
     }
 
     private String audioTestError(Throwable failure, boolean microphone) {
         Throwable cause = failure;
         while ((cause instanceof java.util.concurrent.CompletionException || cause instanceof java.util.concurrent.ExecutionException)
-                && cause.getCause() != null) cause = cause.getCause();
-        String code = cause.getMessage();
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
         return microphone ? client.media.CameraErrors.audioMessage(failure)
                 : "Không phát được âm thử. Kiểm tra loa/tai nghe, âm lượng Windows và chọn lại thiết bị.";
     }
+
     private ComboBox<AudioDevice> audioDevice(String id) {
-        ComboBox<AudioDevice> combo = new ComboBox<>(); combo.setMaxWidth(Double.MAX_VALUE); combo.setId(id);
+        ComboBox<AudioDevice> combo = new ComboBox<>();
+        combo.setMaxWidth(Double.MAX_VALUE);
+        combo.setId(id);
         combo.setPromptText("Thiết bị mặc định của Windows");
         combo.setConverter(new javafx.util.StringConverter<>() {
             @Override public String toString(AudioDevice device) { return device == null ? "" : device.getName(); }
@@ -218,6 +326,7 @@ public final class SettingsScreen extends BorderPane {
         });
         return combo;
     }
+
     private void loadAudioDevices() {
         CompletableFuture<MicrophoneConsentStore.Choice> choice = audio.choice();
         CompletableFuture<List<AudioDevice>> inputs = audio.microphones();
@@ -230,7 +339,8 @@ public final class SettingsScreen extends BorderPane {
             }
             loadingAudioDevices = true;
             try {
-                microphones.getItems().setAll(inputs.join()); speakers.getItems().setAll(outputs.join());
+                microphones.getItems().setAll(inputs.join());
+                speakers.getItems().setAll(outputs.join());
                 MicrophoneConsentStore.Choice saved = choice.join();
                 String microphoneDescriptor = saved.preferredDevice();
                 if (microphoneDescriptor == null || microphoneDescriptor.isBlank()) {
@@ -242,21 +352,17 @@ public final class SettingsScreen extends BorderPane {
                 speakers.getItems().stream().filter(device -> device.getDescriptor().equals(saved.preferredSpeaker())).findFirst().ifPresent(speakers::setValue);
                 audioStatus.setText((microphones.getItems().isEmpty() ? "Không tìm thấy microphone. " : "")
                         + (speakers.getItems().isEmpty() ? "Không tìm thấy loa/tai nghe." : "Thiết bị âm thanh đã sẵn sàng; voice trong phòng cần server/SFU đang chạy."));
-            } finally { loadingAudioDevices = false; }
+            } finally {
+                loadingAudioDevices = false;
+            }
         }));
     }
+
     private ComboBox<String> device(SceneManager manager, String key, List<String> choices) {
-        ComboBox<String> combo = Ui.devices(choices); combo.setValue(manager.preference(key, choices.getFirst()));
-        combo.valueProperty().addListener((o, old, value) -> manager.preferenceSet(key, value)); return combo;
-    }
-    private HBox toggle(SceneManager manager, String key, String title, boolean initial) {
-        ToggleButton button = new ToggleButton(); button.getStyleClass().add("settings-switch"); button.setAccessibleText(title);
-        StackPane track = new StackPane(); track.setMinSize(40, 22); track.setMaxSize(40, 22); track.getStyleClass().add("switch-track");
-        Circle knob = new Circle(8, javafx.scene.paint.Color.WHITE); track.getChildren().add(knob); button.setGraphic(track);
-        button.setSelected(Boolean.parseBoolean(manager.preference(key, String.valueOf(initial)))); knob.setTranslateX(button.isSelected() ? 9 : -9);
-        button.selectedProperty().addListener((o, old, selected) -> { knob.setTranslateX(selected ? 9 : -9); manager.preferenceSet(key, selected.toString()); });
-        HBox row = Ui.row(16, Ui.label(title, "strong"), Ui.spacer(), button); row.setAlignment(Pos.CENTER_LEFT); return row;
+        ComboBox<String> combo = Ui.devices(choices);
+        combo.setId("settings-video-quality");
+        combo.setValue(manager.preference(key, choices.getFirst()));
+        combo.valueProperty().addListener((o, old, value) -> manager.preferenceSet(key, value));
+        return combo;
     }
 }
-
-

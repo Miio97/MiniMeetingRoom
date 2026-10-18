@@ -1,13 +1,19 @@
 package common.auth;
 
 import common.room.RoomRequest;
+import common.schedule.ScheduleRequest;
 
-/** One authentication command, carried inside a TLS connection. */
+/** One command carried inside a TLS connection. */
 public record AuthRequest(String action, String username, String password,
-                          String displayName, String email, String token, RoomRequest room) {
+                          String displayName, String email, String token, RoomRequest room,
+                          ScheduleRequest schedule) {
+    public AuthRequest(String action, String username, String password,
+                       String displayName, String email, String token, RoomRequest room) {
+        this(action, username, password, displayName, email, token, room, null);
+    }
     public AuthRequest(String action, String username, String password,
                        String displayName, String email, String token) {
-        this(action, username, password, displayName, email, token, null);
+        this(action, username, password, displayName, email, token, null, null);
     }
     // Avoid accidental credential disclosure from logs or debugger expressions.
     @Override public String toString() { return "AuthRequest[action=" + action + "]"; }

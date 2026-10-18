@@ -39,9 +39,11 @@ public final class AuthClient {
     private static final Set<String> RESPONSE_CODES = Set.of("OK", "INVALID_REQUEST", "INVALID_CREDENTIALS",
             "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
             "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
-            "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE");
+            "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE",
+            "SCHEDULE_NOT_FOUND", "SCHEDULE_LIMIT_EXCEEDED", "SCHEDULE_ALREADY_DELETED", "PERMISSION_DENIED",
+            "SCHEDULE_TIME_CONFLICT");
     private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
-            "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM");
+            "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM", "CREATE_SCHEDULE", "LIST_SCHEDULES", "DELETE_SCHEDULE");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
     private final AtomicReference<NetworkMonitor> networkMonitor = new AtomicReference<>();
@@ -92,12 +94,30 @@ public final class AuthClient {
         return roomCommand("LIST_ROOMS", token, null);
     }
 
+    public AuthResponse listRooms(String token, int offset, int limit) throws IOException {
+        return roomCommand("LIST_ROOMS", token, RoomRequest.page(offset, limit));
+    }
+
     public AuthResponse getRoom(String token, long roomId) throws IOException {
         return roomCommand("GET_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
     }
 
     public AuthResponse leaveRoom(String token, long roomId) throws IOException {
         return roomCommand("LEAVE_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
+    }
+
+    public AuthResponse createSchedule(String token, common.schedule.ScheduleRequest schedule) throws IOException {
+        return send(new AuthRequest("CREATE_SCHEDULE", null, null, null, null, token, null, schedule));
+    }
+
+    public AuthResponse listSchedules(String token, String from, String to) throws IOException {
+        return send(new AuthRequest("LIST_SCHEDULES", null, null, null, null, token, null,
+                common.schedule.ScheduleRequest.list(from, to)));
+    }
+
+    public AuthResponse deleteSchedule(String token, long scheduleId) throws IOException {
+        return send(new AuthRequest("DELETE_SCHEDULE", null, null, null, null, token, null,
+                common.schedule.ScheduleRequest.delete(scheduleId)));
     }
 
     private AuthResponse roomCommand(String action, String token, RoomRequest parameters) throws IOException {
@@ -121,8 +141,17 @@ public final class AuthClient {
                         if (!validRoom(response.room())) throw new IOException("Thông tin phòng từ máy chủ không hợp lệ.");
                     }
                     case "LIST_ROOMS" -> {
-                        if (response.rooms().size() > 20 || response.rooms().stream().anyMatch(room -> !validRoom(room))) {
-                            throw new IOException("Danh sách phòng từ máy chủ không hợp lệ.");
+                        response = normalizeRoomPage(request, response);
+                    }
+                    case "CREATE_SCHEDULE" -> {
+                        if (response.schedule() == null || response.schedule().id() <= 0
+                                || response.schedule().title() == null || response.schedule().title().isBlank()) {
+                            throw new IOException("Thông tin lịch hẹn từ máy chủ không hợp lệ.");
+                        }
+                    }
+                    case "LIST_SCHEDULES" -> {
+                        if (response.schedules() == null) {
+                            throw new IOException("Danh sách lịch hẹn từ máy chủ không hợp lệ.");
                         }
                     }
                     default -> { }
@@ -136,6 +165,22 @@ public final class AuthClient {
             Diagnostics.current().failure("auth_client_request", failure, timing.fields("error"));
             throw failure;
         }
+    }
+
+    // Older servers return their whole recent list and omit pagination metadata.
+    // Validate that bounded list before slicing it, rather than rejecting valid rooms.
+    static AuthResponse normalizeRoomPage(AuthRequest request, AuthResponse response) throws IOException {
+        int limit = request.room() == null ? 20 : request.room().limit();
+        int offset = request.room() == null ? 0 : request.room().offset();
+        boolean legacy = response.hasMoreRooms() == null;
+        if (response.rooms().size() > (legacy ? 20 : limit)
+                || response.rooms().stream().anyMatch(room -> !validRoom(room))) {
+            throw new IOException("Danh sách phòng từ máy chủ không hợp lệ.");
+        }
+        if (!legacy) return response;
+        int from = Math.min(offset, response.rooms().size());
+        int to = Math.min(from + limit, response.rooms().size());
+        return AuthResponse.roomsPage(response.rooms().subList(from, to), to < response.rooms().size());
     }
 
     public RoomResponse meeting(common.meeting.RoomRequest request) throws IOException {

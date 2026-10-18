@@ -203,9 +203,18 @@ public final class AuthServer implements AutoCloseable {
                 Diagnostics.current().failure("server.request.failed", e,
                         Map.of("connection_id", connectionId, "phase", phase, "action", action));
                 // Do not send SQL, connection strings or credentials to the client.
-                System.err.println("Auth database error (SQLState=" + e.getSQLState() + ").");
-                response = AuthResponse.error("DATABASE_UNAVAILABLE", chatRequest
-                        ? "Không thể lưu tin nhắn lúc này. Vui lòng thử lại." : "Không thể xử lý tài khoản lúc này. Vui lòng thử lại.");
+                System.err.println("Auth database error (SQLState=" + e.getSQLState() + ", ErrorCode=" + e.getErrorCode() + ").");
+                String dbErrorMessage;
+                if (chatRequest) {
+                    dbErrorMessage = "Không thể lưu tin nhắn lúc này. Vui lòng thử lại.";
+                } else if (action != null && action.contains("SCHEDULE")) {
+                    dbErrorMessage = "Không thể xử lý lịch hẹn lúc này. Vui lòng thử lại.";
+                } else if (action != null && action.contains("ROOM")) {
+                    dbErrorMessage = "Không thể xử lý phòng họp lúc này. Vui lòng thử lại.";
+                } else {
+                    dbErrorMessage = "Không thể xử lý tài khoản lúc này. Vui lòng thử lại.";
+                }
+                response = AuthResponse.error("DATABASE_UNAVAILABLE", dbErrorMessage);
             } catch (IOException | IllegalArgumentException | JsonParseException e) {
                 Diagnostics.current().failure("server.request.failed", e,
                         Map.of("connection_id", connectionId, "phase", phase, "action", action));
@@ -348,6 +357,7 @@ public final class AuthServer implements AutoCloseable {
                 statement.executeQuery("SELECT Ma_Phien, Ma_Nguoi_Dung, Token_Bam, Het_Han_Luc, Thu_Hoi_Luc FROM Phien_Dang_Nhap WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Phong, Ma_Phong_Tham_Gia, Ten_Phong, Ma_PIN_Bam, Ma_Chu_Phong, Trang_Thai, Da_Khoa, So_Nguoi_Toi_Da, Ngay_Tao, Ngay_Dong FROM Phong_Hop WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Thanh_Vien_Phong, Ma_Phong, Ma_Nguoi_Dung, Vai_Tro, Tham_Gia_Luc, Roi_Phong_Luc, Ly_Do_Roi FROM Thanh_Vien_Phong WHERE 1=0").close();
+                statement.executeQuery("SELECT Ma_Lich_Hen, Ma_Nguoi_Tao, Tieu_De, Mo_Ta, Bat_Dau_Luc, Ket_Thuc_Luc, Lap_Lai, Ma_Phong, Ngay_Tao, Ngay_Xoa FROM Lich_Hen WHERE 1=0").close();
                 if (transferConfig.enabled()) {
                     statement.executeQuery("SELECT Transfer_Id, Ma_Tep, Ma_Tin_Nhan, Duong_Dan_Luu_Tru FROM Tep_Dinh_Kem WHERE 1=0").close();
                     statement.executeQuery("SELECT Ma_Tin_Nhan, Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Ngay_Xoa FROM Tin_Nhan WHERE 1=0").close();
@@ -393,7 +403,8 @@ public final class AuthServer implements AutoCloseable {
             System.err.println("Không khởi động được auth server ở bước kết nối MySQL/kiểm tra bảng"
                     + " (SQLState=" + e.getSQLState() + "). Kiểm tra db.url, db.user, db.password"
                     + " trong config/auth-server.properties hoặc các biến MMR_DB_*."
-                    + " Nếu thiếu Transfer_Id, áp dụng database/migrations/001_file_transfer.sql trước khi bật file transfer.");
+                    + " Nếu thiếu Transfer_Id, áp dụng database/migrations/001_file_transfer.sql trước khi bật file transfer."
+                    + " Nếu thiếu bảng Lich_Hen, áp dụng database/migrations/002_lich_hen.sql cho database hiện có (SCHEMA_NOT_READY).");
             exitCode = 1;
         } catch (Exception e) {
             diagnostics.failure("server.startup.failed", e,
@@ -433,7 +444,8 @@ public final class AuthServer implements AutoCloseable {
             case "REGISTER" -> "REGISTER";
             case "LOGIN" -> "LOGIN";
             case "LOGOUT" -> "LOGOUT";
-            case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM" -> action.toUpperCase(Locale.ROOT);
+            case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM",
+                 "CREATE_SCHEDULE", "LIST_SCHEDULES", "DELETE_SCHEDULE" -> action.toUpperCase(Locale.ROOT);
             default -> "OTHER";
         };
     }
@@ -443,7 +455,9 @@ public final class AuthServer implements AutoCloseable {
         return switch (code) {
             case "OK", "INVALID_REQUEST", "INVALID_CREDENTIALS", "VALIDATION_ERROR", "USERNAME_TAKEN",
                     "EMAIL_TAKEN", "DATABASE_UNAVAILABLE", "SERVER_ERROR", "SESSION_EXPIRED", "ROOM_NOT_FOUND",
-                    "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN", "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE" -> code;
+                    "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN", "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE",
+                    "SCHEDULE_NOT_FOUND", "SCHEDULE_LIMIT_EXCEEDED", "SCHEDULE_ALREADY_DELETED", "PERMISSION_DENIED",
+                    "SCHEDULE_TIME_CONFLICT" -> code;
             default -> "OTHER";
         };
     }

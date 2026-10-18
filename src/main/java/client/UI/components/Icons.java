@@ -15,7 +15,8 @@ public final class Icons {
         "user", "M16 7A4 4 0 1 0 8 7A4 4 0 1 0 16 7 M4 22V20A8 8 0 0 1 20 20V22",
         "video", "M3 6H15V18H3Z M15 10L22 6V18L15 14Z",
         "logout", "M9 3H3V21H9 M8 12H22 M17 7L22 12L17 17",
-        "search", "M18 10A8 8 0 1 0 2 10A8 8 0 1 0 18 10 M16 16L22 22"
+        "search", "M18 10A8 8 0 1 0 2 10A8 8 0 1 0 18 10 M16 16L22 22",
+        "calendar", "M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"
     );
     public static StackPane icon(String name, double size) {
         SVGPath path = new SVGPath(); path.setContent(PATHS.getOrDefault(name, PATHS.get("video")));

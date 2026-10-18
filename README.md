@@ -118,3 +118,60 @@ Trong phòng mới, Bật mic hỏi quyền lần đầu và ghi nhớ trên má
 Nhấn Chia sẻ, chọn màn hình/cửa sổ và kiểm tra preview rồi xác nhận. Camera và screen chạy độc lập. Mỗi phòng chỉ một người chia sẻ; host có thể Dừng mic/Dừng chia sẻ. Không tự bật lại sau mất kết nối. Cấu hình mục tiêu screen mặc định 1280×720, 10 fps, 1.8 Mbit/s; đây không phải số đo đạt được. Xem config/media-client.vmoptions.example và docs/video-call.md.
 
 Giữ cách chạy NetBeans: Run File server/Main.java rồi client/Main.java. Không thêm schema/migration cho hai tính năng này. Test tự động dùng H2/TLS + PCM/I420 tạo sẵn; thiết bị mic/loa/màn hình thật, LAN và tải dài hạn cần người dùng nghiệm thu. Chạy scripts/test-video-call.ps1 cho cả audio/video/screen, mvn -B test cho hồi quy. Bằng chứng và phần chưa chạy ở docs/sfu-testing.md.
+
+## Tính năng Lịch hẹn & Tinh gọn Cài đặt
+
+### 1. Quản lý lịch hẹn (Schedule)
+- **Sảnh chính (`LobbyScreen`)**:
+  - Thẻ thông tin ngày giờ hiển thị theo giờ Việt Nam (`Asia/Ho_Chi_Minh`) dạng chuẩn `Thứ Bảy, 17 thg 10` (đầy đủ tên thứ, không bị lỗi hiển thị). Nút icon lịch mở popup lịch tháng.
+  - Thẻ **Lịch hẹn hôm nay**: hiển thị danh sách cuộc hẹn trong ngày gồm khung giờ (bắt đầu – kết thúc theo định dạng 24h `HH:mm`), tiêu đề, mô tả rút gọn, mã phòng họp gắn kèm (nếu có) và nút xóa lịch hẹn (`✕`). Khi chưa có lịch hẹn, hiển thị trạng thái rỗng `Hôm nay bạn chưa có lịch hẹn`.
+  - **Nhắc lịch trong ứng dụng**: Banner nổi bật tự động cảnh báo khi có cuộc hẹn bắt đầu trong vòng 10 phút tới trong lúc đang mở ứng dụng.
+- **Popup lịch tháng (`MonthCalendar`)**:
+  - Thành phần JavaFX tự viết trên `GridPane`, độc lập, không dùng thư viện ngoài.
+  - Tuần bắt đầu từ thứ Hai (`T2`, `T3`, `T4`, `T5`, `T6`, `T7`, `CN`), tiêu đề dạng `tháng MM yyyy`, nút `‹` và `›` chuyển tháng, làm mờ các ngày ngoài tháng, làm nổi bật ngày hôm nay và ngày được chọn.
+  - Các ngày có lịch hẹn được đánh dấu bằng chấm nhỏ (`.calendar-event-dot`).
+  - Chọn ngày trên lịch ở sảnh chính sẽ lọc và hiển thị danh sách lịch hẹn của ngày đó. Tái sử dụng thành phần này trong hộp thoại tạo lịch hẹn để chọn ngày bắt đầu / kết thúc.
+- **Hộp thoại tạo lịch hẹn (`CreateScheduleDialog`)**:
+  - Giao diện thiết kế theo phong cách Google Calendar: nút đóng `✕`, ô nhập tiêu đề lớn (bắt buộc, 1–100 ký tự).
+  - Chọn ngày bắt đầu, giờ bắt đầu, giờ kết thúc, ngày kết thúc. Bước chọn giờ là 15 phút theo định dạng 24h nhất quán (`HH:mm`). Mặc định bắt đầu ở mốc 15/30 phút tiếp theo và kéo dài 1 giờ.
+  - Bộ chọn chu kỳ lặp lại ("Không lặp lại", "Hằng ngày", "Hằng tuần", "Hằng tháng"). Ngày/giờ nhập và hiển thị cố định theo giờ Việt Nam; thời điểm lưu dưới dạng UTC.
+  - Ô nhập nội dung mô tả (tối đa 1000 ký tự) và tùy chọn gắn phòng họp từ danh sách phòng gần đây hoặc nhập mã `MMR-...` (tuyệt đối KHÔNG lưu hay gửi PIN).
+  - Kiểm tra hợp lệ dữ liệu ngay tại client trước khi gửi qua TLS. Nút Lưu vô hiệu hóa trong khi gửi để tránh gửi lặp.
+
+### 2. Tinh gọn Cài đặt (`SettingsScreen`)
+- Đã gỡ bỏ hoàn toàn tab "Giao diện & thông báo" và toàn bộ các mục demo: Microphone (demo), Loa (demo), Test mic, Test loa, ProgressBar mức mic, Âm lượng, cùng các toggle thông báo giả. Không còn bất kỳ nhãn `(demo)` nào trong màn hình Cài đặt.
+- Màn hình Cài đặt hiện chỉ còn đúng 2 tab:
+  1. **Thiết bị**:
+     - Bộ chọn giao diện Sáng / Tối `ThemeManager.selector()` (chuyển đổi theme ngay tại chỗ, giữ nguyên Scene).
+     - "Camera trên máy của bạn" (`CameraControls` chế độ `selectionOnly`).
+     - "Chất lượng video tối đa" (ComboBox với các mức `360p`, `720p`, `Tự động`, lưu khóa cấu hình `quality`).
+  2. **Tài khoản**: hiển thị thông tin tài khoản hiện tại.
+
+### 3. Database Migration & Triển khai backend
+- Bảng mới `Lich_Hen`:
+  - `Ma_Lich_Hen` BIGINT AUTO_INCREMENT PRIMARY KEY
+  - `Ma_Nguoi_Tao` BIGINT NOT NULL (FK `Nguoi_Dung` ON DELETE CASCADE)
+  - `Tieu_De` VARCHAR(100) NOT NULL
+  - `Mo_Ta` VARCHAR(1000) NULL
+  - `Bat_Dau_Luc` TIMESTAMP NOT NULL (UTC)
+  - `Ket_Thuc_Luc` TIMESTAMP NOT NULL (UTC)
+  - `Lap_Lai` ENUM('KHONG', 'HANG_NGAY', 'HANG_TUAN', 'HANG_THANG') NOT NULL DEFAULT 'KHONG'
+  - `Ma_Phong` BIGINT NULL (FK `Phong_Hop` ON DELETE SET NULL)
+  - `Ngay_Tao` TIMESTAMP NOT NULL (UTC)
+  - `Ngay_Xoa` TIMESTAMP NULL (Xóa mềm)
+  - Index: `idx_lich_hen_nguoi_tao_bat_dau` trên `(Ma_Nguoi_Tao, Bat_Dau_Luc)`.
+- Database mới dùng schema hiện tại, không có hai cột lựa chọn cả ngày/múi giờ.
+- Database đã có bảng lịch hẹn: chạy [migration 003](database/migrations/003_simplify_schedule.sql) để bỏ hai cột; thời gian bắt đầu/kết thúc và các lịch đã tạo được giữ nguyên. Chạy client/server bản mới cùng thay đổi này.
+- File migration tạo bảng: [database/migrations/002_lich_hen.sql](database/migrations/002_lich_hen.sql).
+  - **Hướng dẫn áp dụng**: Với database MySQL hiện có (Railway), hãy thực thi nội dung của file `002_lich_hen.sql` một lần qua công cụ quản lý DB (như DBeaver, MySQL Workbench hoặc Railway Query Editor). Server KHÔNG tự động migrate mà chỉ kiểm tra preflight `SELECT ... FROM Lich_Hen WHERE 1=0`; nếu thiếu bảng, server sẽ dừng và thông báo rõ ràng `SCHEMA_NOT_READY` cùng hướng dẫn áp dụng file migration này.
+  - Với database cài đặt mới từ đầu, script [database/schema.sql](database/schema.sql) đã tích hợp sẵn định nghĩa bảng `Lich_Hen`.
+- **Giao thức & Bảo mật**:
+  - Mở rộng giao thức TLS 8443 sẵn có (`CREATE_SCHEDULE`, `LIST_SCHEDULES`, `DELETE_SCHEDULE`), không mở thêm cổng mới.
+  - Server xác thực danh tính người dùng thông qua phiên token, không tin cậy `userId` do client gửi. Người dùng chỉ xem và xóa được lịch hẹn của chính mình.
+  - Giới hạn: tối đa 200 lịch hẹn chưa xóa/người; tra cứu danh sách theo khoảng thời gian tối đa 62 ngày/lần.
+  - Tuyệt đối không log thông tin nhạy cảm, token, PIN hay nội dung lịch; lỗi trả về qua mã lỗi cố định và thông điệp tiếng Việt.
+
+### 4. Giới hạn & lưu ý kỹ thuật
+- **Tùy chọn chất lượng video (`quality`)**: Đã được lưu vào cấu hình Preferences của ứng dụng, nhưng hiện tại WebRTC media engine chưa kết nối trực tiếp để điều tiết bitrate hay độ phân giải luồng video thật.
+- **Tính năng lặp lại (Recurrence)**: Hộp thoại và DB lưu trữ đúng loại chu kỳ lặp (`KHONG`, `HANG_NGAY`, `HANG_TUAN`, `HANG_THANG`) và hiển thị thông tin này; hệ thống hiện chưa cài đặt bộ máy sinh định kỳ các lần lặp tiếp theo (recurrence expansion engine).
+

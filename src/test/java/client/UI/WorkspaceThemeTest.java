@@ -156,27 +156,27 @@ class WorkspaceThemeTest {
                 Scene scene = new Scene(settings, 1380, 915); scene.getStylesheets().add(Ui.class.getResource("/styles/app.css").toExternalForm());
                 stage.setScene(scene); ThemeManager.attach(settings); css(settings);
                 TabPane tabs = (TabPane) settings.lookup(".settings-tabs");
+                assertEquals(2, tabs.getTabs().size());
+                assertEquals("Thiết bị", tabs.getTabs().get(0).getText());
+                assertEquals("Tài khoản", tabs.getTabs().get(1).getText());
                 for (boolean light : new boolean[] {true, false}) {
                     ThemeManager.setLight(light);
-                    for (int tab = 0; tab < 3; tab++) {
+                    for (int tab = 0; tab < 2; tab++) {
                         tabs.getSelectionModel().select(tab); css(settings);
-                        if (tab == 0) for (var node : settings.lookupAll(".combo-box:disabled")) {
-                            ComboBox<?> box = (ComboBox<?>) node;
-                            for (var child : box.lookupAll(".list-cell")) {
-                                ListCell<?> cell = (ListCell<?>) child;
-                                assertEquals(1, cell.getOpacity());
-                                readable(cell.getTextFill(), background(box));
-                            }
-                        }
-                        if (tab == 1) {
+                        if (tab == 0) {
+                            assertNotNull(settings.lookup("#theme-dark"));
+                            assertNotNull(settings.lookup("#theme-light"));
+                            assertNotNull(settings.lookup("#settings-video-quality"));
                             ((Button) settings.lookup(light ? "#theme-dark" : "#theme-light")).fire(); css(settings);
                             assertEquals(!light, ThemeManager.isLight());
                             ((Button) settings.lookup(light ? "#theme-light" : "#theme-dark")).fire(); css(settings);
-                            for (var node : settings.lookupAll(".settings-switch")) {
-                                ToggleButton toggle = (ToggleButton) node;
-                                toggle.setSelected(!toggle.isSelected()); css(settings);
-                                assertEquals(Color.TRANSPARENT, background(toggle));
-                                toggle.setSelected(!toggle.isSelected());
+                            for (var node : settings.lookupAll(".combo-box:disabled")) {
+                                ComboBox<?> box = (ComboBox<?>) node;
+                                for (var child : box.lookupAll(".list-cell")) {
+                                    ListCell<?> cell = (ListCell<?>) child;
+                                    assertEquals(1, cell.getOpacity());
+                                    readable(cell.getTextFill(), background(box));
+                                }
                             }
                         }
                         snapshot(settings, "settings-" + (light ? "light-" : "dark-") + tab);
@@ -184,6 +184,36 @@ class WorkspaceThemeTest {
                 }
                 assertSame(scene, stage.getScene());
             } finally { settings.dispose(); manager.shutdown(); stage.close(); ThemeManager.setLight(original); }
+            return null;
+        });
+    }
+
+    @Test void settingsScreenHasOnlyTwoTabsAndNoDemoLabels() throws Exception {
+        FxTestRuntime.call(() -> {
+            Stage stage = new Stage(); SceneManager manager = manager(stage);
+            SettingsScreen settings = new SettingsScreen(manager, false);
+            try {
+                Scene scene = new Scene(settings, 1380, 915);
+                stage.setScene(scene);
+                css(settings);
+                TabPane tabs = (TabPane) settings.lookup(".settings-tabs");
+                assertEquals(2, tabs.getTabs().size());
+                assertEquals("Thiết bị", tabs.getTabs().get(0).getText());
+                assertEquals("Tài khoản", tabs.getTabs().get(1).getText());
+
+                tabs.getSelectionModel().select(0);
+                css(settings);
+
+                assertNotNull(settings.lookup("#theme-light"));
+                assertNotNull(settings.lookup("#theme-dark"));
+                assertNotNull(settings.lookup("#settings-video-quality"));
+                assertNotNull(settings.lookup("#camera-controls"));
+
+                for (var node : settings.lookupAll(".label")) {
+                    Label label = (Label) node;
+                    assertFalse(label.getText().toLowerCase().contains("(demo)"), "Found demo label: " + label.getText());
+                }
+            } finally { settings.dispose(); manager.shutdown(); stage.close(); }
             return null;
         });
     }

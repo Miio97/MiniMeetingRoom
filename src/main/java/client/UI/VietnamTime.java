@@ -29,6 +29,18 @@ public final class VietnamTime {
 
     public static String formatTime(Instant instant) { return TIME.format(instant); }
 
+    public static String formatLobbyDate(LocalDate date) {
+        if (date == null) date = today();
+        String[] days = {"Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"};
+        int dayIndex = date.getDayOfWeek().getValue() - 1;
+        return days[dayIndex] + ", " + date.getDayOfMonth() + " thg " + date.getMonthValue();
+    }
+
+    public static String formatScheduleDate(LocalDate date) {
+        if (date == null) return "";
+        return date.getDayOfMonth() + " thg " + date.getMonthValue() + ", " + date.getYear();
+    }
+
     public static String timeNow() { return formatTime(Instant.now()); }
 
     private static DateTimeFormatter formatter(String pattern) {
