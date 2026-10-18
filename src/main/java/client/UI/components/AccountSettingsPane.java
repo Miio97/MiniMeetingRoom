@@ -2,6 +2,7 @@ package client.UI.components;
 
 import client.UI.SceneManager;
 import client.UI.dialogs.ChangePasswordDialog;
+import client.UI.dialogs.EmailVerificationDialog;
 import common.auth.AuthValidation;
 import java.util.Objects;
 import javafx.beans.binding.Bindings;
@@ -25,7 +26,9 @@ public final class AccountSettingsPane extends VBox {
     private final Button save = Ui.button("Lưu thay đổi", "primary", this::save);
     private final Button password = Ui.button("Đổi mật khẩu", "secondary", this::password);
     private final Button forgot = Ui.button("Quên mật khẩu", "secondary", this::forgotPassword);
+    private final Button verifyEmail = Ui.button("Xác thực email (OTP)", "secondary", this::verifyEmail);
     private ChangePasswordDialog passwordDialog;
+    private EmailVerificationDialog emailDialog;
     private boolean pending, disposed;
 
     public AccountSettingsPane(SceneManager manager, Runnable updated) {
@@ -36,25 +39,26 @@ public final class AccountSettingsPane extends VBox {
         name = field("account-display-name", manager.user());
         email = field("account-email", manager.email());
         email.setMinWidth(0);
-        Button verifyEmail = Ui.button("Xác thực email (OTP)", "secondary", () -> { });
-        verifyEmail.setId("account-verify-email"); verifyEmail.setDisable(true);
+        verifyEmail.setId("account-verify-email");
         verifyEmail.setMinWidth(Button.USE_PREF_SIZE);
-        verifyEmail.setTooltip(new Tooltip("Email đăng ký được xác thực bằng OTP. Xác thực lại email thay đổi tại đây chưa được hỗ trợ."));
+        verifyEmail.setTooltip(new Tooltip("Lưu email vào tài khoản, sau đó nhận và nhập mã OTP để xác thực."));
         HBox emailRow = Ui.row(12, email, verifyEmail); HBox.setHgrow(email, Priority.ALWAYS);
         emailConfirmed = Bindings.createBooleanBinding(() -> manager.emailVerified() && !manager.email().isBlank()
                         && email.getText().strip().equals(manager.email()), manager.emailVerifiedProperty(), email.textProperty());
         password.opacityProperty().bind(Bindings.when(password.disabledProperty()).then(0.55).otherwise(1.0));
         password.setDisable(!emailConfirmed.get());
         emailConfirmed.addListener((observable, before, verified) -> password.setDisable(pending || !verified));
+        verifyEmail.setDisable(emailConfirmed.get());
+        emailConfirmed.addListener((observable, before, verified) -> verifyEmail.setDisable(pending || verified));
         Label verification = Ui.label("", "caption"); verification.setId("account-email-verification-status");
         verification.textProperty().bind(Bindings.when(emailConfirmed).then("Email đã xác thực.")
                 .otherwise("Xác thực email để sử dụng chức năng đổi mật khẩu."));
         save.setId("account-save"); password.setId("account-change-password"); status.setId("account-status");
         forgot.setId("account-forgot-password");
-        forgot.setTooltip(new Tooltip("Đăng xuất phiên hiện tại rồi mở màn hình nhận OTP đặt lại mật khẩu."));
+        forgot.setTooltip(new Tooltip("Đặt lại mật khẩu bằng OTP ngay tại đây, giữ phiên đăng nhập hiện tại."));
         FlowPane actions = new FlowPane(12, 12, password, forgot, save);
         getChildren().addAll(Ui.field("Tên đăng nhập", username), Ui.field("Tên hiển thị", name),
-                Ui.field("Email (không bắt buộc)", Ui.column(8, emailRow, verification)), actions, status,
+                Ui.field("Email", Ui.column(8, emailRow, verification)), actions, status,
                 Ui.label("Tên đăng nhập mới sẽ được dùng cho những lần đăng nhập tiếp theo.", "caption"));
     }
 
@@ -93,17 +97,34 @@ public final class AccountSettingsPane extends VBox {
 
     private void forgotPassword() {
         if (disposed || pending) return;
+        String value = email.getText().strip();
+        if (value.isEmpty()) { status("Vui lòng nhập và lưu email trước khi nhận OTP đặt lại mật khẩu.", false); return; }
+        if (!value.equals(manager.email())) { status("Vui lòng lưu thay đổi email trước khi nhận OTP đặt lại mật khẩu.", false); return; }
         manager.forgotPassword();
+    }
+
+    private void verifyEmail() {
+        if (disposed || pending || emailConfirmed.get() || emailDialog != null && emailDialog.isShowing()) return;
+        String value = email.getText().strip();
+        if (value.isEmpty()) { status("Vui lòng nhập và lưu email trước khi xác thực.", false); return; }
+        if (!value.equals(manager.email())) { status("Vui lòng lưu thay đổi email trước khi xác thực.", false); return; }
+        emailDialog = new EmailVerificationDialog(manager, () -> status("Email đã được xác thực.", true));
+        emailDialog.show();
     }
 
     private void pending(boolean value) {
         pending = value; username.setDisable(value); name.setDisable(value); email.setDisable(value);
         save.setDisable(value); forgot.setDisable(value); password.setDisable(value || !emailConfirmed.get()); save.setText(value ? "Đang lưu…" : "Lưu thay đổi");
+        verifyEmail.setDisable(value || emailConfirmed.get());
     }
 
     private void status(String message, boolean success) {
         status.setText(message); status.getStyleClass().setAll(success ? "success-text" : "error-text");
     }
 
-    public void dispose() { disposed = true; emailConfirmed.dispose(); if (passwordDialog != null) passwordDialog.close(); }
+    public void dispose() {
+        disposed = true; emailConfirmed.dispose();
+        if (passwordDialog != null) passwordDialog.close();
+        if (emailDialog != null) emailDialog.close();
+    }
 }

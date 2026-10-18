@@ -30,7 +30,7 @@ public final class EmailOtpService {
     private static final Pattern CODE = Pattern.compile("[0-9]{6}");
     private static final Duration VALIDITY = Duration.ofMinutes(5);
     private static final Duration COOLDOWN = Duration.ofSeconds(60);
-    private static final String REGISTER = "REGISTER", RESET = "RESET", VERIFIED = "VERIFIED";
+    private static final String REGISTER = "REGISTER", RESET = "RESET", VERIFY = "VERIFY", VERIFIED = "VERIFIED";
     private static final String RESET_MESSAGE = "Nếu email thuộc tài khoản đang hoạt động, mã OTP đã được gửi. Mã có hiệu lực 5 phút.";
     private final ConnectionProvider connections;
     private final PasswordHasher passwords;
@@ -74,6 +74,87 @@ public final class EmailOtpService {
         return issue(email, RESET, null, false, null);
     }
 
+    /** The caller owns the transaction and has locked/validated the authenticated account. */
+    AuthResponse requestAccountEmail(Connection connection, long accountId, String rawEmail) throws SQLException {
+        return requestAccountCode(connection, accountId, rawEmail, VERIFY);
+    }
+
+    AuthResponse requestAccountPasswordReset(Connection connection, long accountId, String rawEmail) throws SQLException {
+        return requestAccountCode(connection, accountId, rawEmail, RESET);
+    }
+
+    private AuthResponse requestAccountCode(Connection connection, long accountId, String rawEmail, String purpose) throws SQLException {
+        String email = normalizedEmail(rawEmail);
+        if (!validEmail(email)) return invalidEmail();
+        Instant now = clock.instant();
+        Challenge row = lock(connection, email, purpose);
+        if (row.lastSent() != null && now.isBefore(row.lastSent().plus(COOLDOWN))
+                || sendsInLastHour(connection, email, purpose, now) >= 5) {
+            return AuthResponse.error("OTP_COOLDOWN", "Vui lòng chờ ít nhất 60 giây giữa các lần gửi; tối đa 5 lần mỗi giờ.");
+        }
+        String code = newCode(row);
+        String hash = passwords.hash(code);
+        try {
+            mail.send(email, purpose, code);
+        } catch (OtpMailSender.MailDeliveryException failure) {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE Auth_Email_OTP SET Last_Sent_At=? WHERE Email=? AND Purpose=?")) {
+                statement.setTimestamp(1, Timestamp.from(now), utc());
+                statement.setString(2, email); statement.setString(3, purpose); statement.executeUpdate();
+            }
+            recordSend(connection, email, purpose, now);
+            return AuthResponse.error("MAIL_UNAVAILABLE", "Chưa gửi được email OTP. Vui lòng thử lại sau.");
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE Auth_Email_OTP SET Code_Hash=?, Expires_At=?, Attempts=0, Consumed=FALSE,
+                    Last_Sent_At=?, Account_Id=? WHERE Email=? AND Purpose=?
+                """)) {
+            statement.setString(1, hash); statement.setTimestamp(2, Timestamp.from(now.plus(VALIDITY)), utc());
+            statement.setTimestamp(3, Timestamp.from(now), utc()); statement.setLong(4, accountId);
+            statement.setString(5, email); statement.setString(6, purpose); statement.executeUpdate();
+        }
+        recordSend(connection, email, purpose, now);
+        return new AuthResponse(true, "OTP_REQUIRED", RESET.equals(purpose)
+                ? "Đã gửi mã OTP đặt lại mật khẩu. Mã có hiệu lực 5 phút."
+                : "Đã gửi mã OTP xác thực email. Mã có hiệu lực 5 phút.",
+                null, null, null);
+    }
+
+    /** Account/session ownership is checked by AuthService before entering this transaction. */
+    AuthResponse consumeAccountPasswordReset(Connection connection, long accountId, String rawEmail, String code) throws SQLException {
+        String email = normalizedEmail(rawEmail);
+        if (!validEmail(email)) return invalidEmail();
+        if (!validCode(code)) return invalidCode();
+        Challenge row = lock(connection, email, RESET);
+        if (row.accountId() == null || row.accountId() != accountId) return invalidCode();
+        AuthResponse error = validateAndCount(connection, email, RESET, row, code);
+        if (error != null) return error;
+        storeVerification(connection, accountId, email, true);
+        consume(connection, email, RESET);
+        return AuthResponse.ok("Đã xác minh mã OTP.", null, null, null);
+    }
+
+    /** Verification never changes the email, password or sessions; it proves the saved mailbox. */
+    AuthResponse verifyAccountEmail(Connection connection, long accountId, String rawEmail, String code) throws SQLException {
+        String email = normalizedEmail(rawEmail);
+        if (!validEmail(email)) return invalidEmail();
+        if (!validCode(code)) return invalidCode();
+        Challenge row = lock(connection, email, VERIFY);
+        if (row.accountId() == null || row.accountId() != accountId) return invalidCode();
+        AuthResponse error = validateAndCount(connection, email, VERIFY, row, code);
+        if (error != null) return error;
+        storeVerification(connection, accountId, email, true);
+        consume(connection, email, VERIFY);
+        return AuthResponse.ok("Email đã được xác thực.", null, null, null);
+    }
+
+    private String newCode(Challenge row) {
+        String code;
+        do { code = String.format(Locale.ROOT, "%06d", random.nextInt(1_000_000)); }
+        while (row.codeHash() != null && passwords.verify(code, row.codeHash()));
+        return code;
+    }
+
     private AuthResponse issue(String email, String purpose, Pending pending, boolean resend,
             String registrationChallenge) throws SQLException {
         Instant now = clock.instant();
@@ -101,10 +182,7 @@ public final class EmailOtpService {
                             : AuthResponse.error("OTP_COOLDOWN", "Vui lòng chờ ít nhất 60 giây giữa các lần gửi; tối đa 5 lần mỗi giờ.");
                 }
                 Long accountId = RESET.equals(purpose) ? activeAccountId(connection, email) : null;
-                String code = String.format(Locale.ROOT, "%06d", random.nextInt(1_000_000));
-                while (row.codeHash() != null && passwords.verify(code, row.codeHash())) {
-                    code = String.format(Locale.ROOT, "%06d", random.nextInt(1_000_000));
-                }
+                String code = newCode(row);
                 String codeHash = passwords.hash(code);
                 // Keep the previous challenge intact until delivery succeeds. The row lock also
                 // prevents a verification/resend from racing this delivery on another server.
@@ -304,10 +382,9 @@ public final class EmailOtpService {
                     .filter(value -> !value.isEmpty()).distinct().sorted().toList()) {
                 try (PreparedStatement statement = connection.prepareStatement("""
                         UPDATE Auth_Email_OTP SET Consumed=TRUE, Code_Hash=NULL
-                        WHERE Email=? AND Purpose=? AND Account_Id=?
+                        WHERE Email=? AND Purpose IN ('RESET', 'VERIFY') AND Account_Id=?
                         """)) {
-                    statement.setString(1, email); statement.setString(2, RESET);
-                    statement.setLong(3, accountId); statement.executeUpdate();
+                    statement.setString(1, email); statement.setLong(2, accountId); statement.executeUpdate();
                 }
                 storeVerification(connection, accountId, email, false);
             }

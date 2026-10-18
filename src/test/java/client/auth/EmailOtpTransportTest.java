@@ -69,6 +69,56 @@ class EmailOtpTransportTest {
         }
     }
 
+    @Test void authenticatedEmailVerificationCarriesTheSessionEmailAndCodeOverTls() throws Exception {
+        List<AuthRequest> received = new CopyOnWriteArrayList<>();
+        try (AuthServer server = server(request -> {
+            received.add(request);
+            return "REQUEST_EMAIL_VERIFICATION".equals(request.action())
+                    ? new AuthResponse(true, "OTP_REQUIRED", "Đã gửi mã.", null, null, null)
+                    : AuthResponse.ok("Email đã được xác thực.", new common.auth.AuthUser(1, "Member", "Member", "saved@example.com", true), null, null);
+        })) {
+            var client = client(server, tls.client());
+            assertEquals("OTP_REQUIRED", client.requestEmailVerification("private-session", "saved@example.com").code());
+            assertTrue(client.verifyEmail("private-session", "saved@example.com", "123456").user().emailVerified());
+            assertEquals(List.of(new AuthRequest("REQUEST_EMAIL_VERIFICATION", null, null, null, "saved@example.com", "private-session"),
+                    new AuthRequest("VERIFY_EMAIL", null, null, null, "saved@example.com", "private-session", null, "123456")), received);
+            assertFalse(received.getLast().toString().contains("private-session"));
+            assertFalse(received.getLast().toString().contains("123456"));
+        }
+    }
+
+    @Test void settingsRecoveryCarriesTheCurrentSessionAndThePasswordWithoutLoggingOut() throws Exception {
+        List<AuthRequest> received = new CopyOnWriteArrayList<>();
+        try (AuthServer server = server(request -> {
+            received.add(request);
+            return "REQUEST_ACCOUNT_PASSWORD_RESET".equals(request.action())
+                    ? new AuthResponse(true, "OTP_REQUIRED", "Đã gửi mã.", null, null, null)
+                    : AuthResponse.ok("Đặt lại mật khẩu thành công.", new common.auth.AuthUser(1, "Member", "Member", "saved@example.com", true), null, null);
+        })) {
+            var client = client(server, tls.client());
+            assertEquals("OTP_REQUIRED", client.requestAccountPasswordReset("current-session", "saved@example.com").code());
+            var reset = client.resetAccountPassword("current-session", "saved@example.com", "123456", "New-password-456!");
+            assertTrue(reset.success()); assertTrue(reset.user().emailVerified()); assertNull(reset.token());
+            assertEquals(List.of(new AuthRequest("REQUEST_ACCOUNT_PASSWORD_RESET", null, null, null, "saved@example.com", "current-session"),
+                    new AuthRequest("RESET_ACCOUNT_PASSWORD", null, "New-password-456!", null, "saved@example.com", "current-session", null, "123456")), received);
+            for (String secret : List.of("current-session", "123456", "New-password-456!")) assertFalse(received.getLast().toString().contains(secret));
+        }
+    }
+
+    @Test void emailVerificationRejectsUnverifiedOrDifferentMailboxSnapshots() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        try (AuthServer server = server(request -> {
+            int call = calls.getAndIncrement();
+            return AuthResponse.ok("Email đã được xác thực.", new common.auth.AuthUser(1, "Member", "Member",
+                    call == 1 ? "different@example.com" : "saved@example.com", call != 0), null, null);
+        })) {
+            var client = client(server, tls.client());
+            assertThrows(IOException.class, () -> client.verifyEmail("session", "saved@example.com", "123456"));
+            assertThrows(IOException.class, () -> client.verifyEmail("session", "saved@example.com", "123456"));
+            assertTrue(client.verifyEmail("session", "saved@example.com", "123456").user().emailVerified());
+        }
+    }
+
     @Test
     void diagnosticsAndDtoStringsOmitEmailOtpAndPasswordsEvenWhenServerFails() throws Exception {
         String oldDirectory = System.getProperty("mmr.diagnostics.dir");

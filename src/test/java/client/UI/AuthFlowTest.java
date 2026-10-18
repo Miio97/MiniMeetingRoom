@@ -318,7 +318,7 @@ class AuthFlowTest {
             manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
             assertTrue(node("account-username", TextField.class).isEditable());
             assertFalse(node("account-forgot-password", Button.class).isDisabled());
-            assertTrue(node("account-verify-email", Button.class).isDisabled());
+            assertFalse(node("account-verify-email", Button.class).isDisabled());
             assertTrue(node("account-change-password", Button.class).isVisible());
             assertTrue(node("account-change-password", Button.class).isManaged());
             assertTrue(node("account-change-password", Button.class).isDisabled());
@@ -439,14 +439,15 @@ class AuthFlowTest {
             manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
             Button password = node("account-change-password", Button.class);
             Button otp = node("account-verify-email", Button.class);
-            assertTrue(otp.isVisible()); assertTrue(otp.isDisabled());
+            assertTrue(otp.isVisible()); assertFalse(otp.isDisabled());
             assertSame(node("account-email", TextField.class).getParent(), otp.getParent());
             assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertTrue(password.isDisabled());
-            otp.fire(); password.fire();
+            password.fire();
             assertFalse(manager.emailVerified()); assertFalse(actions.contains("CHANGE_PASSWORD"));
 
             var user = login.user();
             manager.updateAccount(new common.auth.AuthUser(user.id(), user.username(), user.displayName(), user.email(), true));
+            assertTrue(otp.isDisabled());
             assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertFalse(password.isDisabled());
             node("account-email", TextField.class).setText("new@example.com");
             assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertTrue(password.isDisabled());

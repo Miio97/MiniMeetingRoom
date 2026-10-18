@@ -96,6 +96,8 @@ public final class AuthService {
                 case "LOGOUT" -> logout(request.token());
                 case "UPDATE_PROFILE" -> updateProfile(request);
                 case "CHANGE_PASSWORD" -> changePassword(request);
+                case "REQUEST_EMAIL_VERIFICATION", "VERIFY_EMAIL", "REQUEST_ACCOUNT_PASSWORD_RESET" -> accountEmailCommand(request);
+                case "RESET_ACCOUNT_PASSWORD" -> resetAccountPassword(request);
                 default -> AuthResponse.error("INVALID_REQUEST", "Chức năng không được hỗ trợ.");
             };
         } catch (SQLException failure) {
@@ -224,6 +226,60 @@ public final class AuthService {
         return AuthResponse.ok("Đã đăng xuất.", null, null, null);
     }
 
+    private AuthResponse accountEmailCommand(AuthRequest request) throws SQLException {
+        if (emailOtp == null) return otpUnavailable();
+        try (Connection connection = connections.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            connection.setAutoCommit(false);
+            try {
+                Account account = lockAuthenticatedAccount(connection, request.token());
+                if (account == null) { connection.rollback(); return expiredSession(); }
+                if (!EmailOtpService.sameMailbox(account.user().email(), request.email())) {
+                    connection.rollback();
+                    return AuthResponse.error("VALIDATION_ERROR", "Vui lòng lưu email vào tài khoản trước khi xác thực.");
+                }
+                AuthResponse response = switch (request.action().toUpperCase(Locale.ROOT)) {
+                    case "VERIFY_EMAIL" -> emailOtp.verifyAccountEmail(connection, account.user().id(), request.email(), request.otp());
+                    case "REQUEST_ACCOUNT_PASSWORD_RESET" -> emailOtp.requestAccountPasswordReset(connection, account.user().id(), request.email());
+                    default -> emailOtp.requestAccountEmail(connection, account.user().id(), request.email());
+                };
+                if ("VERIFY_EMAIL".equalsIgnoreCase(request.action()) && response.success()) {
+                    response = AuthResponse.ok(response.message(), verifiedUser(connection, account.user()), null, null);
+                }
+                // Wrong-code attempts and failed SMTP deliveries must also retain their rate limits.
+                connection.commit();
+                return response;
+            } catch (SQLException | RuntimeException failure) { rollback(connection, failure); throw failure; }
+        }
+    }
+
+    private AuthResponse resetAccountPassword(AuthRequest request) throws SQLException {
+        if (emailOtp == null) return otpUnavailable();
+        String error = AuthValidation.registrationPasswordError(request.password());
+        if (error != null) return AuthResponse.error("VALIDATION_ERROR", error);
+        List<String> revoked;
+        AuthUser user;
+        try (Connection connection = connections.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            connection.setAutoCommit(false);
+            try {
+                Account account = lockAuthenticatedAccount(connection, request.token());
+                if (account == null) { connection.rollback(); return expiredSession(); }
+                if (!EmailOtpService.sameMailbox(account.user().email(), request.email())) {
+                    connection.rollback();
+                    return AuthResponse.error("VALIDATION_ERROR", "Email không khớp tài khoản đang đăng nhập. Vui lòng lưu email rồi thử lại.");
+                }
+                AuthResponse validation = emailOtp.consumeAccountPasswordReset(connection, account.user().id(), request.email(), request.otp());
+                if (!validation.success()) { connection.commit(); return validation; }
+                revoked = replacePasswordAndRevokeOthers(connection, account.user().id(), request.password(), request.token());
+                user = verifiedUser(connection, account.user());
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) { rollback(connection, failure); throw failure; }
+        }
+        notifyRevocations(revoked);
+        return AuthResponse.ok("Đặt lại mật khẩu thành công. Bạn vẫn đang đăng nhập; các phiên khác đã được đăng xuất.", user, null, null);
+    }
+
     private AuthResponse updateProfile(AuthRequest request) throws SQLException {
         String name = clean(request.displayName()), email = clean(request.email());
         String error = AuthValidation.profileError(request.username(), name, email);
@@ -284,37 +340,47 @@ public final class AuthService {
                     return AuthResponse.error("VALIDATION_ERROR", "Mật khẩu mới phải khác mật khẩu hiện tại.");
                 }
                 user = verifiedUser(connection, account.user());
-                Instant now = clock.instant();
-                String currentHash = tokenHash(request.token());
-                try (PreparedStatement statement = connection.prepareStatement(
-                        "UPDATE Nguoi_Dung SET Mat_Khau_Bam=? WHERE Ma_Nguoi_Dung=?")) {
-                    statement.setString(1, passwords.hash(request.newPassword())); statement.setLong(2, user.id());
-                    statement.executeUpdate();
+                if (emailOtp != null && !user.emailVerified()) {
+                    connection.rollback();
+                    return AuthResponse.error("VALIDATION_ERROR", "Vui lòng xác thực email trước khi đổi mật khẩu.");
                 }
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        SELECT Token_Bam FROM Phien_Dang_Nhap WHERE Ma_Nguoi_Dung=? AND Token_Bam<>?
-                        AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>? ORDER BY Ma_Phien FOR UPDATE
-                        """)) {
-                    statement.setLong(1, user.id()); statement.setString(2, currentHash);
-                    statement.setTimestamp(3, Timestamp.from(now), utc());
-                    try (ResultSet rows = statement.executeQuery()) { while (rows.next()) revoked.add(rows.getString(1)); }
-                }
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE Phien_Dang_Nhap SET Thu_Hoi_Luc=? WHERE Ma_Nguoi_Dung=? AND Token_Bam<>?
-                        AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>?
-                        """)) {
-                    statement.setTimestamp(1, Timestamp.from(now), utc()); statement.setLong(2, user.id());
-                    statement.setString(3, currentHash); statement.setTimestamp(4, Timestamp.from(now), utc());
-                    statement.executeUpdate();
-                }
+                revoked.addAll(replacePasswordAndRevokeOthers(connection, user.id(), request.newPassword(), request.token()));
                 connection.commit();
             } catch (SQLException | RuntimeException exception) { rollback(connection, exception); throw exception; }
         }
-        for (String hash : revoked) {
+        notifyRevocations(revoked);
+        return AuthResponse.ok("Đã đổi mật khẩu. Các phiên đăng nhập khác đã hết hiệu lực.", user, null, null);
+    }
+
+    /** Caller holds the account and current session locks; all changes commit with OTP/password validation. */
+    private List<String> replacePasswordAndRevokeOthers(Connection connection, long userId, String password, String token) throws SQLException {
+        List<String> revoked = new ArrayList<>();
+        Instant now = clock.instant(); String currentHash = tokenHash(token);
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE Nguoi_Dung SET Mat_Khau_Bam=? WHERE Ma_Nguoi_Dung=?")) {
+            statement.setString(1, passwords.hash(password)); statement.setLong(2, userId); statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT Token_Bam FROM Phien_Dang_Nhap WHERE Ma_Nguoi_Dung=? AND Token_Bam<>?
+                AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>? ORDER BY Ma_Phien FOR UPDATE
+                """)) {
+            statement.setLong(1, userId); statement.setString(2, currentHash); statement.setTimestamp(3, Timestamp.from(now), utc());
+            try (ResultSet rows = statement.executeQuery()) { while (rows.next()) revoked.add(rows.getString(1)); }
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE Phien_Dang_Nhap SET Thu_Hoi_Luc=? WHERE Ma_Nguoi_Dung=? AND Token_Bam<>?
+                AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>?
+                """)) {
+            statement.setTimestamp(1, Timestamp.from(now), utc()); statement.setLong(2, userId);
+            statement.setString(3, currentHash); statement.setTimestamp(4, Timestamp.from(now), utc()); statement.executeUpdate();
+        }
+        return revoked;
+    }
+
+    private void notifyRevocations(List<String> hashes) {
+        for (String hash : hashes) {
             try { revocations.revoked(hash); }
             catch (RuntimeException ignored) { /* Committed revocation is also enforced by periodic validation. */ }
         }
-        return AuthResponse.ok("Đã đổi mật khẩu. Các phiên đăng nhập khác đã hết hiệu lực.", user, null, null);
     }
 
     /** Account first, session second: matches login and serializes concurrent password changes. */

@@ -277,6 +277,8 @@ public final class DiagnosticsReport {
                     ? tag(fields, "kind") : "unavailable";
             String action = tagged(fields, "action", Set.of("LOGIN", "REGISTER", "LOGOUT", "AUTHENTICATE",
                     "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET", "RESET_PASSWORD", "UPDATE_PROFILE", "CHANGE_PASSWORD",
+                    "REQUEST_EMAIL_VERIFICATION", "VERIFY_EMAIL",
+                    "REQUEST_ACCOUNT_PASSWORD_RESET", "RESET_ACCOUNT_PASSWORD",
                     "CREATE_ROOM", "REOPEN_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "ADMISSION_STATUS", "GET_ROOM", "LEAVE_ROOM", "SET_MEDIA_STATE",
                     "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
                     "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",

@@ -37,6 +37,7 @@ class EmailOtpAccountSettingsIntegrationTest {
     private String url;
     private AuthService service, legacy;
     private SessionService sessions;
+    private boolean failMail;
 
     @BeforeEach void setup() throws Exception {
         url = "jdbc:h2:mem:merged_accounts_" + UUID.randomUUID()
@@ -148,14 +149,14 @@ class EmailOtpAccountSettingsIntegrationTest {
         assertTrue(login("Khoa", "NewKhoa456@").user().emailVerified());
     }
 
-    @Test void missingOtpMigrationKeepsExistingLoginProfileAndPasswordChangeUsable() throws Exception {
+    @Test void missingOtpMigrationKeepsLoginAndProfileButDoesNotBypassPasswordVerification() throws Exception {
         assertTrue(legacy.handle(new AuthRequest("REGISTER", "Khoa", PASSWORD, "Khoa", EMAIL, null)).success());
         execute("DROP TABLE Auth_Email_OTP_Send"); execute("DROP TABLE Auth_Email_OTP");
         var current = login("Khoa", PASSWORD);
         assertTrue(current.success()); assertFalse(current.user().emailVerified());
         assertTrue(profile(current.token(), "Changed", "Changed", "new@example.com").success());
-        assertTrue(password(current.token(), PASSWORD, "NewKhoa456@").success());
-        assertTrue(login("Changed", "NewKhoa456@").success());
+        assertEquals("VALIDATION_ERROR", password(current.token(), PASSWORD, "NewKhoa456@").code());
+        assertTrue(login("Changed", PASSWORD).success());
         assertEquals("DB_MIGRATION_REQUIRED", service.handle(new AuthRequest(
                 "REGISTER", "NewAccount", PASSWORD, "New", "next@example.com", null)).code());
     }
@@ -207,10 +208,270 @@ class EmailOtpAccountSettingsIntegrationTest {
         }
     }
 
+    @Test void existingAccountCanVerifySavedEmailWithoutResettingItsPasswordOrSessions() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", null, null));
+        var current = login("Existing", PASSWORD); var other = login("Existing", PASSWORD);
+        assertFalse(current.user().emailVerified());
+        assertEquals("VALIDATION_ERROR", password(current.token(), PASSWORD, "NewPassword-456!").code());
+        assertTrue(profile(current.token(), "Existing", "Existing", EMAIL).success());
+        assertEquals("OTP_REQUIRED", emailRequest(current.token(), EMAIL).code());
+        assertEquals("VERIFY", sent.getLast().purpose());
+        String code = sent.getLast().code();
+        assertEquals("OTP_INVALID", emailVerify(current.token(), EMAIL, wrongCode(code)).code());
+        var verified = emailVerify(current.token(), EMAIL, code);
+        assertTrue(verified.success()); assertTrue(verified.user().emailVerified());
+        assertNull(verified.token()); assertEquals(current.user().id(), verified.user().id());
+        assertEquals(current.user().id(), sessions.authenticate(current.token()));
+        assertEquals(current.user().id(), sessions.authenticate(other.token())); assertTrue(revoked.isEmpty());
+        service = newService(); assertTrue(login("Existing", PASSWORD).user().emailVerified());
+        assertTrue(password(current.token(), PASSWORD, "NewPassword-456!").success());
+        assertThrows(TransferException.class, () -> sessions.authenticate(other.token()));
+    }
+
+    @Test void verificationRequiresActiveSessionAndTheExactSavedMailbox() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD);
+        assertEquals("SESSION_EXPIRED", emailRequest("invalid-token", EMAIL).code());
+        assertEquals("SESSION_EXPIRED", emailVerify(null, EMAIL, "123456").code());
+        assertEquals("VALIDATION_ERROR", emailRequest(current.token(), "other@example.com").code());
+        assertEquals("VALIDATION_ERROR", emailRequest(current.token(), "khóa@example.com").code());
+        assertTrue(sent.isEmpty());
+        assertTrue(profile(current.token(), "Existing", "Existing", "").success());
+        assertEquals("VALIDATION_ERROR", emailRequest(current.token(), "").code());
+        service.handle(new AuthRequest("LOGOUT", null, null, null, null, current.token()));
+        assertEquals("SESSION_EXPIRED", emailRequest(current.token(), EMAIL).code());
+        var next = login("Existing", PASSWORD);
+        execute("UPDATE Nguoi_Dung SET Trang_Thai='BI_KHOA'");
+        assertEquals("SESSION_EXPIRED", emailRequest(next.token(), EMAIL).code());
+        assertTrue(sent.isEmpty());
+    }
+
+    @Test void verificationCodesAreSingleUseAndCannotReplacePasswordResetCodes() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD);
+        emailRequest(current.token(), EMAIL); String verification = sent.getLast().code();
+        resetRequest(EMAIL); String resetCode = sent.getLast().code();
+        // Make the negative purpose test deterministic even if random six-digit values coincide.
+        if (verification.equals(resetCode)) {
+            clock.advance(Duration.ofSeconds(60)); resetRequest(EMAIL); resetCode = sent.getLast().code();
+        }
+        if (!verification.equals(resetCode)) {
+            assertEquals("OTP_INVALID", emailVerify(current.token(), EMAIL, resetCode).code());
+            assertEquals("OTP_INVALID", reset(EMAIL, verification, "NewPassword-456!").code());
+        }
+        assertTrue(emailVerify(current.token(), EMAIL, verification).success());
+        assertEquals("OTP_INVALID", emailVerify(current.token(), EMAIL, verification).code());
+        assertTrue(login("Existing", PASSWORD).success());
+        assertTrue(reset(EMAIL, resetCode, "Recovered-789!").success());
+        assertThrows(TransferException.class, () -> sessions.authenticate(current.token()));
+    }
+
+    @Test void verificationResendRotatesCodesAndSmtpFailurePreservesTheLastWorkingCode() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD);
+        emailRequest(current.token(), EMAIL); String original = sent.getLast().code();
+        assertEquals("OTP_COOLDOWN", emailRequest(current.token(), EMAIL).code()); assertEquals(1, sent.size());
+        clock.advance(Duration.ofSeconds(60));
+        emailRequest(current.token(), EMAIL); String replacement = sent.getLast().code();
+        assertNotEquals(original, replacement);
+        assertEquals("OTP_INVALID", emailVerify(current.token(), EMAIL, original).code());
+        clock.advance(Duration.ofSeconds(60)); failMail = true;
+        assertEquals("MAIL_UNAVAILABLE", emailRequest(current.token(), EMAIL).code());
+        assertEquals("OTP_COOLDOWN", emailRequest(current.token(), EMAIL).code());
+        assertEquals(2, sent.size());
+        assertTrue(emailVerify(current.token(), EMAIL, replacement).success());
+    }
+
+    @Test void verificationRejectsExpiredCodesAndLocksAfterFiveWrongAttempts() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD);
+        emailRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        for (int attempt = 1; attempt <= 5; attempt++)
+            assertEquals(attempt < 5 ? "OTP_INVALID" : "OTP_LOCKED",
+                    emailVerify(current.token(), EMAIL, wrongCode(code)).code());
+        assertEquals("OTP_LOCKED", emailVerify(current.token(), EMAIL, code).code());
+        clock.advance(Duration.ofSeconds(60)); emailRequest(current.token(), EMAIL); code = sent.getLast().code();
+        clock.advance(Duration.ofMinutes(5));
+        assertEquals("OTP_EXPIRED", emailVerify(current.token(), EMAIL, code).code());
+        assertFalse(login("Existing", PASSWORD).user().emailVerified());
+    }
+
+    @Test void changingEmailCancelsVerificationAndOldCodeCannotVerifyANewOwner() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD);
+        emailRequest(current.token(), EMAIL); String old = sent.getLast().code();
+        profile(current.token(), "Existing", "Existing", "moved@example.com");
+        assertEquals("VALIDATION_ERROR", emailVerify(current.token(), EMAIL, old).code());
+        legacy.handle(new AuthRequest("REGISTER", "NewOwner", PASSWORD, "New owner", EMAIL, null));
+        var newOwner = login("NewOwner", PASSWORD);
+        assertEquals("OTP_INVALID", emailVerify(newOwner.token(), EMAIL, old).code());
+        assertFalse(login("NewOwner", PASSWORD).user().emailVerified());
+        profile(current.token(), "Existing", "Existing", "another@example.com");
+        emailRequest(current.token(), "another@example.com"); String abandoned = sent.getLast().code();
+        profile(current.token(), "Existing", "Existing", "moved@example.com");
+        profile(current.token(), "Existing", "Existing", "another@example.com");
+        assertEquals("OTP_INVALID", emailVerify(current.token(), "another@example.com", abandoned).code());
+    }
+
+    @Test void verificationDeliveryFailuresAlsoCountTowardTheRollingHourlyLimit() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD); failMail = true;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            assertEquals("MAIL_UNAVAILABLE", emailRequest(current.token(), EMAIL).code());
+            clock.advance(Duration.ofSeconds(60));
+        }
+        failMail = false;
+        assertEquals("OTP_COOLDOWN", emailRequest(current.token(), EMAIL).code()); assertTrue(sent.isEmpty());
+        clock.advance(Duration.ofHours(1));
+        assertEquals("OTP_REQUIRED", emailRequest(current.token(), EMAIL).code());
+    }
+
+    @Test void simultaneousEmailVerificationOnlyConsumesTheCodeOnce() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD);
+        emailRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var start = new CountDownLatch(1);
+            var first = executor.submit(() -> { start.await(); return emailVerify(current.token(), EMAIL, code); });
+            var second = executor.submit(() -> { start.await(); return emailVerify(current.token(), EMAIL, code); });
+            start.countDown();
+            var a = first.get(15, TimeUnit.SECONDS); var b = second.get(15, TimeUnit.SECONDS);
+            assertNotEquals(a.success(), b.success()); assertEquals("OTP_INVALID", a.success() ? b.code() : a.code());
+            assertTrue(login("Existing", PASSWORD).user().emailVerified());
+        }
+    }
+
+    @Test void settingsRecoveryKeepsTheCurrentTokenAndRevokesOnlyOtherSessionsOfThatAccount() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        legacy.handle(new AuthRequest("REGISTER", "Other", PASSWORD, "Other", "other@example.com", null));
+        var current = login("Existing", PASSWORD); var previous = login("Existing", PASSWORD); var unrelated = login("Other", PASSWORD);
+        assertFalse(current.user().emailVerified());
+        assertEquals("OTP_REQUIRED", accountResetRequest(current.token(), EMAIL).code());
+        assertEquals("RESET", sent.getLast().purpose()); String code = sent.getLast().code();
+        assertEquals("OTP_COOLDOWN", accountResetRequest(current.token(), EMAIL).code());
+        var response = accountReset(current.token(), EMAIL, code, "Recovered-123!");
+        assertTrue(response.success(), response::message); assertTrue(response.user().emailVerified()); assertNull(response.token());
+        assertEquals(current.user().id(), sessions.authenticate(current.token()));
+        assertEquals(unrelated.user().id(), sessions.authenticate(unrelated.token()));
+        assertThrows(TransferException.class, () -> sessions.authenticate(previous.token()));
+        assertEquals(List.of(AuthService.tokenHash(previous.token())), revoked);
+        assertEquals("INVALID_CREDENTIALS", login("Existing", PASSWORD).code());
+        assertTrue(login("Existing", "Recovered-123!").success());
+        assertEquals("OTP_INVALID", accountReset(current.token(), EMAIL, code, "Replay-password-456!").code());
+    }
+
+    @Test void settingsRecoveryRejectsAnonymousOrDifferentAccountRequestsAndWeakPasswordsWithoutConsumingCode() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        legacy.handle(new AuthRequest("REGISTER", "Other", PASSWORD, "Other", "other@example.com", null));
+        var current = login("Existing", PASSWORD); var other = login("Other", PASSWORD);
+        assertEquals("SESSION_EXPIRED", accountResetRequest(null, EMAIL).code());
+        assertEquals("SESSION_EXPIRED", accountReset(null, EMAIL, "123456", "Recovered-123!").code());
+        assertEquals("VALIDATION_ERROR", accountResetRequest(other.token(), EMAIL).code()); assertTrue(sent.isEmpty());
+        accountResetRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        assertEquals("VALIDATION_ERROR", accountReset(other.token(), EMAIL, code, "Recovered-123!").code());
+        assertEquals("VALIDATION_ERROR", accountReset(current.token(), EMAIL, code, "weak").code());
+        assertTrue(accountReset(current.token(), EMAIL, code, "Recovered-123!").success());
+        assertEquals(other.user().id(), sessions.authenticate(other.token()));
+    }
+
+    @Test void settingsRecoveryRejectsOldEmailCodesAndRevokedSessions() throws Exception {
+        registerVerified("Khoa", EMAIL); var current = login("Khoa", PASSWORD);
+        accountResetRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        profile(current.token(), "Khoa", "Khoa", "changed@example.com");
+        assertEquals("VALIDATION_ERROR", accountReset(current.token(), EMAIL, code, "Recovered-123!").code());
+        profile(current.token(), "Khoa", "Khoa", EMAIL);
+        assertEquals("OTP_INVALID", accountReset(current.token(), EMAIL, code, "Recovered-123!").code());
+        assertTrue(login("Khoa", PASSWORD).success());
+        service.handle(new AuthRequest("LOGOUT", null, null, null, null, current.token()));
+        assertEquals("SESSION_EXPIRED", accountResetRequest(current.token(), EMAIL).code());
+        assertEquals("SESSION_EXPIRED", accountReset(current.token(), EMAIL, code, "Recovered-123!").code());
+    }
+
+    @Test void settingsRecoveryCountsWrongAttemptsAndRejectsExpiredCodesWithoutEndingTheSession() throws Exception {
+        registerVerified("Khoa", EMAIL); var current = login("Khoa", PASSWORD);
+        accountResetRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        for (int attempt = 1; attempt <= 5; attempt++)
+            assertEquals(attempt < 5 ? "OTP_INVALID" : "OTP_LOCKED", accountReset(current.token(), EMAIL, wrongCode(code), "Recovered-123!").code());
+        assertEquals("OTP_LOCKED", accountReset(current.token(), EMAIL, code, "Recovered-123!").code());
+        clock.advance(Duration.ofSeconds(60)); accountResetRequest(current.token(), EMAIL); code = sent.getLast().code();
+        clock.advance(Duration.ofMinutes(5));
+        assertEquals("OTP_EXPIRED", accountReset(current.token(), EMAIL, code, "Recovered-123!").code());
+        assertEquals(current.user().id(), sessions.authenticate(current.token())); assertTrue(revoked.isEmpty());
+        assertTrue(login("Khoa", PASSWORD).success());
+    }
+
+    @Test void concurrentSettingsRecoveryKeepsOnlyTheSuccessfulRequestSession() throws Exception {
+        registerVerified("Khoa", EMAIL); var first = login("Khoa", PASSWORD); var second = login("Khoa", PASSWORD);
+        accountResetRequest(first.token(), EMAIL); String code = sent.getLast().code();
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var start = new CountDownLatch(1);
+            var a = executor.submit(() -> { start.await(); return accountReset(first.token(), EMAIL, code, "First-recovery-123!"); });
+            var b = executor.submit(() -> { start.await(); return accountReset(second.token(), EMAIL, code, "Second-recovery-456!"); });
+            start.countDown(); var firstResult = a.get(15, TimeUnit.SECONDS); var secondResult = b.get(15, TimeUnit.SECONDS);
+            assertNotEquals(firstResult.success(), secondResult.success());
+            assertEquals("SESSION_EXPIRED", firstResult.success() ? secondResult.code() : firstResult.code());
+            String keep = firstResult.success() ? first.token() : second.token(); String expired = firstResult.success() ? second.token() : first.token();
+            assertEquals(first.user().id(), sessions.authenticate(keep));
+            assertThrows(TransferException.class, () -> sessions.authenticate(expired));
+            assertEquals(List.of(AuthService.tokenHash(expired)), revoked);
+        }
+    }
+
+    @Test void publicAndSettingsRecoveryCannotConsumeTheSameCodeTwice() throws Exception {
+        registerVerified("Khoa", EMAIL); var current = login("Khoa", PASSWORD);
+        accountResetRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var start = new CountDownLatch(1);
+            var inSettings = executor.submit(() -> { start.await(); return accountReset(current.token(), EMAIL, code, "Settings-recovery-123!"); });
+            var publicReset = executor.submit(() -> { start.await(); return reset(EMAIL, code, "Public-recovery-456!"); });
+            start.countDown(); var kept = inSettings.get(15, TimeUnit.SECONDS); var signedOut = publicReset.get(15, TimeUnit.SECONDS);
+            assertNotEquals(kept.success(), signedOut.success());
+            if (kept.success()) {
+                assertEquals("OTP_INVALID", signedOut.code()); assertEquals(current.user().id(), sessions.authenticate(current.token()));
+            } else {
+                assertEquals("SESSION_EXPIRED", kept.code()); assertThrows(TransferException.class, () -> sessions.authenticate(current.token()));
+            }
+        }
+    }
+
+    @Test void failedPasswordWriteRollsBackOtpConsumptionProofAndSessionRevocation() throws Exception {
+        legacy.handle(new AuthRequest("REGISTER", "Existing", PASSWORD, "Existing", EMAIL, null));
+        var current = login("Existing", PASSWORD); var other = login("Existing", PASSWORD);
+        accountResetRequest(current.token(), EMAIL); String code = sent.getLast().code();
+        String originalHash;
+        try (var connection = connection(); var statement = connection.createStatement(); var row = statement.executeQuery("SELECT Mat_Khau_Bam FROM Nguoi_Dung")) {
+            assertTrue(row.next()); originalHash = row.getString(1);
+        }
+        execute("ALTER TABLE Nguoi_Dung ADD CONSTRAINT keep_original_password CHECK (Mat_Khau_Bam='" + originalHash + "')");
+        assertThrows(SQLException.class, () -> accountReset(current.token(), EMAIL, code, "Recovered-123!"));
+        assertFalse(login("Existing", PASSWORD).user().emailVerified());
+        assertEquals(current.user().id(), sessions.authenticate(current.token())); assertEquals(current.user().id(), sessions.authenticate(other.token()));
+        assertTrue(revoked.isEmpty()); execute("ALTER TABLE Nguoi_Dung DROP CONSTRAINT keep_original_password");
+        assertTrue(accountReset(current.token(), EMAIL, code, "Recovered-123!").success());
+    }
+
+    private AuthResponse accountResetRequest(String token, String email) throws SQLException {
+        return service.handle(new AuthRequest("REQUEST_ACCOUNT_PASSWORD_RESET", null, null, null, email, token));
+    }
+    private AuthResponse accountReset(String token, String email, String code, String password) throws SQLException {
+        return service.handle(new AuthRequest("RESET_ACCOUNT_PASSWORD", null, password, null, email, token, null, code));
+    }
+
+    private static String wrongCode(String code) { return "000000".equals(code) ? "000001" : "000000"; }
+    private AuthResponse emailRequest(String token, String email) throws SQLException {
+        return service.handle(new AuthRequest("REQUEST_EMAIL_VERIFICATION", null, null, null, email, token));
+    }
+    private AuthResponse emailVerify(String token, String email, String code) throws SQLException {
+        return service.handle(new AuthRequest("VERIFY_EMAIL", null, null, null, email, token, null, code));
+    }
+
     private AuthService newService() {
         return new AuthService(this::connection, passwords, clock, Duration.ofHours(24), revoked::add,
                 new EmailOtpService(this::connection, passwords, clock,
-                        (email, purpose, code) -> sent.add(new Delivery(email, code)), revoked::add));
+                        (email, purpose, code) -> {
+                            if (failMail) throw new OtpMailSender.MailDeliveryException();
+                            sent.add(new Delivery(email, purpose, code));
+                        }, revoked::add));
     }
     private void registerVerified(String username, String email) throws SQLException {
         var pending = service.handle(new AuthRequest("REGISTER", username, PASSWORD, username, email, null));
@@ -238,7 +499,7 @@ class EmailOtpAccountSettingsIntegrationTest {
     private void execute(String sql) throws SQLException {
         try (Connection connection = connection(); Statement statement = connection.createStatement()) { statement.execute(sql); }
     }
-    private record Delivery(String email, String code) { }
+    private record Delivery(String email, String purpose, String code) { }
     private static final class MutableClock extends Clock {
         private Instant now = Instant.parse("2026-10-18T07:00:00Z");
         void advance(Duration duration) { now = now.plus(duration); }

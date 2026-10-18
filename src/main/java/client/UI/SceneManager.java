@@ -55,6 +55,7 @@ public final class SceneManager {
         recentRooms = java.util.List.copyOf(rooms); recentRoomsAt = System.nanoTime();
     }
     private final ReadOnlyBooleanWrapper logoutPending = new ReadOnlyBooleanWrapper();
+    private client.UI.dialogs.AccountPasswordResetDialog passwordRecovery;
     private AuthUser authenticatedUser;
     private String sessionToken;
     private java.time.Instant sessionExpiresAt;
@@ -327,21 +328,23 @@ public final class SceneManager {
         return "Không thể kết nối máy chủ. Kiểm tra kết nối và khởi động server rồi thử lại.";
     }
     public void logout() {
-        logout(false);
+        performLogout();
     }
-    /** Recovery entered from settings first follows the normal confirmed server logout flow. */
+    /** Settings recovery proves the saved email by OTP and keeps the current server session. */
     public void forgotPassword() {
         if (closing || logoutPending.get()) return;
         if (sessionToken == null) { auth(); openPasswordReset(); return; }
-        logout(true);
+        if (passwordRecovery != null && passwordRecovery.isShowing()) return;
+        passwordRecovery = new client.UI.dialogs.AccountPasswordResetDialog(this);
+        passwordRecovery.show();
     }
     private void openPasswordReset() {
         if (!closing && stage.getScene() != null && stage.getScene().getRoot() instanceof AuthScreen screen)
             screen.showPasswordReset();
     }
-    private void logout(boolean resetAfterLogout) {
+    private void performLogout() {
         if (closing || logoutPending.get()) return;
-        if (sessionToken == null) { clearSession(); auth(); if (resetAfterLogout) openPasswordReset(); return; }
+        if (sessionToken == null) { clearSession(); auth(); return; }
         boolean videoWasOpen = hasVideoRoom();
         closeSfuSession();
         logoutPending.set(true); stage.getScene().getRoot().setDisable(true);
@@ -361,8 +364,8 @@ public final class SceneManager {
         }, response -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
             if (leftRoom.get()) { roomJoined = false; pendingRoomId = -1; }
-            if (sessionExpired(response)) { if (resetAfterLogout) openPasswordReset(); return; }
-            if (response.success()) { clearSession(); auth(); if (resetAfterLogout) openPasswordReset(); }
+            if (sessionExpired(response)) return;
+            if (response.success()) { clearSession(); auth(); }
             else { restoreAfterLogoutFailure(leftRoom.get()); logoutError(response.message()); }
         }, error -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
@@ -644,5 +647,8 @@ public final class SceneManager {
         FadeTransition fade = new FadeTransition(Duration.millis(200), root); fade.setToValue(1);
         transition = new ParallelTransition(fade); transition.play();
     }
-    public void dispose() { cleanup.run(); cleanup = () -> { }; if (transition != null) transition.stop(); }
+    public void dispose() {
+        if (passwordRecovery != null) { passwordRecovery.close(); passwordRecovery = null; }
+        cleanup.run(); cleanup = () -> { }; if (transition != null) transition.stop();
+    }
 }

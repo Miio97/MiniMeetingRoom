@@ -59,7 +59,7 @@ class OtpAccountSettingsUiTest {
     @TempDir static Path temporary;
     private static RoomTestFixture.Tls tls;
     private final Map<String, String> codes = new ConcurrentHashMap<>();
-    private final AtomicBoolean failNextLogout = new AtomicBoolean();
+    private final AtomicBoolean failNextResetMail = new AtomicBoolean();
     private final AtomicInteger logoutAttempts = new AtomicInteger();
     private String database;
     private AuthServer server;
@@ -97,14 +97,16 @@ class OtpAccountSettingsUiTest {
         try (Connection connection = connection()) { RunScript.execute(connection, new StringReader(migration)); }
         PasswordHasher passwords = new PasswordHasher(); Clock clock = Clock.systemUTC();
         EmailOtpService otp = new EmailOtpService(this::connection, passwords, clock,
-                (email, purpose, code) -> codes.put(email + ":" + purpose, code), SessionRevocationListener.NONE);
+                (email, purpose, code) -> {
+                    if ("RESET".equals(purpose) && failNextResetMail.getAndSet(false)) throw new server.auth.OtpMailSender.MailDeliveryException();
+                    codes.put(email + ":" + purpose, code);
+                }, SessionRevocationListener.NONE);
         AuthService accounts = new AuthService(this::connection, passwords, clock, Duration.ofHours(24),
                 SessionRevocationListener.NONE, otp);
         server = new AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0), request -> {
             if ("LIST_ROOMS".equals(request.action())) return AuthResponse.roomsOk("Đã tải danh sách phòng.", java.util.List.of());
             if ("LOGOUT".equals(request.action())) {
                 logoutAttempts.incrementAndGet();
-                if (failNextLogout.getAndSet(false)) return AuthResponse.error("TEST_RETRY", "Chưa thể thu hồi phiên, hãy thử lại.");
             }
             return accounts.handle(request);
         });
@@ -172,60 +174,163 @@ class OtpAccountSettingsUiTest {
             assertFalse(button("account-forgot-password").isDisabled()); button("account-forgot-password").fire();
             return null;
         });
-        awaitFx(() -> root() instanceof AuthScreen && root().lookup("#auth-email") != null);
+        awaitFx(() -> recoveryWindow() != null);
         fx(() -> {
-            assertNull(manager.sessionToken()); assertFalse(manager.emailVerified());
-            assertNull(root().lookup("#auth-password"));
+            assertTrue(root() instanceof SettingsScreen); assertEquals(originalToken, manager.sessionToken());
+            assertFalse(manager.logoutPendingProperty().get()); assertFalse(root().isDisabled());
             assertNull(codes.get(EMAIL + ":RESET"), "Opening recovery must not send an email");
-            field("auth-email").setText(EMAIL); button("auth-submit").fire(); return null;
+            recoveryButton("account-reset-send").fire(); return null;
         });
-        assertEquals("SESSION_EXPIRED", client.updateProfile(originalToken, "VerifiedMember", "Rejected", EMAIL).code());
-        awaitFx(() -> root().lookup("#auth-new-password") != null);
+        awaitFx(() -> codes.get(EMAIL + ":RESET") != null && recoveryStatus().startsWith("Đã gửi mã OTP"));
         fx(() -> {
-            field("auth-otp").setText(codes.get(EMAIL + ":RESET")); field("auth-new-password").setText("Recovered-password-789!");
-            field("auth-confirm-password").setText("Recovered-password-789!"); button("auth-submit").fire(); return null;
+            recoveryField("account-reset-code").setText(codes.get(EMAIL + ":RESET"));
+            recoveryField("account-reset-password").setText("Recovered-password-789!");
+            recoveryField("account-reset-confirm").setText("Mismatch-password-789!");
+            recoveryButton("account-reset-submit").fire(); assertEquals("Mật khẩu xác nhận chưa khớp.", recoveryStatus());
+            recoveryField("account-reset-confirm").setText("Recovered-password-789!");
+            recoveryButton("account-reset-submit").fire(); return null;
         });
-        awaitFx(() -> root().lookup("#auth-password") != null && hasLabel("Đổi mật khẩu thành công."));
+        awaitFx(() -> recoveryStatus().startsWith("Đặt lại mật khẩu thành công."));
+        snapshotDialog(fx(this::recoveryWindow), "account-password-recovery.png");
+        fx(() -> {
+            assertTrue(root() instanceof SettingsScreen); assertEquals(originalToken, manager.sessionToken()); assertTrue(manager.emailVerified());
+            for (String id : java.util.List.of("account-reset-code", "account-reset-password", "account-reset-confirm"))
+                assertTrue(recoveryField(id).getText().isEmpty());
+            assertTrue(recoveryButton("account-reset-submit").isDisabled()); closeDialog(recoveryWindow());
+            assertFalse(button("account-save").isDisabled()); return null;
+        });
+        assertEquals(0, logoutAttempts.get());
+        assertTrue(client.updateProfile(originalToken, "VerifiedMember", "Tên mới đã xác thực", EMAIL).success());
         assertEquals("SESSION_EXPIRED", client.updateProfile(beforeReset.token(), "VerifiedMember", "Rejected", EMAIL).code());
         assertEquals("INVALID_CREDENTIALS", client.login("VerifiedMember", "Changed-password-456!").code());
         AuthResponse recovered = client.login("VerifiedMember", "Recovered-password-789!");
         assertTrue(recovered.success()); assertTrue(recovered.user().emailVerified());
     }
 
-    @Test void failedSettingsLogoutPreservesTheSessionAndRebuildsAWorkingRecoveryButtonForRetry() throws Exception {
+    @Test void failedRecoveryDeliveryDoesNotLogOutAndTheDialogCanCloseAndReopen() throws Exception {
         AuthResponse registration = client.register("RetryMember", "Thành viên thử lại", EMAIL, PASSWORD);
         assertTrue(registration.success()); assertEquals("OTP_REQUIRED", registration.code());
         assertTrue(client.verifyRegistration(EMAIL, codes.get(EMAIL + ":REGISTER"), registration.registrationChallenge()).success());
         AuthResponse login = client.login("RetryMember", PASSWORD); assertTrue(login.success());
         Parent previousSettings = fx(() -> {
             manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
-            Parent previous = root(); failNextLogout.set(true); button("account-forgot-password").fire();
-            assertTrue(manager.logoutPendingProperty().get()); assertTrue(root().isDisabled()); return previous;
+            Parent previous = root(); failNextResetMail.set(true); button("account-forgot-password").fire();
+            assertFalse(manager.logoutPendingProperty().get()); assertFalse(root().isDisabled()); return previous;
         });
-        awaitFx(() -> root() instanceof SettingsScreen && root() != previousSettings
-                && !manager.logoutPendingProperty().get() && logoutErrorWindow() != null);
+        awaitFx(() -> recoveryWindow() != null);
+        fx(() -> { recoveryButton("account-reset-send").fire(); return null; });
+        awaitFx(() -> recoveryStatus().startsWith("Chưa gửi được email OTP"));
         fx(() -> {
             assertEquals(login.token(), manager.sessionToken()); assertTrue(manager.emailVerified());
+            assertSame(previousSettings, root());
             assertFalse(root().isDisabled()); assertFalse(button("account-forgot-password").isDisabled());
-            Stage error = logoutErrorWindow(); assertNotNull(error);
-            DialogPane pane = nodes(error.getScene().getRoot()).filter(DialogPane.class::isInstance)
-                    .map(DialogPane.class::cast).findFirst().orElseThrow();
-            assertTrue(pane.getContentText().contains("hãy thử lại"));
-            ((Button) pane.lookupButton(ButtonType.OK)).fire(); return null;
+            closeDialog(recoveryWindow()); return null;
         });
-        assertEquals(1, logoutAttempts.get());
+        assertEquals(0, logoutAttempts.get());
         assertTrue(client.updateProfile(login.token(), "RetryMember", "Thành viên thử lại", EMAIL).success(),
-                "The failed logout must preserve the server session");
+                "A delivery failure must preserve the server session");
         assertNull(codes.get(EMAIL + ":RESET"));
         fx(() -> { button("account-forgot-password").fire(); return null; });
-        awaitFx(() -> root() instanceof AuthScreen && root().lookup("#auth-email") != null);
+        awaitFx(() -> recoveryWindow() != null);
         fx(() -> {
-            assertNull(manager.sessionToken()); assertFalse(manager.emailVerified()); assertNull(root().lookup("#auth-password"));
-            assertFalse(button("auth-submit").isDisabled()); assertNull(logoutErrorWindow()); return null;
+            assertEquals(login.token(), manager.sessionToken()); assertTrue(manager.emailVerified());
+            assertSame(previousSettings, root()); assertTrue(recoveryField("account-reset-code").getText().isEmpty());
+            assertTrue(recoveryField("account-reset-password").getText().isEmpty()); closeDialog(recoveryWindow()); return null;
         });
-        assertEquals(2, logoutAttempts.get());
-        assertEquals("SESSION_EXPIRED", client.updateProfile(login.token(), "RetryMember", "Rejected", EMAIL).code());
-        assertNull(codes.get(EMAIL + ":RESET"), "Recovery must wait for an explicit email submission after retry");
+        assertEquals(0, logoutAttempts.get());
+        assertNull(codes.get(EMAIL + ":RESET"), "Reopening recovery must not automatically send email");
+    }
+
+    @Test void existingAccountSavesAndVerifiesItsEmailFromSettingsBeforeChangingPassword() throws Exception {
+        var legacy = new AuthService(this::connection, new PasswordHasher(), Clock.systemUTC(), Duration.ofHours(24));
+        assertTrue(legacy.handle(new common.auth.AuthRequest("REGISTER", "ExistingMember", PASSWORD, "Thành viên cũ", null, null)).success());
+        AuthResponse login = client.login("ExistingMember", PASSWORD); assertTrue(login.success());
+        fx(() -> {
+            manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
+            assertFalse(hasLabel("Email (không bắt buộc)")); assertTrue(hasLabel("Email"));
+            assertTrue(button("account-change-password").isDisabled());
+            assertFalse(button("account-verify-email").isDisabled());
+            button("account-forgot-password").fire(); assertTrue(hasLabel("Vui lòng nhập và lưu email"));
+            assertNull(recoveryWindow()); assertEquals(login.token(), manager.sessionToken());
+            button("account-verify-email").fire(); assertTrue(hasLabel("Vui lòng nhập và lưu email"));
+            field("account-email").setText(EMAIL); button("account-verify-email").fire();
+            assertTrue(hasLabel("Vui lòng lưu thay đổi email"));
+            button("account-forgot-password").fire(); assertTrue(hasLabel("Vui lòng lưu thay đổi email")); assertNull(recoveryWindow());
+            button("account-save").fire(); return null;
+        });
+        awaitFx(() -> hasLabel("Đã lưu thông tin tài khoản.") && !button("account-save").isDisabled());
+        fx(() -> { button("account-verify-email").fire(); return null; });
+        awaitFx(() -> verificationWindow() != null);
+        fx(() -> {
+            assertNull(codes.get(EMAIL + ":VERIFY"), "Opening verification must wait for explicit delivery");
+            verificationButton("email-verification-submit").fire();
+            assertTrue(verificationStatus().contains("6 chữ số"));
+            verificationButton("email-verification-send").fire(); return null;
+        });
+        awaitFx(() -> codes.get(EMAIL + ":VERIFY") != null && verificationStatus().startsWith("Đã gửi mã OTP"));
+        String otp = codes.get(EMAIL + ":VERIFY");
+        fx(() -> {
+            assertTrue(verificationButton("email-verification-send").isDisabled());
+            assertTrue(verificationButton("email-verification-send").getText().contains("s)"));
+            verificationField().setText("000000".equals(otp) ? "000001" : "000000");
+            verificationButton("email-verification-submit").fire(); return null;
+        });
+        awaitFx(() -> verificationStatus().startsWith("Mã OTP không đúng"));
+        fx(() -> { verificationField().setText(otp); verificationButton("email-verification-submit").fire(); return null; });
+        awaitFx(() -> manager.emailVerified() && verificationStatus().equals("Email đã được xác thực."));
+        snapshotVerificationDialog();
+        fx(() -> {
+            assertEquals(login.token(), manager.sessionToken()); assertTrue(verificationField().getText().isEmpty());
+            assertFalse(button("account-change-password").isDisabled()); assertTrue(button("account-verify-email").isDisabled());
+            assertTrue(hasLabel("Email đã xác thực."));
+            var dialog = verificationWindow();
+            DialogPane pane = (DialogPane) dialog.getScene().getRoot();
+            ButtonType close = pane.getButtonTypes().stream().filter(type -> type.getButtonData().isCancelButton()).findFirst().orElseThrow();
+            ((Button) pane.lookupButton(close)).fire();
+            button("account-change-password").fire(); return null;
+        });
+        awaitFx(() -> passwordWindow() != null);
+        fx(() -> {
+            Parent pane = passwordWindow().getScene().getRoot();
+            ((TextField) pane.lookup("#password-current")).setText(PASSWORD);
+            ((TextField) pane.lookup("#password-new")).setText("Changed-after-verify-123!");
+            ((TextField) pane.lookup("#password-confirm")).setText("Changed-after-verify-123!");
+            ((Button) pane.lookup("#password-submit")).fire(); return null;
+        });
+        awaitFx(() -> ((Label) passwordWindow().getScene().getRoot().lookup("#password-status")).getText().startsWith("Đã đổi mật khẩu."));
+        assertEquals("INVALID_CREDENTIALS", client.login("ExistingMember", PASSWORD).code());
+        assertTrue(client.login("ExistingMember", "Changed-after-verify-123!").user().emailVerified());
+    }
+
+    private Stage verificationWindow() { return ownedWindow("Xác thực email"); }
+    private Stage passwordWindow() { return ownedWindow("Đổi mật khẩu"); }
+    private Stage recoveryWindow() { return ownedWindow("Quên mật khẩu"); }
+    private Stage ownedWindow(String title) {
+        return Window.getWindows().stream().filter(Stage.class::isInstance).map(Stage.class::cast)
+                .filter(window -> window.getOwner() == stage && title.equals(window.getTitle())).findFirst().orElse(null);
+    }
+    private Button verificationButton(String id) { return (Button) verificationWindow().getScene().getRoot().lookup("#" + id); }
+    private TextField verificationField() { return (TextField) verificationWindow().getScene().getRoot().lookup("#email-verification-code"); }
+    private String verificationStatus() { return ((Label) verificationWindow().getScene().getRoot().lookup("#email-verification-status")).getText(); }
+    private Button recoveryButton(String id) { return (Button) recoveryWindow().getScene().getRoot().lookup("#" + id); }
+    private TextField recoveryField(String id) { return (TextField) recoveryWindow().getScene().getRoot().lookup("#" + id); }
+    private String recoveryStatus() { return ((Label) recoveryWindow().getScene().getRoot().lookup("#account-reset-status")).getText(); }
+    private void closeDialog(Stage window) {
+        DialogPane pane = (DialogPane) window.getScene().getRoot();
+        ButtonType close = pane.getButtonTypes().stream().filter(type -> type.getButtonData().isCancelButton()).findFirst().orElseThrow();
+        ((Button) pane.lookupButton(close)).fire();
+    }
+
+    private void snapshotVerificationDialog() throws Exception {
+        snapshotDialog(fx(this::verificationWindow), "account-email-verification.png");
+    }
+    private void snapshotDialog(Stage dialog, String filename) throws Exception {
+        var snapshot = fx(() -> dialog.getScene().getRoot().snapshot(null, null));
+        var png = new java.awt.image.BufferedImage((int) snapshot.getWidth(), (int) snapshot.getHeight(), java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < png.getHeight(); y++) for (int x = 0; x < png.getWidth(); x++)
+            png.setRGB(x, y, snapshot.getPixelReader().getArgb(x, y));
+        Path output = Path.of("target/qa", filename); Files.createDirectories(output.getParent());
+        javax.imageio.ImageIO.write(png, "png", output.toFile());
     }
 
     private Parent root() { return stage.getScene().getRoot(); }

@@ -43,9 +43,12 @@ public final class JakartaOtpMailSender implements OtpMailSender {
             MimeMessage message = new MimeMessage(session);
             message.setFrom(new InternetAddress(from, true));
             message.setRecipient(Message.RecipientType.TO, new InternetAddress(email, true));
-            boolean registration = "REGISTER".equals(purpose);
-            message.setSubject(registration ? "Mini Meeting Room - Xác thực đăng ký"
-                    : "Mini Meeting Room - Đặt lại mật khẩu", StandardCharsets.UTF_8.name());
+            String subject = switch (purpose) {
+                case "REGISTER" -> "Mini Meeting Room - Xác thực đăng ký";
+                case "VERIFY" -> "Mini Meeting Room - Xác thực email tài khoản";
+                default -> "Mini Meeting Room - Đặt lại mật khẩu";
+            };
+            message.setSubject(subject, StandardCharsets.UTF_8.name());
             message.setText("Mã xác thực của bạn: " + code + "\n\nMã có hiệu lực trong 5 phút và chỉ dùng một lần."
                     + " Không chia sẻ mã cho bất kỳ ai.\nNếu bạn không yêu cầu, hãy bỏ qua email này.",
                     StandardCharsets.UTF_8.name());
