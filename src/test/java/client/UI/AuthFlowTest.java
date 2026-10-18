@@ -317,8 +317,8 @@ class AuthFlowTest {
         fx(() -> {
             manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
             assertTrue(node("account-username", TextField.class).isEditable());
-            assertTrue(node("account-forgot-password", Button.class).isDisabled());
-            assertTrue(node("account-verify-email", Button.class).isDisabled());
+            assertFalse(node("account-forgot-password", Button.class).isDisabled());
+            assertFalse(node("account-verify-email", Button.class).isDisabled());
             assertTrue(node("account-change-password", Button.class).isVisible());
             assertTrue(node("account-change-password", Button.class).isManaged());
             assertTrue(node("account-change-password", Button.class).isDisabled());
@@ -326,7 +326,8 @@ class AuthFlowTest {
             node("account-display-name", TextField.class).setText("Tên mới 日本語");
             node("account-email", TextField.class).setText("updated@example.com");
             node("account-save", Button.class).fire(); node("account-save", Button.class).fire();
-            assertTrue(node("account-save", Button.class).isDisabled()); return null;
+            assertTrue(node("account-save", Button.class).isDisabled());
+            assertTrue(node("account-forgot-password", Button.class).isDisabled()); return null;
         });
         awaitFx(() -> "NewLogin".equals(manager.username()) && !node("account-save", Button.class).isDisabled());
         fx(() -> {
@@ -410,7 +411,7 @@ class AuthFlowTest {
         } finally { fx(() -> { dialog.close(); return null; }); }
     }
 
-    @Test void expiredAccountSessionReturnsToLoginAndForgotPasswordRemainsInactive() throws Exception {
+    @Test void expiredAccountSessionReturnsToLoginAndForgotPasswordOpensTheOtpForm() throws Exception {
         AuthClient client = accountClient(); var login = accountLogin(client);
         fx(() -> { manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout(); return null; });
         assertTrue(client.logout(login.token()).success());
@@ -419,8 +420,16 @@ class AuthFlowTest {
         fx(() -> {
             assertNull(manager.sessionToken());
             root().applyCss(); root().layout();
-            assertTrue(node("login-forgot-password", Button.class).isDisabled());
-            node("login-forgot-password", Button.class).fire(); assertTrue(root() instanceof AuthScreen); return null;
+            Button forgot = node("auth-forgot-password", Button.class);
+            assertFalse(forgot.isDisabled());
+            long requestsBefore = actions.size();
+            forgot.fire();
+            assertTrue(root() instanceof AuthScreen);
+            assertNotNull(node("auth-email", TextField.class));
+            assertNotNull(button("Gửi mã OTP"));
+            assertNull(root().lookup("#auth-password"));
+            assertEquals(requestsBefore, actions.size(), "Opening recovery must wait for the user to submit an email");
+            return null;
         });
     }
 
@@ -430,14 +439,15 @@ class AuthFlowTest {
             manager.acceptSession(login); manager.settingsAccount(); root().applyCss(); root().layout();
             Button password = node("account-change-password", Button.class);
             Button otp = node("account-verify-email", Button.class);
-            assertTrue(otp.isVisible()); assertTrue(otp.isDisabled());
+            assertTrue(otp.isVisible()); assertFalse(otp.isDisabled());
             assertSame(node("account-email", TextField.class).getParent(), otp.getParent());
             assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertTrue(password.isDisabled());
-            otp.fire(); password.fire();
+            password.fire();
             assertFalse(manager.emailVerified()); assertFalse(actions.contains("CHANGE_PASSWORD"));
 
             var user = login.user();
             manager.updateAccount(new common.auth.AuthUser(user.id(), user.username(), user.displayName(), user.email(), true));
+            assertTrue(otp.isDisabled());
             assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertFalse(password.isDisabled());
             node("account-email", TextField.class).setText("new@example.com");
             assertTrue(password.isVisible()); assertTrue(password.isManaged()); assertTrue(password.isDisabled());

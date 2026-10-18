@@ -62,7 +62,7 @@ class MeetingPaginationTest {
     @Test void meetingScreenPaginatesTwentyParticipantsAcrossTwoPages() throws Exception {
         FxTestRuntime.call(() -> {
             Stage stage = new Stage();
-            SceneManager manager = new SceneManager(stage, new AuthClient(), new FileTransferClient());
+            SceneManager manager = new SceneManager(stage, offlineAuthClient(), new FileTransferClient());
             manager.acceptSession(AuthResponse.ok("token", new AuthUser(1, "host", "Host", "host@test.invalid"),
                     "hash", Instant.now().plusSeconds(3600).toString()));
 
@@ -75,42 +75,44 @@ class MeetingPaginationTest {
             manager.enterRoom(response, "1234");
 
             MeetingScreen screen = new MeetingScreen(manager);
-            Scene scene = new Scene(screen, 1280, 720);
-            stage.setScene(scene);
-            screen.resize(1280, 720);
-            screen.layout();
+            try {
+                Scene scene = new Scene(screen, 1280, 720);
+                stage.setScene(scene);
+                screen.resize(1280, 720);
+                screen.layout();
 
-            // Find pager label "Trang 1/2 · Người 1–12"
-            Label pagerLabel = findLabelMatching(screen, "Trang 1/2");
-            assertNotNull(pagerLabel, "Expected pager label on page 1");
-            assertTrue(pagerLabel.getText().contains("Người 1–12"), "Expected page 1 range: " + pagerLabel.getText());
+                // Find pager label "Trang 1/2 · Người 1–12"
+                Label pagerLabel = findLabelMatching(screen, "Trang 1/2");
+                assertNotNull(pagerLabel, "Expected pager label on page 1");
+                assertTrue(pagerLabel.getText().contains("Người 1–12"), "Expected page 1 range: " + pagerLabel.getText());
 
-            // Click "Sau →" button
-            Button nextButton = findButtonByText(screen, "Sau →");
-            assertNotNull(nextButton, "Expected Sau → button");
-            assertFalse(nextButton.isDisabled(), "Next button should be enabled on page 1");
+                // Click "Sau →" button
+                Button nextButton = findButtonByText(screen, "Sau →");
+                assertNotNull(nextButton, "Expected Sau → button");
+                assertFalse(nextButton.isDisabled(), "Next button should be enabled on page 1");
 
-            nextButton.fire();
-            screen.layout();
+                nextButton.fire();
+                screen.layout();
 
-            // Pager label should now show "Trang 2/2 · Người 13–20"
-            Label page2Label = findLabelMatching(screen, "Trang 2/2");
-            assertNotNull(page2Label, "Expected pager label on page 2");
-            assertTrue(page2Label.getText().contains("Người 13–20"), "Expected page 2 range: " + page2Label.getText());
+                // Pager label should now show "Trang 2/2 · Người 13–20"
+                Label page2Label = findLabelMatching(screen, "Trang 2/2");
+                assertNotNull(page2Label, "Expected pager label on page 2");
+                assertTrue(page2Label.getText().contains("Người 13–20"), "Expected page 2 range: " + page2Label.getText());
 
-            // Click "← Trước" button
-            Button prevButton = findButtonByText(screen, "← Trước");
-            assertNotNull(prevButton, "Expected ← Trước button");
-            assertFalse(prevButton.isDisabled(), "Previous button should be enabled on page 2");
+                // Click "← Trước" button
+                Button prevButton = findButtonByText(screen, "← Trước");
+                assertNotNull(prevButton, "Expected ← Trước button");
+                assertFalse(prevButton.isDisabled(), "Previous button should be enabled on page 2");
 
-            prevButton.fire();
-            screen.layout();
+                prevButton.fire();
+                screen.layout();
 
-            // Returned to page 1
-            Label returnedLabel = findLabelMatching(screen, "Trang 1/2");
-            assertNotNull(returnedLabel, "Expected returned pager label on page 1");
-
-            stage.close();
+                // Returned to page 1
+                Label returnedLabel = findLabelMatching(screen, "Trang 1/2");
+                assertNotNull(returnedLabel, "Expected returned pager label on page 1");
+            } finally {
+                screen.dispose(); manager.shutdown(); stage.close();
+            }
             return null;
         });
     }
@@ -118,18 +120,26 @@ class MeetingPaginationTest {
     @Test void sceneManagerMaxRoomCapacityFollowsServerAndRespectsHardCap() throws Exception {
         FxTestRuntime.call(() -> {
             Stage stage = new Stage();
-            SceneManager manager = new SceneManager(stage, new AuthClient(), new FileTransferClient());
-            // Without session
-            assertEquals(250, manager.maxRoomCapacity());
+            SceneManager manager = new SceneManager(stage, offlineAuthClient(), new FileTransferClient());
+            try {
+                // Without session
+                assertEquals(250, manager.maxRoomCapacity());
 
-            // With SFU session
-            manager.acceptSession(AuthResponse.ok("tok", new AuthUser(1, "u", "U", "u@invalid"), "h", Instant.now().plusSeconds(3600).toString()));
-            MeetingSession session = manager.sfuSession();
-            assertNotNull(session);
-            assertEquals(20, manager.maxRoomCapacity());
-            stage.close();
+                // With SFU session
+                manager.acceptSession(AuthResponse.ok("tok", new AuthUser(1, "u", "U", "u@invalid"), "h", Instant.now().plusSeconds(3600).toString()));
+                MeetingSession session = manager.sfuSession();
+                assertNotNull(session);
+                assertEquals(20, manager.maxRoomCapacity());
+            } finally {
+                manager.shutdown(); stage.close();
+            }
             return null;
         });
+    }
+
+    private static AuthClient offlineAuthClient() throws Exception {
+        // Layout fixtures must not call the configured development auth server.
+        return new AuthClient("127.0.0.1", 1, javax.net.ssl.SSLContext.getDefault(), 250);
     }
 
     private static Label findLabelMatching(Node root, String substring) {
@@ -157,7 +167,7 @@ class MeetingPaginationTest {
     @Test void meetingScreenContainsNetworkSignalWidgetInTopBar() throws Exception {
         FxTestRuntime.call(() -> {
             Stage stage = new Stage();
-            SceneManager manager = new SceneManager(stage, new AuthClient(), new FileTransferClient());
+            SceneManager manager = new SceneManager(stage, offlineAuthClient(), new FileTransferClient());
             manager.acceptSession(AuthResponse.ok("token", new AuthUser(1, "host", "Host", "host@test.invalid"),
                     "hash", Instant.now().plusSeconds(3600).toString()));
             RoomView view = new RoomView(101L, "Phòng test signal", "MMR-SIGNAL01", 10, false, false, false);
@@ -165,26 +175,27 @@ class MeetingPaginationTest {
             manager.enterRoom(response, "1234");
 
             MeetingScreen screen = new MeetingScreen(manager);
-            Scene scene = new Scene(screen, 1280, 720);
-            stage.setScene(scene);
-            screen.layout();
+            try {
+                Scene scene = new Scene(screen, 1280, 720);
+                stage.setScene(scene);
+                screen.layout();
 
-            assertNull(screen.lookup("#room-management"), "Room management button should be removed");
+                assertNull(screen.lookup("#room-management"), "Room management button should be removed");
 
-            Node signalNode = screen.lookup("#network-signal");
-            assertNotNull(signalNode, "Expected #network-signal in MeetingScreen");
-            assertTrue(signalNode instanceof client.UI.components.NetworkSignalWidget, "Expected NetworkSignalWidget");
-            client.UI.components.NetworkSignalWidget widget = (client.UI.components.NetworkSignalWidget) signalNode;
-            assertEquals(widget, screen.networkSignal());
-            assertEquals("Chưa có dữ liệu", widget.qualityBadgeLabel().getText());
+                Node signalNode = screen.lookup("#network-signal");
+                assertNotNull(signalNode, "Expected #network-signal in MeetingScreen");
+                assertTrue(signalNode instanceof client.UI.components.NetworkSignalWidget, "Expected NetworkSignalWidget");
+                client.UI.components.NetworkSignalWidget widget = (client.UI.components.NetworkSignalWidget) signalNode;
+                assertEquals(widget, screen.networkSignal());
+                assertEquals("Chưa có dữ liệu", widget.qualityBadgeLabel().getText());
 
-            widget.update(new client.media.NetworkStatsCalculator.CalculatedSample(45.0, 10.0, 0.2, 2000, 30, 1280, 720));
-            assertEquals("TOT", widget.currentQuality());
-            assertEquals("Tốt", widget.qualityBadgeLabel().getText());
-            assertEquals("45.0 ms", widget.rttValueLabel().getText());
-
-            screen.dispose();
-            stage.close();
+                widget.update(new client.media.NetworkStatsCalculator.CalculatedSample(45.0, 10.0, 0.2, 2000, 30, 1280, 720));
+                assertEquals("TOT", widget.currentQuality());
+                assertEquals("Tốt", widget.qualityBadgeLabel().getText());
+                assertEquals("45.0 ms", widget.rttValueLabel().getText());
+            } finally {
+                screen.dispose(); manager.shutdown(); stage.close();
+            }
             return null;
         });
     }
