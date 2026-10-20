@@ -43,7 +43,6 @@ class MeetingSignalingTest {
     private final List<SignalingClient> clients = new ArrayList<>();
     private final java.util.concurrent.atomic.AtomicInteger snapshotRequests = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicInteger sessionDbQueries = new java.util.concurrent.atomic.AtomicInteger();
-    private server.meeting.NetworkStatsService statsService;
 
     @BeforeAll static void certificates() throws Exception { tls = RoomTestFixture.certificates(temporary); }
 
@@ -65,24 +64,6 @@ class MeetingSignalingTest {
                     Ngay_Xoa TIMESTAMP NULL
                 )
                 """);
-        fixture.execute("""
-                CREATE TABLE IF NOT EXISTS Thong_Ke_Ket_Noi (
-                    Ma_Thong_Ke BIGINT AUTO_INCREMENT PRIMARY KEY,
-                    Ma_Phong BIGINT NOT NULL REFERENCES Phong_Hop(Ma_Phong) ON DELETE CASCADE,
-                    Ma_Nguoi_Dung BIGINT NOT NULL REFERENCES Nguoi_Dung(Ma_Nguoi_Dung),
-                    Do_Tre_Ms DECIMAL(8,2),
-                    Do_Rung_Ms DECIMAL(8,2),
-                    Ty_Le_Mat_Goi_Tin DECIMAL(5,2),
-                    Bitrate_Kbps INT,
-                    FPS SMALLINT,
-                    Chieu_Rong SMALLINT,
-                    Chieu_Cao SMALLINT,
-                    Trang_Thai_Ket_Noi VARCHAR(20),
-                    Thoi_Diem_Lay_Mau TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """);
-        statsService = new server.meeting.NetworkStatsService(fixture::connection, Clock.systemUTC());
-        statsService.start();
         AtomicReference<SignalingServer> current = new AtomicReference<>();
         rooms = new RoomService(new RoomRepository(fixture::connection), Clock.systemUTC(), "test-instance",
                 new byte[32], 20, event -> {
@@ -97,7 +78,7 @@ class MeetingSignalingTest {
         };
         server = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
                 new SessionValidator(countingProvider, Clock.systemUTC()), new SignalingServer.Handler() {
-                    private final MeetingHandler delegate = new MeetingHandler(rooms, null, statsService);
+                    private final MeetingHandler delegate = new MeetingHandler(rooms);
                     public SignalMessage handle(SignalingServer.Connection connection, SignalMessage request) throws Exception {
                         if (request.type().equals("GET_ROOM")) snapshotRequests.incrementAndGet();
                         return delegate.handle(connection, request);
@@ -112,7 +93,6 @@ class MeetingSignalingTest {
     @AfterEach void close() throws Exception {
         clients.forEach(SignalingClient::close);
         if (server != null) server.close();
-        if (statsService != null) statsService.close();
         if (rooms != null) rooms.close();
         if (fixture != null) fixture.close();
     }
@@ -541,97 +521,17 @@ class MeetingSignalingTest {
         assertTrue(guestEvents.stream().noneMatch(e -> "CHAT_MESSAGE".equals(e.type())));
     }
 
-    @Test void networkStatsValidationAndRateLimit() throws Exception {
-        SignalingClient host = login("hostStatsVal", new CopyOnWriteArrayList<>());
-        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
-        join(host, room, "", UUID.randomUUID().toString());
-
-        // Test out-of-range bounds
-        JsonObject badRtt = new JsonObject(); badRtt.addProperty("rtt", 60001.0);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badRtt));
-
-        JsonObject badNegRtt = new JsonObject(); badNegRtt.addProperty("rtt", -1.0);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badNegRtt));
-
-        JsonObject badJitter = new JsonObject(); badJitter.addProperty("jitter", 10001.0);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badJitter));
-
-        JsonObject badLoss = new JsonObject(); badLoss.addProperty("loss", 101.0);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badLoss));
-
-        JsonObject badBitrate = new JsonObject(); badBitrate.addProperty("bitrate", 100001);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badBitrate));
-
-        JsonObject badFps = new JsonObject(); badFps.addProperty("fps", 121);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badFps));
-
-        JsonObject badWidth = new JsonObject(); badWidth.addProperty("width", 7681);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badWidth));
-
-        JsonObject badHeight = new JsonObject(); badHeight.addProperty("height", 7681);
-        code("INVALID_REQUEST", () -> request(host, "NETWORK_STATS", room.roomId(), badHeight));
-
-        // Valid sample
-        JsonObject valid = new JsonObject();
-        valid.addProperty("rtt", 45.0);
-        valid.addProperty("jitter", 12.0);
-        valid.addProperty("loss", 0.5);
-        valid.addProperty("bitrate", 600);
-        valid.addProperty("fps", 30);
-        valid.addProperty("width", 640);
-        valid.addProperty("height", 480);
-        SignalMessage res1 = request(host, "NETWORK_STATS", room.roomId(), valid);
-        assertEquals("NETWORK_STATS_ACK", res1.type());
-        assertTrue(res1.body().get("ok").getAsBoolean());
-        assertFalse(res1.body().has("dropped") && res1.body().get("dropped").getAsBoolean());
-
-        // Rapid sample sent immediately (< 1s) must be dropped
-        SignalMessage res2 = request(host, "NETWORK_STATS", room.roomId(), valid);
-        assertEquals("NETWORK_STATS_ACK", res2.type());
-        assertTrue(res2.body().get("ok").getAsBoolean());
-        assertTrue(res2.body().has("dropped") && res2.body().get("dropped").getAsBoolean(),
-                "Burst sample within 1s must be dropped");
-    }
-
-    @Test void networkStatsOverTlsWritesCorrectUserAndRoomEvenIfClientSpoofsRoomIdAndNoSessionDbQueries() throws Exception {
-        SignalingClient host = login("hostStatsTls", new CopyOnWriteArrayList<>());
-        RoomSnapshot room = create(host, 5, UUID.randomUUID().toString());
-        join(host, room, "", UUID.randomUUID().toString());
-
-        long storedRoomId = rooms.storedRoomId(room.roomId());
-
-        // Reset session query counter
-        sessionDbQueries.set(0);
-
-        // Host sends NETWORK_STATS with spoofed room ID in request
-        JsonObject sample = new JsonObject();
-        sample.addProperty("rtt", 50.0);
-        sample.addProperty("jitter", 10.0);
-        sample.addProperty("loss", 0.2);
-        sample.addProperty("bitrate", 500);
-        sample.addProperty("fps", 25);
-        sample.addProperty("width", 640);
-        sample.addProperty("height", 480);
-
-        SignalMessage res = request(host, "NETWORK_STATS", "spoofed_room_id", sample);
-        assertEquals("NETWORK_STATS_ACK", res.type());
-        assertTrue(res.body().get("ok").getAsBoolean());
-
-        // Verify NO database query was made for session validation during NETWORK_STATS
-        assertEquals(0, sessionDbQueries.get(), "NETWORK_STATS must rely on validatedAt without DB session query");
-
-        // Flush batch to H2 database
-        int inserted = statsService.flushBatch();
-        assertEquals(1, inserted);
-
-        // Verify database row has genuine room and genuine user
-        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi WHERE Ma_Phong = " + storedRoomId));
-        assertEquals(0, fixture.count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi WHERE Ma_Phong != " + storedRoomId));
-        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thong_Ke_Ket_Noi WHERE Ma_Phong = " + storedRoomId + " AND Trang_Thai_Ket_Noi = 'TOT'"));
-
-        // In contrast, GET_ROOM MUST issue a session validation DB query
-        request(host, "GET_ROOM", room.roomId(), new JsonObject());
-        assertTrue(sessionDbQueries.get() > 0, "Non-stats request must validate session against DB");
+    @Test void retiredTelemetryIsAckedWithoutAStatsTableOrExtraSessionQueries() throws Exception {
+        SignalingClient host=login("hostRetiredStats",new CopyOnWriteArrayList<>());
+        var room=create(host,3,UUID.randomUUID().toString());join(host,room,"",UUID.randomUUID().toString());
+        sessionDbQueries.set(0);var sample=new JsonObject();sample.addProperty("rtt",45);
+        for(int i=0;i<5;i++) {
+            var reply=request(host,"NETWORK_STATS","spoofed_room",sample);
+            assertEquals("NETWORK_STATS_ACK",reply.type());assertTrue(reply.body().get("retired").getAsBoolean());assertTrue(reply.body().get("dropped").getAsBoolean());
+        }
+        assertEquals(0,sessionDbQueries.get(),"Retired telemetry must not hit the database");
+        assertEquals(1,fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        request(host,"GET_ROOM",room.roomId(),new JsonObject());assertTrue(sessionDbQueries.get()>0);
     }
 
     @Test void twentyParticipantsSignalingBenchmarkAndStateSync() throws Exception {

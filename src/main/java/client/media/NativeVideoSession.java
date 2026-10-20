@@ -23,11 +23,11 @@ public final class NativeVideoSession implements AutoCloseable {
         factory = created; anchorSource = source; anchor = track;
     }
     public Peer publisher(VideoInput input, VideoFrameMailbox preview) {
-        return publisher(input,preview,700000,15);
+        return publisher(input,preview,600000,Math.min(30,input.fps()));
     }
     public Peer publisher(VideoInput input, VideoFrameMailbox preview, int bitrate, int fps) {
         VideoTrack track = factory.createVideoTrack("camera-video", input.source());
-        try { return new Peer(track, true, preview, bitrate, fps); } catch (RuntimeException failure) { track.dispose(); throw failure; }
+        try { Peer peer=new Peer(track, true, preview, bitrate, fps);peer.sourceWidth=input.width();peer.sourceHeight=input.height();peer.sourceFps=input.fps();return peer; } catch (RuntimeException failure) { track.dispose(); throw failure; }
     }
     public Peer subscriber(VideoFrameMailbox output) { return new Peer(anchor, false, output, 700000, 15); }
     /** Local capture track without a PeerConnection; pre-join never publishes camera. */
@@ -61,6 +61,8 @@ public final class NativeVideoSession implements AutoCloseable {
         private final Object trackLifecycle = new Object();
         private final Object nativeLifecycle = new Object();
         private RTCRtpSender sender;
+        private int sourceWidth,sourceHeight,sourceFps=30;
+        private final SingleFlightStats statsFlight=new SingleFlightStats();
         private volatile VideoTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
         private Peer(VideoTrack track, boolean publisher, VideoFrameMailbox sink, int bitrate, int fps) {
@@ -112,14 +114,18 @@ public final class NativeVideoSession implements AutoCloseable {
         }
         public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
         public void quality(AdaptiveVideoPolicy.Profile profile) {
+            quality(profile,NetworkSample.Limitation.UNKNOWN,NetworkStatsConfig.defaults());
+        }
+        public void quality(AdaptiveVideoPolicy.Profile profile,NetworkSample.Limitation reason,NetworkStatsConfig config) {
             synchronized (nativeLifecycle) {
                 if (closing.get() || sender == null) return;
                 RTCRtpSendParameters parameters = sender.getParameters();
                 if (parameters.encodings == null || parameters.encodings.isEmpty()) throw new IllegalStateException("VIDEO_ENCODINGS_UNAVAILABLE");
                 for (var encoding : parameters.encodings) {
                     encoding.active = profile != AdaptiveVideoPolicy.Profile.VOICE_PRIORITY;
-                    encoding.maxBitrate = profile.bitrate; encoding.maxFramerate = (double) profile.fps;
-                    encoding.scaleResolutionDownBy = profile.scale;
+                    encoding.maxBitrate = switch(profile) {case HD -> config.hdBitrate();case LOW -> config.lowBitrate();default -> config.savingBitrate();};
+                    encoding.maxFramerate = (double)Math.min(sourceFps,reason==NetworkSample.Limitation.CPU_LIMITED?15:profile.fps);
+                    encoding.scaleResolutionDownBy = Math.max(1,Math.max((double)sourceWidth/profile.width,(double)sourceHeight/profile.height));
                 }
                 sender.setParameters(parameters);
                 if (profile != AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) sender.generateKeyFrame();
@@ -135,24 +141,16 @@ public final class NativeVideoSession implements AutoCloseable {
                 if (!pause) sender.generateKeyFrame();
             }
         }
-        public RTCStatsReport stats(long timeoutMs) {
-            if (closing.get()) return null;
-            CompletableFuture<RTCStatsReport> result = new CompletableFuture<>();
-            pending.add(result);
-            try {
+        public CompletableFuture<RTCStatsReport> statsAsync() {
+            return statsFlight.request(callback -> {
                 synchronized (nativeLifecycle) {
-                    if (closing.get()) return null;
-                    connection.getStats(report -> {
-                        if (!closing.get()) result.complete(report);
-                        else result.complete(null);
-                    });
+                    if(closing.get()) {callback.accept(null);return;}
+                    connection.getStats(callback::accept);
                 }
-                return result.get(timeoutMs, TimeUnit.MILLISECONDS);
-            } catch (Exception failure) {
-                return null;
-            } finally {
-                pending.remove(result);
-            }
+            });
+        }
+        public RTCStatsReport stats(long timeoutMs) {
+            try {return statsAsync().get(timeoutMs,TimeUnit.MILLISECONDS);} catch(Exception failure) {return null;}
         }
         private void set(RTCSessionDescription value, boolean remoteDescription) throws Exception {
             CompletableFuture<Void> result = new CompletableFuture<>(); pending.add(result);
@@ -165,6 +163,7 @@ public final class NativeVideoSession implements AutoCloseable {
         }
         @Override public void close() {
             if (!closing.compareAndSet(false, true)) return;
+            statsFlight.close();
             pending.forEach(future -> future.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED")));
             gathered.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED"));
             synchronized (trackLifecycle) {

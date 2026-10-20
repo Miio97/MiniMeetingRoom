@@ -43,7 +43,7 @@ public class VideoCallIntegrationTest {
                         && receiver.audio().receivedSamples(participant) > 4800 && receiver.screen().frames(participant).receivedFrames() > 3);
                 var bad = new AdaptiveVideoPolicy.Evidence(800.0, 100.0, 15.0);
                 long seed = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
-                for (int second = 0; second <= 18; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, bad).get(5, TimeUnit.SECONDS);
+                for (int second = 0; second <= 18; second++) camera.networkSample(MediaStatsSamples.evidence(seed + TimeUnit.SECONDS.toNanos(second), bad, bad)).get(5, TimeUnit.SECONDS);
                 FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
                 transport.get().close();
                 FxTestRuntime.await(() -> host.stateProperty().get() == MeetingSession.State.RECONNECTING);
@@ -53,7 +53,7 @@ public class VideoCallIntegrationTest {
                 assertEquals(2, fixture.database.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
                 new server.filetransfer.FileMetadataRepository(fixture.database::connection).authorize(account.user().id(), storedRoom);
                 FxTestRuntime.await(() -> !camera.cameraRequestedProperty().get() && !camera.audio().requestedProperty().get() && !camera.screen().requestedProperty().get());
-                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.NORMAL);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.LOW);
                 long beforeReceive = camera.frames(guest.selfParticipantId()).receivedFrames();
                 FxTestRuntime.await(() -> camera.frames(guest.selfParticipantId()).receivedFrames() > beforeReceive + 3);
                 camera.startInput(() -> new GeneratedCamera(0)).get(15, TimeUnit.SECONDS);
@@ -90,10 +90,10 @@ public class VideoCallIntegrationTest {
                 long seed = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
                 var bad = new AdaptiveVideoPolicy.Evidence(800.0, 100.0, 15.0);
                 var good = new AdaptiveVideoPolicy.Evidence(40.0, 5.0, 0.0);
-                for (int second = 0; second <= 10; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, good).get(5, TimeUnit.SECONDS);
-                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.LOW);
-                FxTestRuntime.await(() -> videoReceived.imageProperty().get() != null && videoReceived.imageProperty().get().getWidth() <= 128);
-                for (int second = 11; second <= 18; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, bad).get(5, TimeUnit.SECONDS);
+                for (int second = 0; second <= 10; second++) camera.networkSample(MediaStatsSamples.evidence(seed + TimeUnit.SECONDS.toNanos(second), bad, good)).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.SAVING);
+                FxTestRuntime.await(() -> videoReceived.imageProperty().get() != null && videoReceived.imageProperty().get().getWidth() <= 240);
+                for (int second = 11; second <= 18; second++) camera.networkSample(MediaStatsSamples.evidence(seed + TimeUnit.SECONDS.toNanos(second), bad, bad)).get(5, TimeUnit.SECONDS);
                 FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
                 assertTrue(FxTestRuntime.call(() -> camera.cameraRequestedProperty().get()), "Network pause preserves user intent");
                 Thread.sleep(1000); long beforePause = videoReceived.receivedFrames();
@@ -105,18 +105,20 @@ public class VideoCallIntegrationTest {
                 assertTrue(screenReceived.receivedFrames() <= screenBeforePause + 1, "Screen RTP must also stop to protect voice");
                 assertTrue(other.audio().receivedSamples(host.selfParticipantId()) > audioBefore + 4800);
                 assertTrue(camera.audio().receivedSamples(guest.selfParticipantId()) > incomingAudioBefore + 4800);
-                for (int second = 19; second <= 58; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), good, good).get(5, TimeUnit.SECONDS);
-                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.NORMAL && videoReceived.receivedFrames() > beforePause + 3);
+                for (int second = 19; second <= 70; second++) camera.networkSample(MediaStatsSamples.evidence(seed + TimeUnit.SECONDS.toNanos(second), good, good)).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.HD && videoReceived.receivedFrames() > beforePause + 3);
                 FxTestRuntime.await(() -> screenReceived.receivedFrames() > screenBeforePause + 3);
                 FxTestRuntime.await(() -> videoReceived.imageProperty().get() != null && videoReceived.imageProperty().get().getWidth() == 320);
-                for (int second = 59; second <= 78; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), bad, bad).get(5, TimeUnit.SECONDS);
+                for (int second = 71; second <= 90; second++) camera.networkSample(MediaStatsSamples.evidence(seed + TimeUnit.SECONDS.toNanos(second), bad, bad)).get(5, TimeUnit.SECONDS);
                 FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
                 FxTestRuntime.call(() -> camera.toggleInput(() -> new GeneratedCamera(0), false)).get(10, TimeUnit.SECONDS);
                 FxTestRuntime.call(() -> camera.screen().toggleInput(GeneratedScreen::new)).get(10, TimeUnit.SECONDS);
-                for (int second = 79; second <= 118; second++) camera.observeNetwork(seed + TimeUnit.SECONDS.toNanos(second), good, good).get(5, TimeUnit.SECONDS);
-                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.NORMAL && !camera.cameraRequestedProperty().get());
+                for (int second = 91; second <= 145; second++) camera.networkSample(MediaStatsSamples.evidence(seed + TimeUnit.SECONDS.toNanos(second), good, good)).get(5, TimeUnit.SECONDS);
+                FxTestRuntime.await(() -> camera.qualityProperty().get() == AdaptiveVideoPolicy.Profile.HD && !camera.cameraRequestedProperty().get());
                 assertNoVideoSource(host, host.selfParticipantId());
                 assertFalse(host.videoRequest("SCREEN_STATE", new com.google.gson.JsonObject(), UUID.randomUUID().toString()).get(10, TimeUnit.SECONDS).getAsJsonObject("sources").has(host.selfParticipantId()));
+                assertEquals(0,fixture.telemetryMessages.get(),"New clients must never emit application NETWORK_STATS");
+                assertTrue(camera.networkHistory().length<=40);
             } finally {
                 host.close(); guest.close();
                 if (h != null) h.closeComplete().get(15, TimeUnit.SECONDS); if (g != null) g.closeComplete().get(15, TimeUnit.SECONDS);
@@ -687,6 +689,7 @@ public class VideoCallIntegrationTest {
         private final int color;
         private int frame;
         GeneratedCamera(int color) { this.color = color; }
+        public int width() {return 320;} public int height() {return 240;} public int fps() {return 15;}
         public VideoTrackSource source() { return source; }
         public void start() { producer.scheduleAtFixedRate(this::frame, 0, 67, TimeUnit.MILLISECONDS); }
         private synchronized void frame() {

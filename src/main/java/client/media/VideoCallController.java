@@ -34,19 +34,25 @@ public final class VideoCallController implements AutoCloseable {
     private final Set<CompletableFuture<?>> jobs = ConcurrentHashMap.newKeySet();
     private final Map<String, VideoFrameMailbox> frames = new ConcurrentHashMap<>();
     private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService statsSampler = Executors.newSingleThreadScheduledExecutor(
-            Thread.ofPlatform().daemon().name("video-stats-sampler").factory());
-    private final NetworkStatsCalculator statsCalculator = new NetworkStatsCalculator();
-    private final RtcQualityMonitor videoQualityMonitor = new RtcQualityMonitor();
-    private int qualityCursor;
-    private final AdaptiveVideoPolicy adaptivePolicy = new AdaptiveVideoPolicy();
-    private final AtomicBoolean adapting = new AtomicBoolean();
-    private volatile AdaptiveVideoPolicy.Profile appliedQuality = AdaptiveVideoPolicy.Profile.NORMAL;
-    private final ReadOnlyObjectWrapper<AdaptiveVideoPolicy.Profile> quality = new ReadOnlyObjectWrapper<>(AdaptiveVideoPolicy.Profile.NORMAL);
+    private final NetworkStatsConfig statsConfig=NetworkStatsConfig.load();
+    private final NetworkStatsBuffer statsBuffer=new NetworkStatsBuffer(statsConfig.capacity());
+    private final NetworkQualityAnalyzer analyzer=new NetworkQualityAnalyzer();
+    private final NetworkStatsCollector statsCollector;
+    private final AdaptiveVideoPolicy adaptivePolicy = new AdaptiveVideoPolicy(statsConfig);
+    private final AtomicBoolean adapting = new AtomicBoolean(), statsUiScheduled=new AtomicBoolean();
+    private record StatsUpdate(long generation,NetworkStatsCalculator.CalculatedSample sample) { }
+    private final AtomicReference<StatsUpdate> pendingStatsUi=new AtomicReference<>();
+    private final AtomicLong statsGeneration=new AtomicLong();
+    private volatile StatsUpdate currentStats;
+    private volatile long lastAnalysis=Long.MIN_VALUE,lastStatsUi=Long.MIN_VALUE,lastApplyFailure=Long.MIN_VALUE;
+    private volatile AdaptiveVideoPolicy.Profile appliedQuality = AdaptiveVideoPolicy.Profile.LOW;
+    private NetworkSample.Limitation appliedLimitation=NetworkSample.Limitation.UNKNOWN;
+    private final ReadOnlyObjectWrapper<AdaptiveVideoPolicy.Profile> quality = new ReadOnlyObjectWrapper<>(AdaptiveVideoPolicy.Profile.LOW);
     public ReadOnlyObjectProperty<AdaptiveVideoPolicy.Profile> qualityProperty() { return quality.getReadOnlyProperty(); }
     private final ReadOnlyObjectWrapper<NetworkStatsCalculator.CalculatedSample> latestStats = new ReadOnlyObjectWrapper<>();
     public ReadOnlyObjectProperty<NetworkStatsCalculator.CalculatedSample> statsProperty() { return latestStats.getReadOnlyProperty(); }
-    public NetworkStatsCalculator.CalculatedSample latestStats() { return latestStats.get(); }
+    public NetworkStatsCalculator.CalculatedSample latestStats() {var update=currentStats;return update!=null && update.generation()==statsGeneration.get()?update.sample():null;}
+    public NetworkSample[] networkHistory() {return statsBuffer.snapshot();}
     private final ReadOnlyStringWrapper status = new ReadOnlyStringWrapper("Camera đang tắt.");
     private final ReadOnlyBooleanWrapper publishing = new ReadOnlyBooleanWrapper();
     private final ReadOnlyBooleanWrapper cameraRequested = new ReadOnlyBooleanWrapper(), cameraPending = new ReadOnlyBooleanWrapper();
@@ -58,11 +64,12 @@ public final class VideoCallController implements AutoCloseable {
     /** Transport recovery preserves the controller borrowed by the view, but never reopens capture. */
     public void controlConnected(boolean connected) {
         controlConnected = connected; audio.controlConnected(connected); screen.controlConnected(connected);
+        if(!connected) {statsBuffer.reset(statsGeneration.incrementAndGet());statsCollector.reset();currentStats=null;pendingStatsUi.set(null);}
         if (!connected) submit(() -> {
             cameraSwitch.resetOff(); stopLocalCamera();
             subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
-            adaptivePolicy.reset(); appliedQuality = AdaptiveVideoPolicy.Profile.NORMAL;
-            Platform.runLater(() -> { if (!closed.get()) quality.set(AdaptiveVideoPolicy.Profile.NORMAL); }); return null;
+            adaptivePolicy.reset(); appliedQuality = AdaptiveVideoPolicy.Profile.LOW; lastAnalysis=lastStatsUi=lastApplyFailure=Long.MIN_VALUE;
+            Platform.runLater(() -> { if (!closed.get()) quality.set(AdaptiveVideoPolicy.Profile.LOW); }); return null;
         });
     }
     private final AtomicReference<String> latestStatus = new AtomicReference<>();
@@ -72,7 +79,7 @@ public final class VideoCallController implements AutoCloseable {
     private NativeVideoSession nativeSession;
     private volatile NativeVideoSession.Peer publisher;
     private NativeVideoSession.Preview preview;
-    private VideoInput input;
+    private volatile VideoInput input;
     private boolean inputStarted;
     private final CameraConsentStore cameraConsent;
     private final Supplier<List<VideoDevice>> deviceProvider;
@@ -93,7 +100,7 @@ public final class VideoCallController implements AutoCloseable {
             if (closed.get() || room.get() == null || !polling.compareAndSet(false, true)) return;
             submit(() -> { synchronize(); return null; }).whenComplete((value, failure) -> polling.set(false));
         }, 1, 2, TimeUnit.SECONDS);
-        statsSampler.scheduleWithFixedDelay(this::sampleNetworkStats, 1, 1, TimeUnit.SECONDS);
+        statsCollector=new NetworkStatsCollector(statsConfig,this::statsSources,this::captureMode,this::networkSample);
     }
     public ReadOnlyStringProperty statusProperty() { return status.getReadOnlyProperty(); }
     public ReadOnlyBooleanProperty publishingProperty() { return publishing.getReadOnlyProperty(); }
@@ -206,7 +213,7 @@ public final class VideoCallController implements AutoCloseable {
             publicationAttempted = true; JsonObject answer = command("VIDEO_PUBLISH", body);
             if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
             publisher.answer(answer.get("sdp").getAsString()); requireWanted(wanted);
-            publisher.quality(appliedQuality); activeCamera = true;
+            publisher.quality(appliedQuality,appliedLimitation,statsConfig); activeCamera = true;
             show("Camera đang bật; đang thiết lập kết nối WebRTC với SFU.");
         } catch (Exception | LinkageError failure) {
             stopLocalCamera(); if (publicationAttempted) try { command("VIDEO_STOP", new JsonObject()); } catch (Exception ignored) { }
@@ -315,161 +322,69 @@ public final class VideoCallController implements AutoCloseable {
         });
     }
 
-    private void sampleNetworkStats() {
-        if (!controlConnected) return;
-        if (closed.get() || room.get() == null || self.get() == null) return;
-        try {
-            var voiceEvidence = audio.networkQuality();
-            videoQualityMonitor.begin();
-            long statsDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1000);
-            Double rttSeconds = null;
-            Double maxJitterSeconds = null;
-            Long packetsLost = null;
-            Long packetsReceived = null;
-            Long bytesSent = null;
-            Long framesSent = null;
-            Integer width = null;
-            Integer height = null;
-
-            NativeVideoSession.Peer pub = publisher;
-            if (pub != null) {
-                dev.onvoid.webrtc.RTCStatsReport pubReport = pub.stats(500);
-                videoQualityMonitor.accept(pub, pubReport, appliedQuality == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY);
-                if (pubReport != null) {
-                    for (dev.onvoid.webrtc.RTCStats stat : pubReport.getStats().values()) {
-                        if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.CANDIDATE_PAIR) {
-                            Object rttObj = stat.getAttributes().get("currentRoundTripTime");
-                            if (rttObj instanceof Number num) {
-                                double val = num.doubleValue();
-                                if (val >= 0 && (rttSeconds == null || val < rttSeconds)) rttSeconds = val;
-                            }
-                        } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.REMOTE_INBOUND_RTP) {
-                            Object rttObj = stat.getAttributes().get("roundTripTime");
-                            if (rttObj instanceof Number num) {
-                                double val = num.doubleValue();
-                                if (val >= 0 && (rttSeconds == null || val < rttSeconds)) rttSeconds = val;
-                            }
-                        } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.OUTBOUND_RTP) {
-                            Object bytesObj = stat.getAttributes().get("bytesSent");
-                            if (bytesObj instanceof Number num) bytesSent = num.longValue();
-                            Object framesObj = stat.getAttributes().get("framesSent");
-                            if (framesObj == null) framesObj = stat.getAttributes().get("framesEncoded");
-                            if (framesObj instanceof Number num) framesSent = num.longValue();
-                            Object wObj = stat.getAttributes().get("frameWidth");
-                            if (wObj instanceof Number num) width = num.intValue();
-                            Object hObj = stat.getAttributes().get("frameHeight");
-                            if (hObj instanceof Number num) height = num.intValue();
-                        } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.MEDIA_SOURCE) {
-                            if (width == null) {
-                                Object wObj = stat.getAttributes().get("width");
-                                if (wObj instanceof Number num) width = num.intValue();
-                            }
-                            if (height == null) {
-                                Object hObj = stat.getAttributes().get("height");
-                                if (hObj instanceof Number num) height = num.intValue();
-                            }
-                        }
-                    }
-                }
-            }
-
-            List<Subscription> qualitySubscriptions = List.copyOf(subscriptions.values());
-            int examined = 0;
-            for (; examined < qualitySubscriptions.size(); examined++) {
-                long remainingMs = TimeUnit.NANOSECONDS.toMillis(statsDeadline - System.nanoTime());
-                if (closed.get() || remainingMs <= 0) break;
-                Subscription sub = qualitySubscriptions.get(Math.floorMod(qualityCursor + examined, qualitySubscriptions.size()));
-                dev.onvoid.webrtc.RTCStatsReport subReport = sub.peer().stats(Math.min(100, remainingMs));
-                videoQualityMonitor.accept(sub.peer(), subReport);
-                if (subReport == null) continue;
-                for (dev.onvoid.webrtc.RTCStats stat : subReport.getStats().values()) {
-                    if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.CANDIDATE_PAIR && rttSeconds == null) {
-                        Object rttObj = stat.getAttributes().get("currentRoundTripTime");
-                        if (rttObj instanceof Number num) {
-                            double val = num.doubleValue();
-                            if (val >= 0) rttSeconds = val;
-                        }
-                    } else if (stat.getType() == dev.onvoid.webrtc.RTCStatsType.INBOUND_RTP) {
-                        Object jitterObj = stat.getAttributes().get("jitter");
-                        if (jitterObj instanceof Number num) {
-                            double j = num.doubleValue();
-                            if (j >= 0) maxJitterSeconds = maxJitterSeconds == null ? j : Math.max(maxJitterSeconds, j);
-                        }
-                        Object lostObj = stat.getAttributes().get("packetsLost");
-                        if (lostObj instanceof Number num) {
-                            packetsLost = (packetsLost == null ? 0L : packetsLost) + num.longValue();
-                        }
-                        Object recvObj = stat.getAttributes().get("packetsReceived");
-                        if (recvObj instanceof Number num) {
-                            packetsReceived = (packetsReceived == null ? 0L : packetsReceived) + num.longValue();
-                        }
-                    }
-                }
-            }
-            qualityCursor = qualitySubscriptions.isEmpty() ? 0 : Math.floorMod(qualityCursor + examined, qualitySubscriptions.size());
-
-            NetworkStatsCalculator.RawCounters raw = new NetworkStatsCalculator.RawCounters(
-                    System.nanoTime(), rttSeconds, maxJitterSeconds,
-                    packetsLost, packetsReceived, bytesSent, framesSent, width, height
-            );
-            NetworkStatsCalculator.CalculatedSample counters = statsCalculator.process(raw);
-            var videoEvidence = videoQualityMonitor.finish().merge(screen.transportQuality());
-            var connectionEvidence = videoEvidence.merge(voiceEvidence);
-            NetworkStatsCalculator.CalculatedSample sample = new NetworkStatsCalculator.CalculatedSample(
-                    connectionEvidence.rttMs(), connectionEvidence.jitterMs(), connectionEvidence.lossPct(),
-                    counters.bitrateKbps(), counters.fps(), counters.width(), counters.height());
-            if (adapting.compareAndSet(false, true)) {
-                observeNetwork(System.nanoTime(), videoEvidence, voiceEvidence).whenComplete((value, failure) -> {
-                    adapting.set(false);
-                    if (failure != null && !closed.get()) mediaFailure("adaptive_quality", failure);
-                });
-            }
-            if (!closed.get()) {
-                try {
-                    Platform.runLater(() -> latestStats.set(sample));
-                } catch (IllegalStateException ignored) {
-                    latestStats.set(sample);
-                }
-            }
-            if (sample.isEmpty() || closed.get()) return;
-
-            JsonObject body = new JsonObject();
-            if (sample.rttMs() != null) body.addProperty("rtt", sample.rttMs());
-            if (sample.jitterMs() != null) body.addProperty("jitter", sample.jitterMs());
-            if (sample.lossPct() != null) body.addProperty("loss", sample.lossPct());
-            if (sample.bitrateKbps() != null) body.addProperty("bitrate", sample.bitrateKbps());
-            if (sample.fps() != null) body.addProperty("fps", sample.fps());
-            if (sample.width() != null) body.addProperty("width", sample.width());
-            if (sample.height() != null) body.addProperty("height", sample.height());
-
-            signaling.request("NETWORK_STATS", body, UUID.randomUUID().toString());
-        } catch (Exception ignored) {
-        }
+    private List<MediaStatsSource> statsSources() {
+        if(!inMeeting || !controlConnected || closed.get() || room.get()==null) return List.of();
+        List<MediaStatsSource> sources=new ArrayList<>();var current=publisher;
+        if(current!=null) sources.add(new MediaStatsSource(current,MediaStatsSource.Kind.CAMERA,true,
+                appliedQuality==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY,current::statsAsync));
+        for(var sub:subscriptions.values()) sources.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.CAMERA,false,false,sub.peer()::statsAsync));
+        audio.statsSources(sources);screen.statsSources(sources);return sources;
     }
-
-    /** All native sender changes share the camera owner, so a manual off/host stop always wins. */
-    CompletableFuture<Void> observeNetwork(long observedAt, AdaptiveVideoPolicy.Evidence videoEvidence, AdaptiveVideoPolicy.Evidence voiceEvidence) {
-        return submit(() -> {
-            if (!controlConnected || !inMeeting || room.get() == null || self.get() == null || System.nanoTime() - observedAt > TimeUnit.SECONDS.toNanos(3)) return null;
-            var next = adaptivePolicy.observe(observedAt, videoEvidence, voiceEvidence);
-            if (next == appliedQuality) return null;
-            if (publisher != null) publisher.quality(next);
-            screen.prioritizeVoice(next == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY).whenComplete((value, failure) -> {
-                if (failure != null && !closed.get()) mediaFailure("adaptive_screen", failure);
-            });
-            appliedQuality = next;
-            if (next == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {
-                subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear();
+    private int[] captureMode() {var source=input;return source==null?new int[]{0,0,0}:new int[]{source.width(),source.height(),source.fps()};}
+    /** One collector owns writes. Tests inject the same compact samples, never a second quality manager. */
+    CompletableFuture<Void> networkSample(NetworkSample sample) {
+        return networkSample(statsGeneration.get(),sample);
+    }
+    private CompletableFuture<Void> networkSample(long generation,NetworkSample sample) {
+        if(sample==null) {
+            if(generation==statsGeneration.get() && !closed.get()) {
+                statsBuffer.clear();currentStats=null;pendingStatsUi.set(new StatsUpdate(generation,null));scheduleStatsUi();
             }
-            Platform.runLater(() -> { if (!closed.get()) quality.set(next); });
-            common.diagnostics.Diagnostics.current().event("video.quality.changed", Map.of("status", next.name()));
+            return CompletableFuture.completedFuture(null);
+        }
+        if(!controlConnected || !inMeeting || closed.get() || room.get()==null || !statsBuffer.add(sample,generation)) return CompletableFuture.completedFuture(null);
+        audio.networkSample(sample);
+        if(lastAnalysis!=Long.MIN_VALUE && sample.atNanos()-lastAnalysis<TimeUnit.MILLISECONDS.toNanos(statsConfig.analysisMs())) return CompletableFuture.completedFuture(null);
+        var analysis=analyzer.analyze(statsBuffer.snapshot(),statsConfig);
+        currentStats=new StatsUpdate(generation,NetworkStatsCalculator.display(sample,analysis));
+        if(lastStatsUi==Long.MIN_VALUE || sample.atNanos()-lastStatsUi>=TimeUnit.MILLISECONDS.toNanos(statsConfig.uiMs())) {
+            lastStatsUi=sample.atNanos();pendingStatsUi.set(currentStats);scheduleStatsUi();
+        }
+        lastAnalysis=sample.atNanos();
+        if(!statsConfig.adaptiveEnabled()) return CompletableFuture.completedFuture(null);
+        if(!adapting.compareAndSet(false,true)) return CompletableFuture.completedFuture(null);
+        return this.<Void>submit(() -> {
+            if(generation!=statsGeneration.get() || !controlConnected || closed.get() || room.get()==null
+                    || System.nanoTime()-sample.atNanos()>TimeUnit.SECONDS.toNanos(3)) return null;
+            var next=adaptivePolicy.observe(analysis);
+            var reason=analysis.limitation();
+            if(appliedLimitation==NetworkSample.Limitation.CPU_LIMITED && reason!=NetworkSample.Limitation.CPU_LIMITED && !analysis.recover()) reason=NetworkSample.Limitation.CPU_LIMITED;
+            if(next==appliedQuality && (reason==NetworkSample.Limitation.CPU_LIMITED)==(appliedLimitation==NetworkSample.Limitation.CPU_LIMITED)) return null;
+            if(lastApplyFailure!=Long.MIN_VALUE && sample.atNanos()-lastApplyFailure<TimeUnit.SECONDS.toNanos(5)) return null;
+            try {
+                if(publisher!=null) publisher.quality(next,reason,statsConfig);
+                screen.prioritizeVoice(next==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY).whenComplete((ignored,failure) -> {
+                    if(failure!=null && !closed.get()) mediaFailure("adaptive_screen",failure);
+                });
+                appliedQuality=next;appliedLimitation=reason;lastApplyFailure=Long.MIN_VALUE;
+                if(next==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {subscriptions.values().forEach(s -> s.peer().close());subscriptions.clear();}
+                Platform.runLater(() -> {if(!closed.get() && generation==statsGeneration.get()) quality.set(next);});
+            } catch(RuntimeException failure) {lastApplyFailure=sample.atNanos();mediaFailure("adaptive_quality",failure);}
             return null;
+        }).whenComplete((ignored,failure) -> adapting.set(false));
+    }
+    private void scheduleStatsUi() {
+        if(!statsUiScheduled.compareAndSet(false,true)) return;
+        Platform.runLater(() -> {
+            var update=pendingStatsUi.getAndSet(null);
+            if(!closed.get() && update!=null && update.generation()==statsGeneration.get()) latestStats.set(update.sample());
+            statsUiScheduled.set(false);
         });
     }
 
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        statsSampler.shutdownNow();
+        statsBuffer.reset(statsGeneration.incrementAndGet());statsCollector.close();currentStats=null;pendingStatsUi.set(null);
         try {
             Platform.runLater(() -> latestStats.set(null));
         } catch (IllegalStateException ignored) {

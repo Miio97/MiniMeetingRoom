@@ -55,8 +55,7 @@ public final class MeetingSession implements AutoCloseable {
     public CompletableFuture<JsonObject> videoRequest(String type, JsonObject body, String requestId) {
         if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
                 "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP",
-                "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STATE", "SCREEN_STOP",
-                "NETWORK_STATS").contains(type))
+                "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STATE", "SCREEN_STOP").contains(type))
             return CompletableFuture.failedFuture(new SignalException("INVALID_REQUEST"));
         return submit(() -> command(type, requireRoom().roomId(), body, requestId).body());
     }

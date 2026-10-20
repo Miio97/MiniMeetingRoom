@@ -120,16 +120,17 @@ public final class NativeAudioSession implements AutoCloseable {
             finally { pending.remove(offer); }
         }
         public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
-        public RTCStatsReport stats(long timeoutMs) {
-            CompletableFuture<RTCStatsReport> result = new CompletableFuture<>(); pending.add(result);
-            try {
+        private final SingleFlightStats statsFlight=new SingleFlightStats();
+        public CompletableFuture<RTCStatsReport> statsAsync() {
+            return statsFlight.request(callback -> {
                 synchronized (statsLifecycle) {
-                    if (closing.get()) return null;
-                    connection.getStats(report -> result.complete(closing.get() ? null : report));
+                    if(closing.get()) {callback.accept(null);return;}
+                    connection.getStats(callback::accept);
                 }
-                return result.get(timeoutMs, TimeUnit.MILLISECONDS);
-            } catch (Exception ignored) { return null; }
-            finally { pending.remove(result); }
+            });
+        }
+        public RTCStatsReport stats(long timeoutMs) {
+            try {return statsAsync().get(timeoutMs,TimeUnit.MILLISECONDS);} catch(Exception failure) {return null;}
         }
         private void set(RTCSessionDescription value, boolean remoteDescription) throws Exception {
             CompletableFuture<Void> result = new CompletableFuture<>(); pending.add(result);
@@ -142,6 +143,7 @@ public final class NativeAudioSession implements AutoCloseable {
         }
         @Override public void close() {
             if (!closing.compareAndSet(false, true)) return;
+            statsFlight.close();
             pending.forEach(future -> future.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED")));
             gathered.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED"));
             synchronized (trackLifecycle) {

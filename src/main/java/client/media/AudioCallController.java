@@ -36,8 +36,6 @@ public final class AudioCallController implements AutoCloseable {
     private final ReadOnlyBooleanWrapper requested = new ReadOnlyBooleanWrapper();
     private final CameraSwitch microphone = new CameraSwitch(this::changed);
     private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
-    private final RtcQualityMonitor qualityMonitor = new RtcQualityMonitor();
-    private int qualityCursor;
     private final Map<String, AtomicLong> samplesBySource = new ConcurrentHashMap<>();
     public long receivedSamples(String participant) { var value=samplesBySource.get(participant); return value==null ? 0 : value.get(); }
     private final AtomicLong receivedSamples = new AtomicLong();
@@ -45,21 +43,14 @@ public final class AudioCallController implements AutoCloseable {
     private volatile boolean entered, active;
     private NativeAudioSession receive, capture;
     private volatile NativeAudioSession.Peer publisher;
-    /** Called only by the video stats sampler; never stalls PCM generation on the audio owner. */
-    synchronized AdaptiveVideoPolicy.Evidence networkQuality() {
-        qualityMonitor.begin();
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
-        List<NativeAudioSession.Peer> peers = new ArrayList<>();
-        NativeAudioSession.Peer current = publisher; if (current != null) peers.add(current);
-        for (Subscription subscription : subscriptions.values()) peers.add(subscription.peer());
-        int examined = 0;
-        for (; examined < peers.size(); examined++) {
-            if (closed.get() || System.nanoTime() >= deadline) break;
-            var peer = peers.get(Math.floorMod(qualityCursor + examined, peers.size()));
-            qualityMonitor.accept(peer, peer.stats(100));
-        }
-        qualityCursor = peers.isEmpty() ? 0 : Math.floorMod(qualityCursor + examined, peers.size());
-        return qualityMonitor.finish();
+    private volatile AdaptiveVideoPolicy.Evidence voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN;
+    AdaptiveVideoPolicy.Evidence networkQuality() {return voiceEvidence;}
+    void networkSample(NetworkSample sample) {voiceEvidence=sample.voiceUp().evidence().merge(sample.voiceDown().evidence());}
+    void statsSources(List<MediaStatsSource> target) {
+        if(!entered || !controlConnected || closed.get()) return;
+        var current=publisher;
+        if(current!=null) target.add(new MediaStatsSource(current,MediaStatsSource.Kind.AUDIO,true,false,current::statsAsync));
+        for(var sub:subscriptions.values()) target.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.AUDIO,false,false,sub.peer()::statsAsync));
     }
     private AudioDevice selectedMicrophone, selectedSpeaker;
     private ScheduledFuture<?> generated;
@@ -104,7 +95,7 @@ public final class AudioCallController implements AutoCloseable {
     public void enter() { entered=true; }
     private volatile boolean controlConnected = true;
     public void controlConnected(boolean connected) {
-        controlConnected = connected;
+        controlConnected = connected; if(!connected) voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN;
         if (!connected) submit(() -> { disconnect(); return null; });
     }
     public CompletableFuture<Void> toggle() {

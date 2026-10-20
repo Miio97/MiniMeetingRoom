@@ -1,91 +1,33 @@
 package client.media;
 
-/**
- * Calculates WebRTC network statistics deltas over a monotonic clock window.
- * Converts seconds to milliseconds, handles counter resets and null metrics.
- */
+/** Small UI projection of local media measurements; never sends telemetry or reads a database. */
 public final class NetworkStatsCalculator {
-    private long prevTimestampNanos = -1;
-    private Long prevBytesSent;
-    private Long prevFramesSent;
-    private Long prevPacketsLost;
-    private Long prevPacketsReceived;
-
-    public record RawCounters(
-            long timestampNanos,
-            Double rttSeconds,
-            Double maxJitterSeconds,
-            Long packetsLost,
-            Long packetsReceived,
-            Long bytesSent,
-            Long framesSent,
-            Integer width,
-            Integer height
-    ) { }
-
-    public record CalculatedSample(
-            Double rttMs,
-            Double jitterMs,
-            Double lossPct,
-            Integer bitrateKbps,
-            Integer fps,
-            Integer width,
-            Integer height
-    ) {
-        public boolean isEmpty() {
-            return rttMs == null && jitterMs == null && lossPct == null
-                    && bitrateKbps == null && fps == null && width == null && height == null;
+    private NetworkStatsCalculator() { }
+    public record CalculatedSample(Double rttMs,Double jitterMs,Double lossPct,Integer bitrateKbps,Integer fps,
+            Integer width,Integer height,Integer receiveBitrateKbps,NetworkSample.Quality quality,NetworkSample.Limitation limitation) {
+        public CalculatedSample(Double rtt,Double jitter,Double loss,Integer bitrate,Integer fps,Integer width,Integer height) {
+            this(rtt,jitter,loss,bitrate,fps,width,height,null,null,null);
         }
+        public boolean isEmpty() {return rttMs==null && jitterMs==null && lossPct==null && bitrateKbps==null && fps==null && width==null && height==null && receiveBitrateKbps==null;}
     }
-
-    public synchronized CalculatedSample process(RawCounters raw) {
-        Double rttMs = raw.rttSeconds() != null && raw.rttSeconds() >= 0 ? raw.rttSeconds() * 1000.0 : null;
-        Double jitterMs = raw.maxJitterSeconds() != null && raw.maxJitterSeconds() >= 0 ? raw.maxJitterSeconds() * 1000.0 : null;
-
-        Double lossPct = null;
-        if (raw.packetsLost() != null && raw.packetsReceived() != null) {
-            if (prevPacketsLost != null && prevPacketsReceived != null) {
-                long deltaLost = raw.packetsLost() - prevPacketsLost;
-                long deltaRecv = raw.packetsReceived() - prevPacketsReceived;
-                if (deltaLost >= 0 && deltaRecv >= 0) {
-                    long totalDelta = deltaLost + deltaRecv;
-                    if (totalDelta > 0) {
-                        lossPct = (deltaLost * 100.0) / (double) totalDelta;
-                    }
-                }
-                // Counter reset / negative delta: window discarded, loss remains null
-            }
-            prevPacketsLost = raw.packetsLost();
-            prevPacketsReceived = raw.packetsReceived();
-        }
-
-        Integer bitrateKbps = null;
-        Integer fps = null;
-        long now = raw.timestampNanos();
-        if (prevTimestampNanos > 0 && now > prevTimestampNanos) {
-            double elapsedSeconds = (now - prevTimestampNanos) / 1_000_000_000.0;
-            if (elapsedSeconds > 0) {
-                if (raw.bytesSent() != null && prevBytesSent != null) {
-                    long deltaBytes = raw.bytesSent() - prevBytesSent;
-                    if (deltaBytes >= 0) {
-                        bitrateKbps = (int) Math.round((deltaBytes * 8.0 / 1000.0) / elapsedSeconds);
-                    }
-                }
-                if (raw.framesSent() != null && prevFramesSent != null) {
-                    long deltaFrames = raw.framesSent() - prevFramesSent;
-                    if (deltaFrames >= 0) {
-                        fps = (int) Math.round(deltaFrames / elapsedSeconds);
-                    }
-                }
-            }
-        }
-        prevTimestampNanos = now;
-        if (raw.bytesSent() != null) prevBytesSent = raw.bytesSent();
-        if (raw.framesSent() != null) prevFramesSent = raw.framesSent();
-
-        Integer width = raw.width() != null && raw.width() > 0 ? raw.width() : null;
-        Integer height = raw.height() != null && raw.height() > 0 ? raw.height() : null;
-
-        return new CalculatedSample(rttMs, jitterMs, lossPct, bitrateKbps, fps, width, height);
+    static CalculatedSample display(NetworkSample s,NetworkQualityAnalyzer.Analysis a) {
+        var evidence=s.uplink().evidence().merge(s.downlink().evidence()).merge(s.voiceUp().evidence()).merge(s.voiceDown().evidence())
+                .merge(s.screenUp().evidence()).merge(s.screenDown().evidence());
+        Double up=sum(s.uplink().bitrateBps(),s.voiceUp().bitrateBps(),s.screenUp().bitrateBps());
+        Double down=sum(s.downlink().bitrateBps(),s.voiceDown().bitrateBps(),s.screenDown().bitrateBps());
+        // The badge combines media evidence; camera bitrate decisions still use only the analyzer's uplink.
+        var quality=NetworkQualityAnalyzer.classify(new NetworkSample.Metrics(evidence.rttMs(),evidence.jitterMs(),evidence.lossPct(),
+                null,null,null,null,null,NetworkSample.Limitation.UNKNOWN));
+        return new CalculatedSample(evidence.rttMs(),evidence.jitterMs(),evidence.lossPct(),integer(up,1000),integer(s.uplink().fps(),1),
+                s.uplink().width(),s.uplink().height(),integer(down,1000),quality,a.limitation());
+    }
+    private static Integer integer(Double n,double scale) {return n==null?null:(int)Math.min(Integer.MAX_VALUE,Math.round(n/scale));}
+    private static Double sum(Double... ns) {Double result=null;for(Double n:ns) if(n!=null) result=result==null?n:result+n;return result;}
+    /** Three-bar legacy presentation only; not the adaptive quality decision. */
+    public static String calculateQuality(Double rtt,Double jitter,Double loss) {
+        var e=new AdaptiveVideoPolicy.Evidence(rtt,jitter,loss);if(!e.known()) return null;
+        if(e.above(160,40,3)) return "KEM";
+        if(e.above(80,20,1)) return "TRUNG_BINH";
+        return "TOT";
     }
 }

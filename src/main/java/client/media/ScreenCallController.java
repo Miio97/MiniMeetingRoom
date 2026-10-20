@@ -44,11 +44,11 @@ public final class ScreenCallController implements AutoCloseable {
         appliedNetworkPause = networkPaused;
         if (networkPaused) { subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear(); }
     }
-    AdaptiveVideoPolicy.Evidence transportQuality() {
-        var monitor = new RtcQualityMonitor(); monitor.begin();
-        var current = publisher;
-        if (current != null) monitor.accept(current, current.stats(100), true);
-        return monitor.finish();
+    void statsSources(List<MediaStatsSource> target) {
+        if(!entered || !controlConnected || closed.get()) return;
+        var current=publisher;
+        if(current!=null) target.add(new MediaStatsSource(current,MediaStatsSource.Kind.SCREEN,true,networkPaused,current::statsAsync));
+        for(var sub:subscriptions.values()) target.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.SCREEN,false,networkPaused,sub.peer()::statsAsync));
     }
     private NativeVideoSession.Preview preview;
     private VideoInput input;

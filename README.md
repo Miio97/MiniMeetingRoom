@@ -1,6 +1,6 @@
 # MiniMeetingRoom
 
-Camera tự giảm bitrate, FPS và kích thước theo thống kê WebRTC; chỉ tạm dừng truyền/nhận video và chia sẻ khi chất lượng thoại bị ảnh hưởng kéo dài. Mạng ổn định sẽ khôi phục dần, giữ nguyên lựa chọn tắt camera/mic/chia sẻ của người dùng. Không thêm migration. Xem [chất lượng video tự động](docs/adaptive-video.md).
+Thống kê media lấy cục bộ mỗi 500 ms, giữ tối đa 40 mẫu trong RAM; không gửi telemetry định kỳ hoặc lưu database. Chất lượng chỉ AUTO, khởi đầu LOW và tối đa 720p/30 FPS; giảm video trước, chỉ tạm dừng khi thoại bị ảnh hưởng kéo dài. Database hiện có dùng [migration 004 xóa bảng thống kê và lịch sử](database/migrations/004_drop_network_statistics.sql), chạy thủ công sau khi nâng cấp server. Xem [kiến trúc, cấu hình, kiểm thử và backup/rollback](docs/client-stats-migration.md). Đã sửa giới hạn hiển thị 8–10 FPS, cách chọn mode camera và điều kiện nâng HD: [bằng chứng trước/sau](docs/video-quality-fix.md).
 
 Mất kết nối signaling sẽ giữ thành viên và vai trò chủ phòng tối đa **2 phút** để client tự kết nối lại cùng phiên. Hết hạn, giao diện tự thoát cuộc họp; kết nối lại thành công giữ quyền gửi tệp. Camera/mic/chia sẻ cần bật lại bằng tay sau mất kết nối. Cần build và khởi động lại cả server lẫn client, không thêm migration. Xem [khôi phục kết nối phòng](docs/meeting-recovery.md).
 
