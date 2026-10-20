@@ -2,7 +2,7 @@
 
 Tài liệu này ghi lại kiến trúc, các quyết định kỹ thuật và cấu hình cho 3 tính năng mới:
 1. Chat realtime qua kênh signaling và chính sách tự hủy vĩnh viễn 20 phút.
-2. Đo và lưu trữ thống kê chất lượng mạng vào bảng `Thong_Ke_Ket_Noi`.
+2. Thống kê media RAM-only và AUTO video trên client; bảng thống kê cũ được xóa bằng migration 004.
 3. Tăng giới hạn số lượng người tham gia phòng họp lên 20 người (trần cứng 50).
 
 ---
@@ -36,54 +36,12 @@ Tài liệu này ghi lại kiến trúc, các quyết định kỹ thuật và c
 
 ---
 
-## 2. Lưu Thống kê Kết nối vào Thong_Ke_Ket_Noi (Task 2)
+## 2. Thống kê media sau migration
 
-### 2.1. Đo đạc WebRTC Stats phía Client
-- **Nguồn số liệu**: Đọc trực tiếp từ `RTCPeerConnection.getStats()` thông qua `NativeVideoSession.Peer.stats(long timeoutMs)`. Đã được kiểm chứng thực tế trên `webrtc-java` 0.19.0.
-- **Bộ tính toán Monotonic Delta** (`NetworkStatsCalculator`):
-  - Lấy mẫu định kỳ 1 giây trên executor riêng `statsSampler` trong `VideoCallController` (không chặn luồng JavaFX, không dùng chung worker với publish/subscribe).
-  - Tính delta trên đồng hồ monotonic. Tự động loại bỏ cửa sổ nếu counter bị reset hoặc giá trị delta âm. Đổi giây sang mili-giây.
-  - **RTT**: Lấy từ `currentRoundTripTime` (candidate-pair) hoặc `roundTripTime` (remote-inbound-rtp).
-  - **Jitter & Loss**: Gộp từ các luồng inbound subscription. Jitter lấy giá trị lớn nhất; Loss tính bằng `packetsLost / (packetsReceived + packetsLost) * 100`.
-  - **Bitrate, FPS, Kích thước**: Đo từ luồng camera đang phát (`outbound-rtp` và `media-source`).
-  - Thuộc tính không đo được để `null`. Nếu toàn bộ mẫu không đo được thì không gửi lên server.
+Client lấy getStats cục bộ mỗi 500 ms, buffer 40 mẫu trong RAM, phân tích và cập nhật UI khoảng 1 giây. Không gửi NETWORK_STATS định kỳ, không ghi/đọc bảng thống kê để chỉnh video. Server bỏ writer/retention và chỉ ACK-bỏ-qua telemetry của client cũ. Dữ liệu chat và retention chat 20 phút giữ nguyên.
 
-### 2.2. Kiểm tra và Ghi nhận phía Server
-- **Signaling Message**: Client gửi `NETWORK_STATS` lên server.
-- **Xác thực phiên tối ưu**:
-  - `SignalingServer` mặc định gọi `validator.validateHash()` (truy vấn DB) cho mỗi request. Vì Railway DB có độ trễ ~0.5s/truy vấn và pool chỉ có 8 kết nối, việc 1 request/giây/client truy vấn DB sẽ làm nghẽn toàn bộ server.
-  - Riêng với `NETWORK_STATS`, server dựa vào `validatedAt` (được revalidate định kỳ 3 giây và ngắt kết nối ngay khi logout/thu hồi token) thay vì tạo truy vấn DB mới.
-- **Validation**:
-  - RTT: 0–60,000 ms.
-  - Jitter: 0–10,000 ms.
-  - Loss: 0–100%.
-  - Bitrate: 0–100,000 kbps.
-  - FPS: 0–120.
-  - Chiều rộng / chiều cao: $\le 7680$ px.
-  - Vượt ngưỡng lập tức trả về `INVALID_REQUEST`.
-  - Chống spam: Tối đa 1 mẫu/giây/kết nối (các mẫu đến sớm hơn 900ms được bỏ qua và trả về `dropped: true`).
-- **Phân loại chất lượng mạng**:
-  - `TOT`: RTT < 80 ms, Loss < 1.0%, Jitter < 20 ms.
-  - `TRUNG_BINH`: RTT < 160 ms, Loss < 3.0%, Jitter < 40 ms.
-  - `KEM`: Các trường hợp còn lại.
-- **Ghi Batch & Hàng đợi giới hạn**:
-  - Hàng đợi giới hạn 1024 mẫu (`NetworkStatsService`). Khi hàng đợi đầy, tự động bỏ mẫu cũ nhất và tăng bộ đếm `dropped`.
-  - Worker định kỳ 10 giây gom batch (10 dòng cho mỗi người tham gia trong 10 giây) thực hiện `INSERT INTO Thong_Ke_Ket_Noi` trong một transaction duy nhất.
-- **Xóa định kỳ (Cleanup)**:
-  - Scheduler chạy mỗi 30 giây: `DELETE FROM Thong_Ke_Ket_Noi WHERE Thoi_Diem_Lay_Mau < NOW() - retention`.
-  - Chạy theo batch $\le 5000$ dòng đến khi hết.
-  - Cấu hình mặc định:
-    ```properties
-    stats.sample-interval-ms=1000
-    stats.flush-interval-seconds=10
-    stats.cleanup-interval-seconds=30
-    stats.retention-seconds=60
-    ```
-  - *Lưu ý*: Nếu muốn xóa sạch toàn bộ sau mỗi 30 giây, đặt `stats.retention-seconds=0`.
-- **Preflight Check**:
-  - Khi server khởi động, thực hiện `SELECT ... WHERE 1=0`. Nếu bảng `Thong_Ke_Ket_Noi` không tồn tại, tính năng tự động tắt an toàn (`NETWORK_STATS_DISABLED`), không tạo bảng và không làm sập server.
+Theo xác nhận ngày 18/10/2026, xóa bảng Thong_Ke_Ket_Noi cùng lịch sử bằng migration 004 chạy thủ công trên Railway sau khi cập nhật server. Chỉ AUTO tối đa 720p/30 FPS, không có MANUAL hay 45/60 FPS. Chi tiết và hướng dẫn backup/rollback: [client-stats-migration.md](client-stats-migration.md).
 
----
 
 ## 3. Tăng Giới hạn Số lượng Người trong Phòng (Task 3)
 

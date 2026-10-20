@@ -25,6 +25,8 @@ public final class VideoTestFixture implements AutoCloseable {
     public final SignalingServer signaling;
     public final VideoEngineClient engine;
     public final VideoCoordinator coordinator;
+    public final java.util.concurrent.atomic.AtomicLong telemetryMessages=new java.util.concurrent.atomic.AtomicLong();
+    private final MeetingHandler meetingHandler;
     private final Process process;
     private final RoomTestFixture.Tls tls;
     private final Path diagnosticDirectory;
@@ -61,8 +63,17 @@ public final class VideoTestFixture implements AutoCloseable {
                     event.revision(), json.toJsonTree(event.body()).getAsJsonObject());
         }); rooms.start();
         coordinator = new VideoCoordinator(rooms, engine); mediaReference.set(coordinator);
+        meetingHandler=new MeetingHandler(rooms,coordinator);
         signaling = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
-                new SessionValidator(database::connection, Clock.systemUTC()), new MeetingHandler(rooms, coordinator),
+                new SessionValidator(database::connection, Clock.systemUTC()), new SignalingServer.Handler() {
+                    public common.signaling.SignalMessage handle(SignalingServer.Connection connection,common.signaling.SignalMessage request) throws Exception {
+                        if("NETWORK_STATS".equals(request.type())) telemetryMessages.incrementAndGet();
+                        return meetingHandler.handle(connection,request);
+                    }
+                    public void disconnected(SignalingServer.Connection connection,String reason) {meetingHandler.disconnected(connection,reason);}
+                    public void validated(SignalingServer.Connection connection) {meetingHandler.validated(connection);}
+                    public void bindServer(SignalingServer server) {meetingHandler.bindServer(server);}
+                },
                 rooms.serverEpoch(), SignalingServer.Options.defaults()); signalReference.set(signaling); signaling.start();
         var auth = new server.auth.AuthService(database::connection, new server.auth.PasswordHasher(), Clock.systemUTC(), Duration.ofHours(24), hash -> { signaling.revokeSession(hash); rooms.revokeSession(hash); });
         collaboration = new server.AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
@@ -82,7 +93,7 @@ public final class VideoTestFixture implements AutoCloseable {
                         new client.media.CameraConsentStore(diagnosticDirectory.getParent().resolve("camera-" + UUID.randomUUID() + ".properties")), List::of, true, new client.media.MicrophoneConsentStore(diagnosticDirectory.getParent().resolve("mic-" + UUID.randomUUID() + ".properties"))));
     }
     @Override public void close() throws Exception {
-        signaling.close(); collaboration.close(); rooms.close(); coordinator.close(); engine.shutdown(); engine.close();
+        signaling.close(); meetingHandler.close(); collaboration.close(); rooms.close(); coordinator.close(); engine.shutdown(); engine.close();
         if (!process.waitFor(8, TimeUnit.SECONDS)) { process.destroyForcibly(); throw new IllegalStateException("VIDEO_TEST_PROCESS_LEAK"); }
         database.close();
         // Retain bounded, sanitized numeric evidence after JUnit removes its temporary directory.

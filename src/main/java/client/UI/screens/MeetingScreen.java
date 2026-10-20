@@ -86,7 +86,6 @@ public final class MeetingScreen extends BorderPane {
     // One FX-owned room snapshot for all participant counts, tiles and sharing UI.
     private common.meeting.RoomSnapshot displayedRoom;
     private final NetworkSignalWidget networkSignal;
-    private javafx.beans.value.ChangeListener<client.media.NetworkStatsCalculator.CalculatedSample> statsListener;
     public NetworkSignalWidget networkSignal() { return networkSignal; }
     private CameraSettingsDialog cameraSettings;
     private AudioControls audioControls;
@@ -128,7 +127,7 @@ public final class MeetingScreen extends BorderPane {
             adaptiveStatus.setId("adaptive-video-status");
             adaptiveStatus.textProperty().bind(javafx.beans.binding.Bindings.createStringBinding(
                     () -> mediaController.qualityProperty().get().label, mediaController.qualityProperty()));
-            adaptiveStatus.visibleProperty().bind(mediaController.qualityProperty().isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.NORMAL));
+            adaptiveStatus.visibleProperty().bind(mediaController.qualityProperty().isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.LOW));
             adaptiveStatus.managedProperty().bind(adaptiveStatus.visibleProperty());
             statusLine.getChildren().add(0, adaptiveStatus);
         }
@@ -166,10 +165,6 @@ public final class MeetingScreen extends BorderPane {
             audioControls.errorProperty().addListener(audioErrorListener); video.screen().statusProperty().addListener(audioErrorListener);
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
             video.cameraRequestedProperty().addListener(cameraListener);
-            statsListener = (observable, before, after) -> {
-                if (!disposed) networkSignal.update(after, network != null ? network.snapshot() : null);
-            };
-            video.statsProperty().addListener(statsListener);
             if (video.latestStats() != null) {
                 networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
             }
@@ -432,7 +427,6 @@ public final class MeetingScreen extends BorderPane {
             mediaSession.stateProperty().removeListener(connectionListener);
             connectionStatus.textProperty().unbind(); connectionStatus.visibleProperty().unbind(); connectionStatus.managedProperty().unbind();
             adaptiveStatus.textProperty().unbind(); adaptiveStatus.visibleProperty().unbind(); adaptiveStatus.managedProperty().unbind();
-            if (statsListener != null) mediaController.statsProperty().removeListener(statsListener);
             mediaSession.roomProperty().removeListener(videoRoomListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);
             mediaController.audio().requestedProperty().removeListener(micListener); audioControls.errorProperty().removeListener(audioErrorListener); audioControls.dispose();

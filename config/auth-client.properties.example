@@ -13,3 +13,21 @@ signaling.port=8444
 file.transfer.host=localhost
 file.transfer.port=9001
 file.transfer.socket-timeout-ms=30000
+
+# Local media monitoring. RAM only; capacity is fixed at 40 and native work is single-flight.
+network.monitor.enabled=true
+network.stats.interval.ms=500
+network.stats.ui-update.ms=1000
+network.stats.analysis.interval.ms=1000
+network.stats.buffer.capacity=40
+network.stats.max-inflight=1
+network.stats.timeout.ms=3000
+network.stats.persist-raw=false
+video.adaptive.enabled=true
+# AUTO only. Capture and sender are capped at 1280x720 / 30 FPS.
+video.adaptive.degrade-window.ms=4000
+video.adaptive.upgrade-window.ms=15000
+video.adaptive.cooldown.ms=10000
+video.profile.saving.max-bitrate=200000
+video.profile.low.max-bitrate=600000
+video.profile.hd.max-bitrate=2500000

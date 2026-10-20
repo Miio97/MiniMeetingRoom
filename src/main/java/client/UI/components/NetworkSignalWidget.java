@@ -10,14 +10,13 @@ import javafx.scene.shape.Rectangle;
 import javafx.stage.Popup;
 import javafx.stage.Window;
 import javafx.util.Duration;
-import server.meeting.NetworkStatsService;
 
 import java.util.Locale;
 
 /**
  * Compact 3-bar network signal widget for the meeting bottom toolbar.
  * Displays connection quality (Green = TOT, Yellow = TRUNG_BINH, Red = KEM, Gray = no data)
- * using thresholds from NetworkStatsService.
+ * using local client-only presentation thresholds.
  * Displays a popover and tooltip with real-time metrics (RTT, packet loss, jitter, bitrate, FPS, resolution).
  */
 public final class NetworkSignalWidget extends Button {
@@ -122,13 +121,15 @@ public final class NetworkSignalWidget extends Button {
         this.currentSample = sample;
         if (sample != null && !sample.isEmpty()) {
             this.isFallback = false;
-            this.currentQuality = NetworkStatsService.calculateQuality(sample.rttMs(), sample.jitterMs(), sample.lossPct());
+            this.currentQuality = sample.quality()==null ? NetworkStatsCalculator.calculateQuality(sample.rttMs(), sample.jitterMs(), sample.lossPct()) : switch(sample.quality()) {
+                case EXCELLENT, GOOD -> "TOT"; case FAIR -> "TRUNG_BINH"; case POOR, CRITICAL -> "KEM"; case UNKNOWN -> null;
+            };
             updateBarsAndQuality(currentQuality);
             updateValues(sample);
             updateTooltipAndText();
         } else if (fallback != null && fallback.rttMillis() != null) {
             this.isFallback = true;
-            this.currentQuality = NetworkStatsService.calculateQuality(fallback.rttMillis(), fallback.jitterMillis(), null);
+            this.currentQuality = NetworkStatsCalculator.calculateQuality(fallback.rttMillis(), fallback.jitterMillis(), null);
             updateBarsAndQuality(currentQuality);
             updateFallbackValues(fallback);
             updateTooltipAndText();
@@ -181,6 +182,7 @@ public final class NetworkSignalWidget extends Button {
         lossValue.setText(s == null || s.lossPct() == null ? "--" : String.format(Locale.ROOT, "%.1f%%", s.lossPct()));
         jitterValue.setText(s == null || s.jitterMs() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", s.jitterMs()));
         bitrateValue.setText(s == null || s.bitrateKbps() == null ? "--" : s.bitrateKbps() + " kbps");
+        if(s!=null && s.receiveBitrateKbps()!=null) bitrateValue.setText("↑ " + (s.bitrateKbps()==null?"--":s.bitrateKbps()) + " · ↓ " + s.receiveBitrateKbps() + " kbps");
         fpsValue.setText(s == null || s.fps() == null ? "--" : String.valueOf(s.fps()));
         resolutionValue.setText(s == null || s.width() == null || s.height() == null ? "--" : s.width() + "x" + s.height());
         if (s != null && !s.isEmpty()) {

@@ -63,24 +63,11 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
 
     private record SavedChatMessage(long id, Instant sentAt) { }
     private record HistoryChatMessage(long id, long userId, String displayName, String content, Instant sentAt) { }
-    private final ConcurrentHashMap<String, Long> lastStatsSampleTimesNanos = new ConcurrentHashMap<>();
-    private volatile server.meeting.NetworkStatsService stats;
-
-    public MeetingHandler(RoomService rooms) { this(rooms, null, null, null, null); }
-    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video) { this(rooms, video, null, null, null); }
-    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video, server.meeting.NetworkStatsService stats) { this(rooms, video, null, null, stats); }
-    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video, ConnectionProvider connections, ChatDispatcher dispatcher) {
-        this(rooms, video, connections, dispatcher, null);
+    public MeetingHandler(RoomService rooms) {this(rooms,null,null,null);}
+    public MeetingHandler(RoomService rooms,server.media.VideoCoordinator video) {this(rooms,video,null,null);}
+    public MeetingHandler(RoomService rooms,server.media.VideoCoordinator video,ConnectionProvider connections,ChatDispatcher dispatcher) {
+        this.rooms=rooms;this.video=video;this.connections=connections!=null?connections:rooms.connectionProvider();this.dispatcher=dispatcher;
     }
-    public MeetingHandler(RoomService rooms, server.media.VideoCoordinator video, ConnectionProvider connections, ChatDispatcher dispatcher, server.meeting.NetworkStatsService stats) {
-        this.rooms = rooms;
-        this.video = video;
-        this.connections = connections != null ? connections : rooms.connectionProvider();
-        this.dispatcher = dispatcher;
-        this.stats = stats;
-    }
-
-    public void setNetworkStatsService(server.meeting.NetworkStatsService stats) { this.stats = stats; }
 
     public void setDispatcher(ChatDispatcher dispatcher) { this.dispatcher = dispatcher; }
     public void bindSignaling(SignalingServer signaling) {
@@ -177,59 +164,9 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                     type = "CHAT_HISTORY_RESULT";
                 }
                 case "NETWORK_STATS" -> {
-                    Double rtt = optDouble(body, "rtt");
-                    if (rtt != null && (rtt < 0.0 || rtt > 60000.0)) throw new SignalException("INVALID_REQUEST");
-
-                    Double jitter = optDouble(body, "jitter");
-                    if (jitter != null && (jitter < 0.0 || jitter > 10000.0)) throw new SignalException("INVALID_REQUEST");
-
-                    Double loss = optDouble(body, "loss");
-                    if (loss != null && (loss < 0.0 || loss > 100.0)) throw new SignalException("INVALID_REQUEST");
-
-                    Integer bitrate = optInt(body, "bitrate");
-                    if (bitrate != null && (bitrate < 0 || bitrate > 100000)) throw new SignalException("INVALID_REQUEST");
-
-                    Integer fps = optInt(body, "fps");
-                    if (fps != null && (fps < 0 || fps > 120)) throw new SignalException("INVALID_REQUEST");
-
-                    Integer width = optInt(body, "width");
-                    if (width != null && (width < 0 || width > 7680)) throw new SignalException("INVALID_REQUEST");
-
-                    Integer height = optInt(body, "height");
-                    if (height != null && (height < 0 || height > 7680)) throw new SignalException("INVALID_REQUEST");
-
-                    long nowNanos = System.nanoTime();
-                    Long lastNanos = lastStatsSampleTimesNanos.get(connection.id());
-                    if (lastNanos != null && nowNanos - lastNanos < TimeUnit.MILLISECONDS.toNanos(900)) {
-                        response.addProperty("ok", true);
-                        response.addProperty("dropped", true);
-                        type = "NETWORK_STATS_ACK";
-                        break;
-                    }
-                    lastStatsSampleTimesNanos.put(connection.id(), nowNanos);
-
-                    Long storedRoomId = rooms.currentStoredRoomIdForConnection(connection.id());
-                    if (storedRoomId == null) {
-                        response.addProperty("ok", false);
-                        response.addProperty("reason", "NOT_IN_ROOM");
-                        type = "NETWORK_STATS_ACK";
-                        break;
-                    }
-
-                    long userId = connection.principal().userId();
-
-                    if (rtt != null || jitter != null || loss != null || bitrate != null || fps != null || width != null || height != null) {
-                        String quality = server.meeting.NetworkStatsService.calculateQuality(rtt, jitter, loss);
-                        Instant sampledAt = rooms.clock().instant();
-                        if (stats != null) {
-                            stats.record(new server.meeting.NetworkStatsService.StatsRecord(
-                                    storedRoomId, userId, rtt, jitter, loss, bitrate, fps, width, height, quality, sampledAt
-                            ));
-                        }
-                    }
-
-                    response.addProperty("ok", true);
-                    type = "NETWORK_STATS_ACK";
+                    // Transitional ACK for older clients. No queue, sample parsing, persistence or retention task.
+                    response.addProperty("ok",true);response.addProperty("dropped",true);response.addProperty("retired",true);
+                    type="NETWORK_STATS_ACK";
                 }
                 case "CREATE_ROOM" -> {
                     var params = new CreateRoomParams(text(body, "name", 100), text(body, "pin", 6),
@@ -356,7 +293,6 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
 
     @Override public void disconnected(SignalingServer.Connection connection, String reason) {
         chatLimits.remove(connection.id());
-        lastStatsSampleTimesNanos.remove(connection.id());
         if (video != null) video.revoke(connection.id());
         if (java.util.Set.of("MAT_KET_NOI", "REQUEST_TIMEOUT").contains(reason)) rooms.suspend(connection.id());
         else rooms.leave(connection.id(), "SERVER_SHUTDOWN".equals(reason) ? "PHONG_DONG" : "MAT_KET_NOI");
@@ -369,29 +305,6 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
         chatExecutor.shutdownNow();
         try { chatExecutor.awaitTermination(1, TimeUnit.SECONDS); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
-    }
-
-    private static Double optDouble(JsonObject body, String field) throws SignalException {
-        if (!body.has(field) || body.get(field).isJsonNull()) return null;
-        var value = body.get(field);
-        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) throw new SignalException("INVALID_REQUEST");
-        try {
-            double v = value.getAsDouble();
-            return Double.isFinite(v) ? v : null;
-        } catch (Exception e) {
-            throw new SignalException("INVALID_REQUEST");
-        }
-    }
-
-    private static Integer optInt(JsonObject body, String field) throws SignalException {
-        if (!body.has(field) || body.get(field).isJsonNull()) return null;
-        var value = body.get(field);
-        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) throw new SignalException("INVALID_REQUEST");
-        try {
-            return value.getAsBigDecimal().intValueExact();
-        } catch (Exception e) {
-            throw new SignalException("INVALID_REQUEST");
-        }
     }
 
     private static String text(JsonObject body, String field, int maximum) throws SignalException {
