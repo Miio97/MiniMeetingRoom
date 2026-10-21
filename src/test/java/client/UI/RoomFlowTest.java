@@ -66,6 +66,8 @@ class RoomFlowTest {
     private final CountDownLatch blockedRequestReceived = new CountDownLatch(1);
     private final CountDownLatch blockedRequestRelease = new CountDownLatch(1);
     private volatile String blockedAction;
+    private server.signalingapi.SignalingServer catalogServer;
+    private server.meeting.RoomCatalog catalog;
 
     @BeforeAll @Timeout(60)
     static void runtime() throws Exception {
@@ -115,7 +117,9 @@ class RoomFlowTest {
 
     private void hiddenClient(AuthResponse session) throws Exception {
         FxTestRuntime.call(() -> {
-            stage = new Stage(); manager = new SceneManager(stage, fixture.client(), fileClient);
+            stage = new Stage(); manager = catalogServer==null?new SceneManager(stage, fixture.client(), fileClient):
+                    new SceneManager(stage,fixture.client(),fileClient,(token,expiry) -> new client.meeting.MeetingSession(token,expiry,
+                        listener -> new client.signalingapi.SignalingClient(new client.signalingapi.SignalingClient.Settings("localhost",catalogServer.port(),null,common.signaling.SignalWire.DEFAULT_MAX_BYTES),tls.client(),listener)));
             manager.acceptSession(session); manager.lobby();
             root().applyCss(); root().layout(); assertFalse(stage.isShowing()); return null;
         });
@@ -135,6 +139,7 @@ class RoomFlowTest {
                 if (fileServer != null) fileServer.close();
                 else if (fileStorage != null) fileStorage.close(); // Constructor failure still releases the storage lock.
             } finally { if (fixture != null) fixture.close(); }
+            if(catalogServer!=null) catalogServer.close();if(catalog!=null) catalog.close();System.setProperty("mmr.test.disableCatalog","true");
         }
     }
 
@@ -375,7 +380,35 @@ class RoomFlowTest {
     }
 
     private Parent root() { return stage.getScene().getRoot(); }
+    private void startCatalog() throws Exception {
+        RoomTestFixture.ownershipSchema(fixture::connection);
+        catalog=new server.meeting.RoomCatalog(fixture::connection);
+        catalogServer=new server.signalingapi.SignalingServer(tls.server(),new java.net.InetSocketAddress("127.0.0.1",0),new server.auth.SessionValidator(fixture::connection,Clock.systemUTC()),new server.signalingapi.SignalingServer.Handler() {
+            public void bindServer(server.signalingapi.SignalingServer value) {catalog.bind(value);}
+            public common.signaling.SignalMessage handle(server.signalingapi.SignalingServer.Connection connection,common.signaling.SignalMessage request) throws Exception {
+                if(request.type().equals("ROOM_CATALOG_WATCH")) {
+                    var focus=new java.util.HashSet<Long>();if(request.body().has("roomIds")) for(var id:request.body().getAsJsonArray("roomIds")) focus.add(id.getAsLong());
+                    return connection.message("ROOM_CATALOG_SNAPSHOT",request.requestId(),null,null,catalog.subscribe(connection,200,request.body().get("watchId").getAsString(),focus));
+                }
+                catalog.unsubscribe(connection.id());return connection.message("OK",request.requestId(),null,null,new com.google.gson.JsonObject());
+            }
+            public void disconnected(server.signalingapi.SignalingServer.Connection connection,String reason) {catalog.unsubscribe(connection.id());}
+        },"test-catalog-epoch",server.signalingapi.SignalingServer.Options.defaults());
+        catalogServer.start();fixture.rooms.onChanged(catalog::invalidate);System.setProperty("mmr.test.disableCatalog","false");
+    }
+    @Test void endedScreenBlocksReopenDuringCleanupAndEnablesImmediatelyAfterPush() throws Exception {
+        startCatalog();var room=fixture.client().createRoom(host.token(),"Cleanup UI","1234",3).room();
+        var closed=fixture.client().leaveRoom(host.token(),room.id()).room();
+        for(int index=0;index<205;index++) fixture.execute("INSERT INTO Phong_Hop(Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da,Ngay_Tao) VALUES('UIHIST-"+index+"','History',"+host.user().id()+",'DA_DONG',FALSE,3,TIMESTAMP '2026-10-22 00:00:00')");
+        var busy=new java.util.concurrent.atomic.AtomicBoolean(true);catalog.cleanupStatus(id -> id==room.id() && busy.get());
+        hiddenClient(host);
+        FxTestRuntime.call(() -> {manager.updateRoom(closed);manager.ended(0,1);return null;});
+        FxTestRuntime.await(() -> node(root(),"reopen-room-submit",Button.class).getText().equals("Đang dọn dữ liệu…") && node(root(),"reopen-room-submit",Button.class).isDisabled());
+        busy.set(false);catalog.invalidate();
+        FxTestRuntime.await(() -> node(root(),"reopen-room-submit",Button.class).getText().equals("Mở lại phòng") && !node(root(),"reopen-room-submit",Button.class).isDisabled());
+    }
     @Test void lobbySeesAnotherHostsReopenedRoomWithoutManualRefresh() throws Exception {
+        startCatalog();
         var room = fixture.client().createRoom(host.token(), "Tự cập nhật", "1234", 3).room();
         var guest = fixture.account("autoRefreshGuest", "Guest");
         fixture.client().joinRoom(guest.token(), room.code(), "1234");

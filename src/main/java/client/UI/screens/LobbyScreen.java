@@ -21,6 +21,31 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class LobbyScreen extends BorderPane {
+    private client.meeting.MeetingSession.CatalogWatch catalogWatch;
+    private ScrollPane catalogScroll;
+    private boolean viewportQueued;
+    private void scheduleCatalogViewport() {
+        if(viewportQueued || disposed) return;viewportQueued=true;
+        javafx.application.Platform.runLater(() -> {viewportQueued=false;updateCatalogViewport();});
+    }
+    private final java.util.Map<Long,RoomInfo> catalogRooms=new java.util.LinkedHashMap<>();
+    private java.util.Set<Long> cleaningRooms=java.util.Set.of();
+    private long catalogRevision;
+    private void catalogUpdate(client.meeting.MeetingSession.CatalogUpdate update) {
+        if(disposed) return;
+        if(update.snapshot()) catalogRooms.clear();
+        for(long id:update.evicted()) catalogRooms.remove(id);
+        for(long id:update.removed()) catalogRooms.remove(id);
+        for(var room:update.rooms()) catalogRooms.put(room.id(),room);
+        cleaningRooms=update.cleaning();catalogRevision=update.revision();
+        var combined=new java.util.LinkedHashMap<Long,RoomInfo>();
+        if(expandedRooms && renderedRooms!=null) for(var room:renderedRooms) combined.put(room.id(),room);
+        combined.putAll(catalogRooms);for(long id:update.removed()) combined.remove(id);
+        var ordered=combined.values().stream().sorted(java.util.Comparator.comparing(RoomInfo::createdAt).thenComparingLong(RoomInfo::id).reversed()).toList();
+        int visible=expandedRooms?Math.max(10,renderedRooms==null?10:renderedRooms.size()):3;
+        renderRooms(ordered.subList(0,Math.min(visible,ordered.size())));manager.cacheRecentRooms(ordered);
+        hasMoreRooms=ordered.size()>visible || ordered.size()>=200;moreRooms.setVisible(hasMoreRooms);moreRooms.setManaged(hasMoreRooms);
+    }
     private final FadeTransition pulse;
     private final javafx.animation.Timeline roomUpdates;
     private List<RoomInfo> renderedRooms;
@@ -123,7 +148,11 @@ public final class LobbyScreen extends BorderPane {
         main.getChildren().addAll(actions,
                 Ui.row(12, Ui.label("Phòng gần đây của bạn", "subtitle"), Ui.spacer(), refresh), roomStatus, rooms, moreRooms);
         ScrollPane scroll = Ui.scroll(main);
+        catalogScroll=scroll;
+        rooms.layoutBoundsProperty().addListener((observable,before,after) -> scheduleCatalogViewport());
+        scroll.viewportBoundsProperty().addListener((observable,before,after) -> updateCatalogViewport());
         scroll.vvalueProperty().addListener((observable, before, after) -> {
+            updateCatalogViewport();
             if (expandedRooms && hasMoreRooms && after.doubleValue() >= 0.98
                     && before.doubleValue() < 0.98) loadMoreRooms();
         });
@@ -137,10 +166,14 @@ public final class LobbyScreen extends BorderPane {
         } else {
             hasMoreRooms = cached.size() >= 3;
             renderRooms(cached.subList(0, Math.min(3, cached.size())));
+            roomStatus.setText("Đang hiển thị dữ liệu đã lưu.");
             moreRooms.setVisible(hasMoreRooms); moreRooms.setManaged(hasMoreRooms);
         }
-        roomUpdates = new javafx.animation.Timeline(new javafx.animation.KeyFrame(Duration.seconds(2), event -> loadRooms(true)));
-        roomUpdates.setCycleCount(Animation.INDEFINITE); roomUpdates.play();
+        roomUpdates = new javafx.animation.Timeline();
+        if(!Boolean.getBoolean("mmr.test.disableCatalog")) {
+            catalogWatch=manager.sfuSession().watchCatalog(update -> javafx.application.Platform.runLater(() -> catalogUpdate(update)));
+            scheduleCatalogViewport();
+        }
     }
 
     private void actionsPending(boolean value) {
@@ -148,6 +181,7 @@ public final class LobbyScreen extends BorderPane {
     }
 
     private void loadRooms() {
+        if(catalogWatch!=null) manager.sfuSession().refreshCatalog();
         loadRooms(false, false);
     }
 
@@ -190,18 +224,45 @@ public final class LobbyScreen extends BorderPane {
             hasMoreRooms = response.hasMoreRooms();
             moreRooms.setVisible(hasMoreRooms); moreRooms.setManaged(hasMoreRooms);
             manager.cacheRecentRooms(recent);
-            if (!background || catalogError || !recent.equals(renderedRooms)) renderRooms(recent);
+            if(catalogRevision==0 || append) {if (!background || catalogError || !recent.equals(renderedRooms)) renderRooms(recent);}
             catalogError = false;
         }, cause -> { if (!disposed) { loading = false; refresh.setDisable(false); moreRooms.setDisable(false); catalogError = true; roomStatus.setText(SceneManager.connectionError(cause)); } });
     }
 
+    private final java.util.Map<Long,RoomInfo> renderedInfo=new java.util.HashMap<>();
+    private java.util.Set<Long> renderedCleaning=java.util.Set.of();
     private void renderRooms(List<RoomInfo> recent) {
-        renderedRooms = List.copyOf(recent);
-        rooms.getChildren().clear();
-        roomStatus.setText(recent.isEmpty() ? "Bạn chưa tạo hoặc tham gia phòng nào." : "Đang hiển thị " + recent.size() + " phòng • Chọn phòng và nhập lại PIN để tham gia.");
-        for (RoomInfo room : recent) {
+        var old=new java.util.HashMap<Long,javafx.scene.Node>();
+        for(var node:rooms.getChildren()) if(node.getUserData() instanceof Long id) old.put(id,node);
+        var wanted=new java.util.ArrayList<javafx.scene.Node>();
+        for(var room:recent) {
+            var node=old.get(room.id());
+            if(node==null || !room.equals(renderedInfo.get(room.id())) || cleaningRooms.contains(room.id())!=renderedCleaning.contains(room.id())) node=roomRow(room);
+            wanted.add(node);
+        }
+        for(int i=0;i<wanted.size();i++) {
+            var node=wanted.get(i);if(i<rooms.getChildren().size() && rooms.getChildren().get(i)==node) continue;
+            rooms.getChildren().remove(node);rooms.getChildren().add(i,node);
+        }
+        while(rooms.getChildren().size()>wanted.size()) rooms.getChildren().removeLast();
+        renderedInfo.clear();for(var room:recent) renderedInfo.put(room.id(),room);renderedCleaning=java.util.Set.copyOf(cleaningRooms);
+        renderedRooms=List.copyOf(recent);
+        roomStatus.setText(recent.isEmpty()?"Bạn chưa tạo hoặc tham gia phòng nào.":"");
+        scheduleCatalogViewport();
+    }
+    private void updateCatalogViewport() {
+        if(disposed || catalogWatch==null || catalogScroll==null) return;
+        var viewport=catalogScroll.lookup(".viewport");var visible=new java.util.LinkedHashSet<Long>();
+        if(viewport!=null) {
+            var bounds=viewport.localToScene(viewport.getBoundsInLocal());
+            for(var row:rooms.getChildren()) if(row.getUserData() instanceof Long id && row.localToScene(row.getBoundsInLocal()).intersects(bounds)) {visible.add(id);if(visible.size()==100) break;}
+        }
+        if(visible.isEmpty() && renderedRooms!=null) renderedRooms.stream().limit(20).forEach(room -> visible.add(room.id()));
+        catalogWatch.rooms(visible);
+    }
+    private javafx.scene.Node roomRow(RoomInfo room) {
             boolean live = "DANG_HOAT_DONG".equals(room.status()) || "CHO".equals(room.status());
-            boolean canReopen = "DA_DONG".equals(room.status()) && manager.authenticatedUser() != null
+            boolean canReopen = "DA_DONG".equals(room.status()) && !cleaningRooms.contains(room.id()) && manager.authenticatedUser() != null
                     && room.hostId() == manager.authenticatedUser().id();
             Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
             Label title = Ui.label(room.name(), "room-title");
@@ -209,12 +270,11 @@ public final class LobbyScreen extends BorderPane {
             badge.setMinWidth(Region.USE_PREF_SIZE); badge.setWrapText(false);
             VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label(room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + VietnamTime.formatDateTime(room.createdAt()), "room-meta"));
             text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
-            Button action = Ui.button(canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng", live || canReopen ? "primary" : "secondary", () -> {
+            Button action = Ui.button(cleaningRooms.contains(room.id())?"Đang dọn dữ liệu…":canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng", live || canReopen ? "primary" : "secondary", () -> {
                 if (canReopen) { reopen(room); return; }
                 code.setText(room.code()); pin.clear(); pin.requestFocus();
             }); action.setId("room-action-" + room.id()); action.setDisable(!live && !canReopen); action.setMinWidth(90);
-            HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); rooms.getChildren().add(item);
-        }
+            HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); item.setUserData(room.id());return item;
     }
 
     private void reopen(RoomInfo room) {
@@ -230,6 +290,7 @@ public final class LobbyScreen extends BorderPane {
     }
 
     public void dispose() {
+        if(catalogWatch!=null) try {catalogWatch.close();} catch(Exception ignored) { }
         if (joining) stopWaiting.run();
         disposed = true;
         pin.clear();

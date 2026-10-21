@@ -42,7 +42,7 @@ public final class VideoEngineClient implements AutoCloseable {
             JsonObject result = JsonParser.parseString(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
             if (reply.statusCode() != 200) {
                 String code = result.has("code") ? result.get("code").getAsString() : "MEDIA_CONTROL_FAILED";
-                if (!java.util.Set.of("MEDIA_BUSY", "ENGINE_CHANGED", "LEASE_EXPIRED", "ALREADY_PUBLISHING", "ALREADY_SUBSCRIBED",
+                if (!java.util.Set.of("MEDIA_BUSY", "VIDEO_VIEWPORT_LIMIT", "ENGINE_CHANGED", "LEASE_EXPIRED", "ALREADY_PUBLISHING", "ALREADY_SUBSCRIBED",
                         "SHARE_IN_USE", "INVALID_MEDIA_KIND", "SOURCE_UNAVAILABLE", "REQUEST_CONFLICT", "OFFER_REJECTED", "ICE_TIMEOUT", "MEDIA_CLOSED").contains(code)) code = "MEDIA_CONTROL_FAILED";
                 throw new SignalException(code);
             }

@@ -48,11 +48,10 @@ public final class SceneManager {
     private java.util.List<RoomInfo> recentRooms;
     private long recentRoomsAt;
     public java.util.List<RoomInfo> recentRooms() {
-        return recentRooms != null && System.nanoTime() - recentRoomsAt < java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
-                ? recentRooms : null;
+        return recentRooms;
     }
     public void cacheRecentRooms(java.util.List<RoomInfo> rooms) {
-        recentRooms = java.util.List.copyOf(rooms); recentRoomsAt = System.nanoTime();
+        recentRooms = rooms.stream().limit(200).toList(); recentRoomsAt = System.nanoTime();
     }
     private final ReadOnlyBooleanWrapper logoutPending = new ReadOnlyBooleanWrapper();
     private client.UI.dialogs.AccountPasswordResetDialog passwordRecovery;
@@ -244,6 +243,7 @@ public final class SceneManager {
         if (!response.success() || response.user() == null || response.token() == null || response.token().isBlank()) {
             throw new IllegalArgumentException("Phiên đăng nhập không hợp lệ.");
         }
+        if(sessionToken!=null && !java.util.Objects.equals(sessionToken,response.token())) closeSfuSession();
         recentRooms = null; recentRoomsAt = 0;
         authenticatedUser = response.user(); sessionToken = response.token(); pendingToken = null;
         emailVerified.set(authenticatedUser.emailVerified());
@@ -313,6 +313,11 @@ public final class SceneManager {
             case "ROOM_NOT_STARTED" -> "Chủ phòng chưa vào phòng. Vui lòng thử lại sau.";
             case "HOST_REQUIRED" -> "Chỉ chủ phòng mới được thực hiện thao tác này.";
             case "HISTORY_UNAVAILABLE" -> "Máy chủ đang lưu trạng thái phòng. Vui lòng thử lại sau.";
+              case "ROOM_CLEANING" -> "Đang dọn dữ liệu phòng. Có thể mở lại ngay khi hoàn tất.";
+              case "ROOM_CAPACITY_POLICY" -> "Sức chứa của phòng cũ vượt giới hạn hiện tại của máy chủ.";
+              case "ROOM_CLEANUP_OWNER_REQUIRED" -> "Phòng legacy cũ chưa xác định server quản lý. Cần xác nhận quyền quản lý trước khi dọn và mở lại.";
+              case "DATABASE_UNAVAILABLE" -> "Database tạm gián đoạn. Thao tác chưa được xác nhận; vui lòng thử lại sau.";
+              case "CHAT_OUTCOME_UNKNOWN" -> "Chưa xác định được kết quả gửi. Không gửi lại thành tin mới để tránh trùng.";
             case "REQUEST_ALREADY_ENDED" -> "Lượt mở hoặc tham gia phòng này đã kết thúc. Hãy làm mới danh sách và thử lại.";
             case "REQUEST_EXPIRED" -> "Yêu cầu mở phòng đã hết hạn. Vui lòng thử lại.";
             case "STALE_ROOM" -> "Phòng đã được mở lại. Hãy tham gia lại từ sảnh.";

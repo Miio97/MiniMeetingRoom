@@ -117,6 +117,8 @@
 .tile-mic, .muted-mic { -fx-max-width: 24; -fx-max-height: 24; }
 .speaking-border { -fx-border-color: -accent; -fx-border-width: 2; -fx-border-radius: 12; -fx-effect: dropshadow(gaussian, rgba(0,194,168,.2), 10, 0, 0, 0); }
 .meeting-panel { -fx-background-color: -bg-surface; -fx-border-color: transparent transparent transparent -border; }
+.list-view#chat-messages { -fx-background-color: -bg-surface; -fx-border-color: transparent; -fx-padding: 0; }
+.list-view#chat-messages .list-cell { -fx-background-color: transparent; -fx-padding: 8 12; }
 .tab-pane .tab-header-area { -fx-padding: 0 12; }
 .tab-pane .tab-header-background { -fx-background-color: -bg-surface; }
 .tab-pane .tab { -fx-background-color: transparent; -fx-padding: 10 8; -fx-background-radius: 6 6 0 0; -fx-border-color: transparent; }

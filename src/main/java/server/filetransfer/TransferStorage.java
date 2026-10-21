@@ -13,6 +13,8 @@ import java.util.concurrent.locks.Lock;
  * Authentication and room authorization remain the caller's responsibility.
  */
 public interface TransferStorage extends AutoCloseable {
+    /** Only recognized object keys in the managed room directory, never personal downloads. */
+    default java.util.List<String> roomObjects(long roomId,int limit) throws IOException {return java.util.List.of();}
     /** Durable metadata and the per-upload lock; no backend-specific path escapes this interface. */
     interface UploadSession {
         UUID id();
@@ -25,11 +27,15 @@ public interface TransferStorage extends AutoCloseable {
         long createdAtMillis();
         Lock lock();
         String storageKey();
+        default String membershipGeneration() {return "";}
     }
 
     /** Reserve capacity or return the same user's matching unfinished upload for resume. */
     UploadSession begin(UUID id, long userId, long roomId, String originalName,
             String mimeType, long size, String checksum) throws IOException;
+    default UploadSession begin(UUID id,long userId,long roomId,String name,String mime,long size,String checksum,String generation) throws IOException {
+        return begin(id,userId,roomId,name,mime,size,checksum);
+    }
 
     UploadSession get(UUID id, long userId) throws IOException;
 

@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/pion/interceptor"
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
@@ -41,17 +42,18 @@ type quietFactory struct{}
 func (quietFactory) NewLogger(string) logging.LeveledLogger { return quietLogger{} }
 
 type controlRequest struct {
-	Operation   string `json:"operation"`
-	Kind        string `json:"kind,omitempty"`
-	Instance    string `json:"instance"`
-	Room        string `json:"room"`
-	Participant string `json:"participant"`
-	Generation  int64  `json:"generation"`
-	TTLMillis   int64  `json:"ttl_ms"`
-	Transport   string `json:"transport"`
-	Source      string `json:"source"`
-	Publication string `json:"publication"`
-	SDP         string `json:"sdp"`
+	Operation   string   `json:"operation"`
+	Kind        string   `json:"kind,omitempty"`
+	Instance    string   `json:"instance"`
+	Room        string   `json:"room"`
+	Participant string   `json:"participant"`
+	Generation  int64    `json:"generation"`
+	TTLMillis   int64    `json:"ttl_ms"`
+	Transport   string   `json:"transport"`
+	Source      string   `json:"source"`
+	Publication string   `json:"publication"`
+	Transports  []string `json:"transports,omitempty"`
+	SDP         string   `json:"sdp"`
 }
 type mediaPeer struct {
 	id, room, owner, source string
@@ -141,9 +143,12 @@ func newEngine(secret string) (*engine, error) {
 		maxParticipants = val
 	}
 
+	if maxParticipants > 50 {
+		return nil, errors.New("MAX_PARTICIPANTS_LIMIT")
+	}
 	maxPeers := 512
 	if maxParticipants <= 100 {
-		computed := maxParticipants * maxParticipants * 2
+		computed := maxParticipants*maxParticipants*2 + maxParticipants
 		if computed > maxPeers {
 			maxPeers = computed
 		}
@@ -175,17 +180,17 @@ func newEngine(secret string) (*engine, error) {
 		return nil, err
 	}
 	return &engine{
-		byKind: map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}},
-		api: webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
-		secret: sha256.Sum256([]byte(secret)),
-		instance: hex.EncodeToString(instanceBytes),
-		peers: map[string]*mediaPeer{},
-		leases: map[string]mediaLease{},
-		pending: map[string]bool{},
+		byKind:       map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}},
+		api:          webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
+		secret:       sha256.Sum256([]byte(secret)),
+		instance:     hex.EncodeToString(instanceBytes),
+		peers:        map[string]*mediaPeer{},
+		leases:       map[string]mediaLease{},
+		pending:      map[string]bool{},
 		stopVersions: map[string]uint64{},
-		slots: make(chan struct{}, slotsCount),
-		maxPeers: maxPeers,
-		maxLeases: maxLeases,
+		slots:        make(chan struct{}, slotsCount),
+		maxPeers:     maxPeers,
+		maxLeases:    maxLeases,
 	}, nil
 }
 func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +291,30 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.leases[request.Participant] = mediaLease{request.Room, request.Generation, time.Now().Add(time.Duration(request.TTLMillis) * time.Millisecond), version}
 		e.mu.Unlock()
 		reply(w, 200, map[string]any{"ok": true})
+	case "unsubscribe":
+		if request.Kind != "VIDEO" || len(request.Transports) > 6 {
+			reply(w, 400, map[string]any{"code": "INVALID_REQUEST"})
+			return
+		}
+		e.mu.Lock()
+		if !e.liveLocked(request.Participant, request.Room, request.Generation) {
+			e.mu.Unlock()
+			reply(w, 403, map[string]any{"code": "LEASE_EXPIRED"})
+			return
+		}
+		removed := []*mediaPeer{}
+		for _, id := range request.Transports {
+			peer := e.peers[id]
+			if peer != nil && !peer.publisher && peer.kind == "VIDEO" && peer.owner == request.Participant && peer.room == request.Room && peer.generation == request.Generation {
+				delete(e.peers, id)
+				removed = append(removed, peer)
+			}
+		}
+		e.mu.Unlock()
+		for _, peer := range removed {
+			peer.close()
+		}
+		reply(w, 200, map[string]any{"ok": true})
 	case "revoke", "stop":
 		e.mu.Lock()
 		live := e.liveLocked(request.Participant, request.Room, request.Generation)
@@ -350,7 +379,16 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		return
 	}
 	source := e.publisherLocked(request.Source, request.Kind)
-	if len(e.peers)+len(e.pending) >= e.maxPeers || e.pending[request.Transport] {
+	limit := e.maxPeers
+	// Keep a global reserve for voice; existing transports are never evicted to admit new ones.
+	if request.Kind != "AUDIO" && limit > 8 {
+		reserve := limit / 8
+		if reserve > 128 {
+			reserve = 128
+		}
+		limit -= reserve
+	}
+	if len(e.peers)+len(e.pending) >= limit || e.pending[request.Transport] {
 		e.mu.Unlock()
 		reply(w, 429, map[string]any{"code": "MEDIA_BUSY"})
 		return
@@ -371,12 +409,21 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		return
 	}
 	if !publisher {
+		visible := 0
 		for _, peer := range e.peers {
+			if !peer.publisher && peer.owner == request.Participant && peer.kind == "VIDEO" {
+				visible++
+			}
 			if !peer.publisher && peer.owner == request.Participant && peer.source == request.Source && peer.kind == request.Kind {
 				e.mu.Unlock()
 				reply(w, 409, map[string]any{"code": "ALREADY_SUBSCRIBED"})
 				return
 			}
+		}
+		if request.Kind == "VIDEO" && visible >= 6 {
+			e.mu.Unlock()
+			reply(w, 429, map[string]any{"code": "VIDEO_VIEWPORT_LIMIT"})
+			return
 		}
 	}
 	leaseVersion := e.leases[request.Participant].version

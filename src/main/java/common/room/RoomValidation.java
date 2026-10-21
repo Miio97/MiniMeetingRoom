@@ -4,7 +4,7 @@ import java.util.Locale;
 
 public final class RoomValidation {
     public static final int MIN_CAPACITY = 2;
-    public static final int MAX_CAPACITY = 250;
+    public static final int MAX_CAPACITY = 50;
     public static final int DEFAULT_CAPACITY = 10;
 
     private RoomValidation() { }

@@ -45,6 +45,7 @@ class RoomServiceTest {
     void createIsolatedDatabase() throws Exception {
         url = "jdbc:h2:mem:rooms_" + UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_UPPER=false;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=15000";
+        execute("CREATE TABLE Tin_Nhan(Ma_Tin_Nhan BIGINT AUTO_INCREMENT PRIMARY KEY,Ma_Phong BIGINT)");
         execute("""
                 CREATE TABLE Nguoi_Dung (
                     Ma_Nguoi_Dung BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -96,6 +97,13 @@ class RoomServiceTest {
         other = session("Other", "Khách hai");
     }
 
+    @Test void configuredLegacyOwnerIsPersistedAndAnotherInstanceCannotMutateTheRoom() throws Exception {
+        support.RoomTestFixture.ownershipSchema(() -> DriverManager.getConnection(url));service.legacyOwner("owner-a");
+        var created=service.handle(new AuthRequest("CREATE_ROOM",null,null,null,null,host.token(),new RoomRequest("Owned",PIN,null,3)));assertTrue(created.success(),created.message());
+        assertEquals("owner-a",textValue("SELECT Instance_ID FROM MMR_Phong_Van_Hanh"));assertEquals("legacy",textValue("SELECT Server_Epoch FROM MMR_Phong_Van_Hanh"));
+        service.legacyOwner("owner-b");var joined=service.handle(new AuthRequest("JOIN_ROOM",null,null,null,null,guest.token(),new RoomRequest(null,PIN,created.room().code(),0)));assertFalse(joined.success());
+        assertEquals(1,count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+    }
     @Test
     void paginatesOwnRoomsThreeThenTenUntilExhausted() throws Exception {
         for (int i = 0; i < 27; i++) {
@@ -450,8 +458,8 @@ class RoomServiceTest {
     void legacyReopenCannotMutateSignalingOwnedRoom() throws Exception {
         RoomInfo room = create(host, "Phòng signaling", 10).room();
         assertTrue(action("LEAVE_ROOM", host, room.code()).success());
-        execute("CREATE TABLE MMR_Phong_Van_Hanh (Ma_Phong BIGINT PRIMARY KEY REFERENCES Phong_Hop(Ma_Phong))");
-        execute("INSERT INTO MMR_Phong_Van_Hanh VALUES (" + room.id() + ")");
+        execute("CREATE TABLE MMR_Phong_Van_Hanh (Ma_Phong BIGINT PRIMARY KEY REFERENCES Phong_Hop(Ma_Phong),Server_Epoch VARCHAR(24) DEFAULT 'sfu')");
+        execute("INSERT INTO MMR_Phong_Van_Hanh(Ma_Phong) VALUES (" + room.id() + ")");
         RoomService guarded = new RoomService(() -> DriverManager.getConnection(url), new PasswordHasher(),
                 Clock.fixed(NOW, ZoneOffset.UTC), true);
         AuthResponse response = guarded.handle(request("REOPEN_ROOM", host.token(),

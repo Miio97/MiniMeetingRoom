@@ -228,6 +228,26 @@ class FileMetadataRepositoryTest {
         assertCode("FILE_NOT_FOUND", () -> repository.find(1, first.getFirst().id()));
     }
 
+    @Test void oldMembershipGenerationCannotFinalizeAfterLeavingAndJoiningAgain() throws Exception {
+        var room=repository.createRoom(1,"Generation",null,3);repository.joinRoom(2,room.code(),null);
+        String previous=repository.membershipGeneration(2,room.id());repository.leaveRoom(2,room.id());repository.joinRoom(2,room.code(),null);
+        var transfer=UUID.randomUUID();
+        assertCode("STALE_TRANSFER",() -> repository.complete(transfer,2,room.id(),"old.txt","text/plain",17,CHECKSUM,"objects/"+transfer+".bin",previous));
+        assertEquals(0,number("SELECT COUNT(*) FROM Tin_Nhan"));
+    }
+    @Test void revokedSessionCannotPublishEvenWhenRoomMembershipStillExists() throws Exception {
+        var room=repository.createRoom(1,"Revocation",null,3);var transfer=UUID.randomUUID();String token="test-upload-token";
+        String hash=java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(token.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        execute("INSERT INTO Phien_Dang_Nhap(Ma_Nguoi_Dung,Token_Bam,Ngay_Tao,Het_Han_Luc,Thu_Hoi_Luc) VALUES(1,'"+hash+"',TIMESTAMP '2026-10-14 05:00:00',TIMESTAMP '2026-10-15 06:00:00',CURRENT_TIMESTAMP)");
+        assertCode("INVALID_SESSION",() -> repository.complete(transfer,1,room.id(),"revoked.txt","text/plain",17,CHECKSUM,"objects/"+transfer+".bin",repository.membershipGeneration(1,room.id()),token));
+        assertEquals(0,number("SELECT COUNT(*) FROM Tep_Dinh_Kem"));
+    }
+    @Test void fileProtocolRoomCreationPersistsOwnerAndRejectsForeignServerWrites() throws Exception {
+        support.RoomTestFixture.ownershipSchema(() -> DriverManager.getConnection(url));repository.legacyOwner("file-owner-a");
+        var room=repository.createRoom(1,"Owned file protocol",null,3);assertEquals("file-owner-a",text("SELECT Instance_ID FROM MMR_Phong_Van_Hanh"));
+        repository.legacyOwner("file-owner-b");assertCode("PERMISSION_DENIED",() -> complete(UUID.randomUUID(),1,room.id(),"foreign.txt"));
+        assertEquals(0,number("SELECT COUNT(*) FROM Tin_Nhan"));
+    }
     private FileMetadata complete(UUID transfer, long user, long room, String name) throws Exception {
         return repository.complete(transfer, user, room, name, "text/plain", 17, CHECKSUM, "objects/" + transfer + ".bin");
     }

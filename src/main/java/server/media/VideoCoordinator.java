@@ -62,6 +62,12 @@ public final class VideoCoordinator implements AutoCloseable {
                 }
                 JsonObject result = new JsonObject(); result.add("sources", sources); return result;
             }
+            case "VIDEO_UNSUBSCRIBE" -> {
+                var ids=request.body().getAsJsonArray("transports");
+                if(ids==null || ids.size()>6) throw new SignalException("INVALID_REQUEST");
+                for(var id:ids) if(!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isString() || !id.getAsString().matches("[A-Za-z0-9_-]{1,96}")) throw new SignalException("INVALID_REQUEST");
+                var body=envelope("unsubscribe",member);body.addProperty("kind","VIDEO");body.add("transports",ids.deepCopy());return engine.control(body);
+            }
             case "VIDEO_STOP", "AUDIO_STOP", "SCREEN_STOP" -> {
                 JsonObject stop = envelope("stop", member); stop.addProperty("kind", kind); engine.control(stop); rooms.setMediaRequested(connection.id(), kind, false);
                 JsonObject result = new JsonObject(); result.addProperty("ok", true); return result;
@@ -93,7 +99,7 @@ public final class VideoCoordinator implements AutoCloseable {
         if (owner == null || closed.get() || !renewing.add(connection.id())) return;
         try { controls.execute(() -> { try { grant(owner); } catch (Exception invalid) { revoke(owner); }
             finally { renewing.remove(connection.id()); } }); }
-        catch (RejectedExecutionException busy) { renewing.remove(connection.id()); revoke(owner); }
+        catch (RejectedExecutionException busy) { renewing.remove(connection.id()); /* Existing lease retries on the next validation; no new grant is claimed. */ }
     }
     public void roomEvent(RoomEvent event) {
         if (!java.util.Set.of("ROOM_LEFT", "ROOM_CLOSED", "PUBLISH_STOPPED").contains(event.type())) return;

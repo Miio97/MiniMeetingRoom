@@ -123,7 +123,7 @@ class MeetingPaginationTest {
             SceneManager manager = new SceneManager(stage, offlineAuthClient(), new FileTransferClient());
             try {
                 // Without session
-                assertEquals(250, manager.maxRoomCapacity());
+                assertEquals(50, manager.maxRoomCapacity());
 
                 // With SFU session
                 manager.acceptSession(AuthResponse.ok("tok", new AuthUser(1, "u", "U", "u@invalid"), "h", Instant.now().plusSeconds(3600).toString()));

@@ -39,6 +39,7 @@ class RoomServiceTest {
     @BeforeEach
     void createDatabase() throws SQLException {
         url = "jdbc:h2:mem:rooms_" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_UPPER=false;DB_CLOSE_DELAY=-1";
+        execute("CREATE TABLE Tin_Nhan(Ma_Tin_Nhan BIGINT AUTO_INCREMENT PRIMARY KEY,Ma_Phong BIGINT)");
         execute("""
                 CREATE TABLE Nguoi_Dung (Ma_Nguoi_Dung BIGINT PRIMARY KEY,
                     Ten_Hien_Thi VARCHAR(100) NOT NULL, Trang_Thai VARCHAR(20) NOT NULL)
@@ -485,6 +486,42 @@ class RoomServiceTest {
         service.suspend("guest-new"); service.revokeSession(hashFor(2));
         assertEquals(1, service.participantCount());
         error("NOT_A_MEMBER", () -> service.resume(principal(2), "guest-again", 3, room.roomId(), guest.selfParticipantId()));
+    }
+    @Test void slowAdmissionDoesNotHoldGlobalRoomMonitor() throws Exception {
+        var first=create(1,"create-slow-room1",3,false);join(1,"slow-host","join-slow-host-0001",first);
+        var second=create(3,"create-fast-room2",3,false);join(3,"fast-host","join-fast-host-0002",second);
+        try(var blocker=DriverManager.getConnection(url);var statement=blocker.prepareStatement("SELECT Ma_Phong FROM Phong_Hop WHERE Ma_Phong_Tham_Gia=? FOR UPDATE")) {
+            blocker.setAutoCommit(false);statement.setString(1,first.joinCode());statement.executeQuery().close();
+            var waiting=java.util.concurrent.CompletableFuture.supplyAsync(() -> {try {return join(2,"slow-guest","join-slow-guest-0001",first);} catch(Exception failure) {throw new java.util.concurrent.CompletionException(failure);}});
+            Thread.sleep(150);assertFalse(waiting.isDone());
+            try {
+                var read=java.util.concurrent.CompletableFuture.supplyAsync(() -> service.getRoom("fast-host",second.roomId()));
+                assertEquals(second.roomId(),read.get(500,TimeUnit.MILLISECONDS).roomId());
+            } finally {blocker.rollback();}
+            assertNotNull(waiting.get(5,TimeUnit.SECONDS));
+        }
+    }
+    @Test void fiftyMemberPolicyIsEnforcedWithoutFiftyDesktopOrMediaClients() throws Exception {
+        for(int user=7;user<=51;user++) {
+            execute("INSERT INTO Nguoi_Dung VALUES("+user+",'Generated','HOAT_DONG')");
+            execute("INSERT INTO Phien_Dang_Nhap VALUES("+user+","+user+",'"+hashFor(user)+"',TIMESTAMP '2026-10-15 06:00:00',NULL)");
+        }
+        var authority=new RoomService(repository,clock,"capacity-fifty",KEY,50,event -> {});owned.add(authority);authority.start();
+        error("INVALID_ROOM",() -> authority.create(principal(1),"capacity-over-fifty",new CreateRoomParams("Over","1234",51,false)));
+        var room=authority.create(principal(1),"capacity-fifty-room",new CreateRoomParams("Capacity","1234",50,false));
+        long start=System.nanoTime();
+        for(int user=1;user<=50;user++) {
+            authority.join(principal(user),"capacity-user-"+user,1,"capacity-join-request-"+user,room.joinCode(),"1234",false,false);
+            if(user==5 || user==10 || user==20 || user==50) System.out.println("ROOM_ADMISSION_LOAD members="+user+", cumulativeMs="+(System.nanoTime()-start)/1e6+", mediaPeerConnections=0");
+        }
+        error("ROOM_FULL",() -> authority.join(principal(51),"capacity-user-51",1,"capacity-join-request-51",room.joinCode(),"1234",false,false));
+        assertEquals(50,authority.participantCount());
+    }
+    @Test void reopeningCannotBypassCapacityPolicyUsingAnOlderDatabaseRow() throws Exception {
+        var room=create(1,"create-capacity-policy",3,false);join(1,"capacity-host","join-capacity-host",room);service.leave("capacity-host","PHONG_DONG");
+        execute("UPDATE Phong_Hop SET So_Nguoi_Toi_Da=51");
+        error("ROOM_CAPACITY_POLICY",() -> service.reopen(principal(1),"reopen-capacity-policy",room.joinCode()));
+        assertEquals("DA_DONG",scalar("SELECT Trang_Thai FROM Phong_Hop"));
     }
     private RoomJoinReply join(int user, String connection, String request, RoomSnapshot room) throws SQLException {
         return service.join(principal(user), connection, 1, request, room.joinCode(), "1234", true, true);

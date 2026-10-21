@@ -27,18 +27,21 @@ public final class MeetingServerMain {
                 MeetingSecrets secrets = MeetingSecrets.load();
                 AtomicReference<SignalingServer> signalingReference = new AtomicReference<>();
                 AtomicReference<server.media.VideoCoordinator> videoReference = new AtomicReference<>();
+                AtomicReference<server.filetransfer.FileTransferServer> filesReference = new AtomicReference<>();
+                AtomicReference<MeetingHandler> handlerReference = new AtomicReference<>();
                 Gson json = new Gson();
-                int maxParticipants = Math.min(50, Math.max(2, ServerConfig.getInt("meeting.maxParticipants", 20)));
-                try (RoomService rooms = new RoomService(new RoomRepository(), Clock.systemUTC(), secrets.instanceId(),
+                int maxParticipants = ServerConfig.getInt("meeting.maxParticipants",20);
+                if(maxParticipants<2 || maxParticipants>50) throw new IllegalArgumentException("MEETING_CAPACITY_LIMIT");
+                RoomRepository roomRepository=new RoomRepository();
+                try (RoomService rooms = new RoomService(roomRepository, Clock.systemUTC(), secrets.instanceId(),
                         secrets.receiptKey(), maxParticipants, event -> {
                             SignalingServer server = signalingReference.get();
                             var video = videoReference.get(); if (video != null) video.roomEvent(event);
+                            var handler=handlerReference.get();if(handler!=null) handler.catalogChanged();
                             if (server != null) server.event(event.recipientConnectionId(), event.type(), event.roomId(),
                                     event.revision(), json.toJsonTree(event.body()).getAsJsonObject());
                         })) {
                     rooms.start(); // Preflight/reconcile only; never creates tables.
-                    var chatRetention = new server.meeting.ChatRetentionService(rooms.connectionProvider(), rooms.clock());
-                    chatRetention.start();
                     var transferConfig = server.filetransfer.TransferConfig.load();
                     if (transferConfig.enabled()) {
                         try (var connection = server.database.DatabaseConnection.getConnection(); var statement = connection.createStatement()) {
@@ -52,20 +55,30 @@ public final class MeetingServerMain {
                     finally { java.util.Arrays.fill(password, '\0'); }
                     try (var media = server.media.VideoServiceProcess.start();
                             var video = new server.media.VideoCoordinator(rooms, media.client());
+                            var meetingHandler=new MeetingHandler(rooms,video);
                             SignalingServer signaling = new SignalingServer(tls,
                             new InetSocketAddress(ServerConfig.get("signaling.bind", "127.0.0.1"), ServerConfig.getInt("signaling.port", 8444)),
-                            new SessionValidator(), new MeetingHandler(rooms, video), rooms.serverEpoch(),
+                            new SessionValidator(), meetingHandler, rooms.serverEpoch(),
                             new SignalingServer.Options(ServerConfig.getInt("signaling.maxConnections", 256),
                                     ServerConfig.getInt("signaling.maxBytes", common.signaling.SignalWire.DEFAULT_MAX_BYTES),
                                     ServerConfig.getInt("signaling.requestsPerSecond", 50),
                                     maxParticipants))) {
                         signalingReference.set(signaling);
                         videoReference.set(video);
+                        handlerReference.set(meetingHandler);
                         AuthService auth = new AuthService(hash -> { signaling.revokeSession(hash); rooms.revokeSession(hash); });
-                        try (AuthServer authServer = new AuthServer(tls,
+                        var authRooms=new server.rooms.RoomService(true);
+                        authRooms.legacyOwner(secrets.instanceId());
+                        try (var files = AuthServer.fileServer(tls, transferConfig,secrets.instanceId());
+                                var contentCleanup=new server.meeting.ImmediateRoomCleanup(rooms.connectionProvider(),secrets.instanceId(),
+                                id -> {if(filesReference.get()!=null) filesReference.get().cleanupRoom(id);},
+                                id -> filesReference.get()!=null && filesReference.get().hasPendingRoom(id),meetingHandler::catalogChanged);
+                                AuthServer authServer = new AuthServer(tls,
                                 new InetSocketAddress(ServerConfig.get("auth.bind", "127.0.0.1"), ServerConfig.getInt("auth.port", 8443)),
-                                new ApplicationService(auth, new server.rooms.RoomService(true))::handle, rooms);
-                                var files = AuthServer.fileServer(tls, transferConfig)) {
+                                new ApplicationService(auth, authRooms)::handle, rooms)) {
+                            filesReference.set(files);roomRepository.setReopenGuard(contentCleanup);authRooms.setReopenGuard(contentCleanup);
+                            meetingHandler.cleanupStatus(contentCleanup::isPending);
+                            rooms.onRoomClosed(contentCleanup::request);authRooms.onChanged(() -> {contentCleanup.request(0);meetingHandler.catalogChanged();});contentCleanup.start();
                             Thread shutdown = new Thread(() -> {
                                 try {
                                     signaling.close();
@@ -74,11 +87,12 @@ public final class MeetingServerMain {
                                     catch (java.io.IOException failure) {
                                         Diagnostics.current().failure("meeting.auth.close_failed", failure, Map.of("phase", "close"));
                                     } finally {
+                                        contentCleanup.close();
                                         try { if (files != null) files.close(); }
                                         catch (java.io.IOException failure) {
                                             Diagnostics.current().failure("meeting.files.close_failed", failure, Map.of("phase", "close"));
                                         } finally {
-                                            try { chatRetention.close(); } catch (Exception ignored) { }
+                                            contentCleanup.close();
                                             rooms.close(); video.close(); media.close(); server.database.DatabaseConnection.close();
                                         }
                                     }

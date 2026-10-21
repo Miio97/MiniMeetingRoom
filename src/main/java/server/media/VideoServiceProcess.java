@@ -43,7 +43,8 @@ public final class VideoServiceProcess implements AutoCloseable {
         String secret = keys.getProperty("control.key", "");
         if (!secret.matches("[A-Za-z0-9_-]{43}")) throw new IllegalStateException("VIDEO_PRIVATE_CONFIG_INVALID");
         int port = ServerConfig.getInt("media.control.port", 8766);
-        int maxParticipants = Math.min(50, Math.max(2, ServerConfig.getInt("meeting.maxParticipants", 20)));
+        int maxParticipants = ServerConfig.getInt("meeting.maxParticipants",20);
+        if(maxParticipants<2 || maxParticipants>50) throw new IllegalArgumentException("MEETING_CAPACITY_LIMIT");
         ProcessBuilder builder = new ProcessBuilder(binary.toString()).directory(root.toFile());
         builder.environment().put("MMR_MEDIA_CONTROL_SECRET", secret);
         builder.environment().put("MMR_MEDIA_CONTROL_PORT", Integer.toString(port));

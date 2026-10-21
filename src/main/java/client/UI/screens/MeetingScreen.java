@@ -40,7 +40,7 @@ public final class MeetingScreen extends BorderPane {
     private final List<VideoTile> tiles = new ArrayList<>();
     private final StackPane canvas = new StackPane();
     private final StackPane videoContent = new StackPane();
-    private static final int PAGE_SIZE = 12;
+    private static final int PAGE_SIZE = 6;
     private int page;
     private final VBox panel = new VBox();
     private final TabPane tabs = new TabPane();
@@ -278,9 +278,14 @@ public final class MeetingScreen extends BorderPane {
     private void renderVideos() {
         if(screenImage!=null) {screenImage.imageProperty().unbind();screenImage=null;}
         tiles.forEach(VideoTile::dispose); tiles.clear(); videoContent.getChildren().clear(); participantCount.setText(people.size() + "/" + manager.room().capacity() + " người");
-        int pages = Math.max(1, (people.size() + PAGE_SIZE - 1) / PAGE_SIZE);
+        if (pinnedIndex >= people.size()) pinnedIndex = -1;
+        String screenOwner=displayedRoom!=null ? displayedRoom.participants().stream().filter(p -> p.mediaState().sharePublishing()).map(common.meeting.ParticipantView::participantId).findFirst().orElse(null) : null;
+        var viewport=videoRoom?client.media.VideoViewport.page(people.size(),pinnedIndex,screenOwner!=null,page):null;
+        int pageSize=videoRoom?(screenOwner!=null || pinnedIndex>=0?5:PAGE_SIZE):12;
+        int pages = videoRoom?viewport.pages():Math.max(1, (people.size() + pageSize - 1) / pageSize);
         page = Math.max(0, Math.min(page, pages - 1));
-        int start = page * PAGE_SIZE, end = Math.min(start + PAGE_SIZE, people.size());
+        int start = page * pageSize, end = Math.min(start + pageSize, people.size());
+        var visibleIndices=videoRoom?viewport.cameras():java.util.stream.IntStream.range(start,end).boxed().toList();
         BorderPane frame = new BorderPane(videoContent);
         if (pages > 1) {
             Button previous = Ui.button("← Trước", "small-button", () -> { page--; renderVideos(); }); previous.setDisable(page == 0);
@@ -288,11 +293,17 @@ public final class MeetingScreen extends BorderPane {
             HBox pager = Ui.row(12, previous, Ui.label("Trang " + (page + 1) + "/" + pages + " · Người " + (start + 1) + "–" + end, "caption"), next); pager.setAlignment(Pos.CENTER); pager.setPadding(new Insets(12, 0, 0, 0)); frame.setBottom(pager);
         }
         canvas.getChildren().setAll(frame);
-        if (pinnedIndex >= people.size()) pinnedIndex = -1;
-        String screenOwner=displayedRoom!=null ? displayedRoom.participants().stream().filter(p -> p.mediaState().sharePublishing()).map(common.meeting.ParticipantView::participantId).findFirst().orElse(null) : null;
+        int focusIndex=videoRoom?viewport.primary():pinnedIndex>=0?pinnedIndex:start;
+        if(videoRoom && displayedRoom!=null) {
+            var ordered=displayedRoom.participants().stream().sorted(java.util.Comparator.comparingInt(p -> p.participantId().equals(mediaSelf)?0:1)).toList();
+            var visible=new java.util.LinkedHashSet<String>();
+            if(screenOwner==null && focusIndex>=0 && focusIndex<ordered.size()) visible.add(ordered.get(focusIndex).participantId());
+            for(int i:visibleIndices) if(i<ordered.size()) visible.add(ordered.get(i).participantId());
+            mediaController.visibleParticipants(visible);
+        }
         if(videoRoom && screenOwner!=null) {
             VBox thumbnails=new VBox(10);thumbnails.setPrefWidth(164);thumbnails.setMinWidth(130);
-            for(int i=start;i<end;i++) {VideoTile tile=tile(i);tile.setPrefHeight(108);tile.setMinHeight(108);tile.setMaxHeight(108);thumbnails.getChildren().add(tile);}
+            for(int i:visibleIndices) {VideoTile tile=tile(i);tile.setPrefHeight(108);tile.setMinHeight(108);tile.setMaxHeight(108);thumbnails.getChildren().add(tile);}
             ScrollPane strip=Ui.scroll(thumbnails);strip.setPrefWidth(180);strip.setMinWidth(145);
             boolean own=screenOwner.equals(mediaSelf);
             String ownerName=displayedRoom.participants().stream().filter(p -> p.participantId().equals(screenOwner)).map(common.meeting.ParticipantView::displayName).findFirst().orElse("");
@@ -315,15 +326,16 @@ public final class MeetingScreen extends BorderPane {
             slide.setAlignment(Pos.CENTER_LEFT); slide.getStyleClass().add("shared-slide");
             VBox large = Ui.column(14, Ui.row(8, IconButton.icon("share"), Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text")), slide); VBox.setVgrow(slide, Priority.ALWAYS); HBox.setHgrow(large, Priority.ALWAYS); large.setMinWidth(0);
             HBox layout = new HBox(14, large, strip); videoContent.getChildren().add(layout);
-        } else if (pinnedIndex >= 0) {
-            VideoTile focused = tile(pinnedIndex);
+        } else if (pinnedIndex >= 0 || videoRoom && !people.isEmpty()) {
+            VideoTile focused = tile(focusIndex);
             BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused)); VBox.setVgrow(focus, Priority.ALWAYS);
             Button back = Ui.button("Trở về lưới", "secondary", () -> { pinnedIndex = -1; renderVideos(); });
-            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label("Đã ghim · " + people.get(pinnedIndex).name(), "strong"), Ui.spacer(), back), focus);
+            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label((pinnedIndex>=0?"Đã ghim · ":"") + people.get(focusIndex).name(), "strong"), Ui.spacer(), back), focus);
             main.setMinWidth(0); HBox.setHgrow(main, Priority.ALWAYS);
             if (people.size() > 1) {
                 VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164);
-                for (int i = start; i < end; i++) if (i != pinnedIndex) {
+                int shown=0;
+                for (int i:visibleIndices) if (i != focusIndex && shown++<5) {
                     VideoTile thumbnail = tile(i); thumbnail.setPrefHeight(108); thumbnail.setMinHeight(108); thumbnail.setMaxHeight(108); thumbnails.getChildren().add(thumbnail);
                 }
                 ScrollPane strip = Ui.scroll(thumbnails); strip.setPrefWidth(180); strip.setMinWidth(180); strip.setMaxWidth(180);

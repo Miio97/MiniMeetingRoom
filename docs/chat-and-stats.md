@@ -1,7 +1,7 @@
 # Tài liệu Kỹ thuật: Chat Realtime, Thống kê Kết nối và Mở rộng Sức chứa Phòng
 
 Tài liệu này ghi lại kiến trúc, các quyết định kỹ thuật và cấu hình cho 3 tính năng mới:
-1. Chat realtime qua kênh signaling và chính sách tự hủy vĩnh viễn 20 phút.
+1. Chat realtime qua kênh signaling và dọn nội dung ngay sau khi đóng phòng.
 2. Thống kê media RAM-only và AUTO video trên client; bảng thống kê cũ được xóa bằng migration 004.
 3. Tăng giới hạn số lượng người tham gia phòng họp lên 20 người (trần cứng 50).
 
@@ -21,24 +21,19 @@ Tài liệu này ghi lại kiến trúc, các quyết định kỹ thuật và c
   - Phía client (`MeetingSession.event()`), sự kiện `CHAT_MESSAGE` được chặn và xử lý trước khi kiểm tra snapshot revision, không làm tăng `room.revision` và không kích hoạt `GET_ROOM` thừa.
 - **Executor & Rate Limiting**:
   - Ghi database cho tin nhắn chat chạy trên executor riêng có giới hạn (2 thread, hàng đợi tối đa 256).
-  - Handler chờ tối đa 5 giây; nếu hàng đợi đầy trả về `CHAT_BUSY`.
+  - Handler trả CompletionStage, giải phóng worker signaling trong lúc chờ chat; hàng đợi đầy trả `CHAT_BUSY`. Hai stripe giữ thứ tự ghi trong cùng phòng.
   - Rate-limit: tối đa 5 tin/giây, burst 10 tin/kết nối.
 
-### 1.2. Chính sách Xóa vĩnh viễn (Chat Retention)
-- **Service**: `server.meeting.ChatRetentionService`. Khởi chạy khi server start và lặp lại định kỳ mỗi 30–60 giây.
-- **Quy tắc**:
-  - Quét theo batch $\le 500$ dòng `Tin_Nhan` có `Loai_Tin_Nhan IN ('VAN_BAN', 'HE_THONG')` thuộc các phòng có `Trang_Thai = 'DA_DONG'` và `Ngay_Dong <= NOW() - 20 phút`.
-  - Thực hiện `DELETE` cứng (hard delete) theo ID, không dùng soft-delete (`Ngay_Xoa`) để đảm bảo tin nhắn không thể khôi phục.
-  - Cấu hình: `chat.retention-minutes=20` (hỗ trợ cấu hình 1–1440 phút).
-- **Quyết định kỹ thuật quan trọng - KHÔNG xóa tin loại TEP**:
-  - Bảng `Tep_Dinh_Kem` có khóa ngoại cascade tới `Tin_Nhan`. Việc xóa cứng dòng `Tin_Nhan` loại `TEP` sẽ xóa dòng đính kèm trong DB nhưng để lại file mồ côi (orphan file) trên đĩa lưu trữ.
-  - Do đó, các dòng tin nhắn loại `TEP` được bảo lưu và tiếp tục do `FileRetentionService` cùng chính sách `file.transfer.retention-days` quản lý toàn vẹn cả file trên đĩa và bản ghi DB.
+### 1.2. Dọn nội dung khi đóng phòng
+`ImmediateRoomCleanup` thay thế lịch chờ 20 phút. Khi phòng đã đóng thực sự, server dọn upload/tệp vật lý/metadata trước, sau đó xóa tin nhắn theo lô 500 dòng. Cả hai đường mở lại phòng dùng `RoomReopenGuard`; chỉ mở lại khi không còn dữ liệu hoặc upload chờ dọn. Dọn lỗi giữ khóa nghiệp vụ mở lại và thử lại với backoff. Lịch sử phòng/tham gia được giữ.
+
+`ChatRetentionService` cũ còn lại để tương thích kiểm thử cũ, không được khởi chạy bởi entry point ứng dụng. Các khóa retention cũ không điều khiển chính sách dọn phòng mới. Chi tiết: [runtime-performance-cleanup.md](runtime-performance-cleanup.md).
 
 ---
 
 ## 2. Thống kê media sau migration
 
-Client lấy getStats cục bộ mỗi 500 ms, buffer 40 mẫu trong RAM, phân tích và cập nhật UI khoảng 1 giây. Không gửi NETWORK_STATS định kỳ, không ghi/đọc bảng thống kê để chỉnh video. Server bỏ writer/retention và chỉ ACK-bỏ-qua telemetry của client cũ. Dữ liệu chat và retention chat 20 phút giữ nguyên.
+Client lấy getStats cục bộ mỗi 500 ms, buffer 40 mẫu trong RAM, phân tích và cập nhật UI khoảng 1 giây. Không gửi NETWORK_STATS định kỳ, không ghi/đọc bảng thống kê để chỉnh video. Server bỏ writer/retention và chỉ ACK-bỏ-qua telemetry của client cũ. Chat dùng chính sách dọn ngay khi đóng phòng như mục 1.2.
 
 Theo xác nhận ngày 18/10/2026, xóa bảng Thong_Ke_Ket_Noi cùng lịch sử bằng migration 004 chạy thủ công trên Railway sau khi cập nhật server. Chỉ AUTO tối đa 720p/30 FPS, không có MANUAL hay 45/60 FPS. Chi tiết và hướng dẫn backup/rollback: [client-stats-migration.md](client-stats-migration.md).
 

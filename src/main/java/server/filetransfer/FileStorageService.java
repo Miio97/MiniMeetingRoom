@@ -119,6 +119,9 @@ public final class FileStorageService implements TransferStorage {
 
     public Session begin(UUID id, long userId, long roomId, String originalName,
             String mimeType, long size, String checksum) throws IOException {
+        return begin(id,userId,roomId,originalName,mimeType,size,checksum,"");
+    }
+    @Override public Session begin(UUID id,long userId,long roomId,String originalName,String mimeType,long size,String checksum,String generation) throws IOException {
         validate(id, userId, roomId, originalName, mimeType, size, checksum);
         checksum = checksum.toLowerCase(Locale.ROOT);
         accounting.lock();
@@ -127,7 +130,7 @@ public final class FileStorageService implements TransferStorage {
             Session existing = sessions.get(id);
             if (existing != null) {
                 authorize(existing, userId);
-                if (existing.roomId != roomId || existing.size != size
+                if (!existing.membershipGeneration.equals(generation) || existing.roomId != roomId || existing.size != size
                         || !existing.originalName.equals(originalName)
                         || !existing.mimeType.equals(mimeType) || !existing.checksum.equals(checksum)) {
                     throw error("TRANSFER_CONFLICT", "Transfer metadata cannot change when resuming.");
@@ -150,6 +153,7 @@ public final class FileStorageService implements TransferStorage {
             requirePhysicalCapacity(size);
             Session session = new Session(id, userId, roomId, originalName, mimeType, size,
                     checksum, System.currentTimeMillis(), temporary.resolve(id + ".part"));
+            session.membershipGeneration=generation;
             if (Files.exists(finalPath(session), LinkOption.NOFOLLOW_LINKS)) {
                 throw error("TRANSFER_CONFLICT", "This transfer already has a stored object.");
             }
@@ -337,6 +341,19 @@ public final class FileStorageService implements TransferStorage {
     }
 
     /** Admin/room-retention hook: caller holds the closed room's DB lock. */
+    @Override public java.util.List<String> roomObjects(long roomId,int limit) throws IOException {
+        if(roomId<1 || limit<1 || limit>100) throw new IllegalArgumentException("ROOM_SCAN_LIMIT");
+        Path directory=checked(root.resolve("rooms/"+roomId+"/files"));
+        if(!Files.exists(directory,LinkOption.NOFOLLOW_LINKS)) return java.util.List.of();
+        var keys=new java.util.ArrayList<String>();
+        try(var objects=Files.newDirectoryStream(directory,"*.bin")) {
+            for(Path object:objects) {
+                String key="rooms/"+roomId+"/files/"+object.getFileName();
+                if(STORAGE_KEY.matcher(key).matches()) {checked(object);if(!Files.isRegularFile(object,LinkOption.NOFOLLOW_LINKS)) throw new IOException("UNSAFE_ROOM_OBJECT");keys.add(key);if(keys.size()==limit) break;}
+            }
+        }
+        return java.util.List.copyOf(keys);
+    }
     public void deleteStoredFile(String storageKey) throws IOException {
         Path path = resolve(storageKey);
         accounting.lock();
@@ -454,6 +471,7 @@ public final class FileStorageService implements TransferStorage {
                             metadata.getProperty("mimeType"), Long.parseLong(metadata.getProperty("size")),
                             metadata.getProperty("checksum"), Long.parseLong(metadata.getProperty("createdAtMillis")),
                             temporary.resolve(id + ".part"));
+                    session.membershipGeneration=metadata.getProperty("membershipGeneration","");
                     validate(id, session.userId, session.roomId, session.originalName,
                             session.mimeType, session.size, session.checksum);
                     Path promoted = checked(finalPath(session));
@@ -559,6 +577,7 @@ public final class FileStorageService implements TransferStorage {
         metadata.setProperty("id", session.id.toString());
         metadata.setProperty("userId", Long.toString(session.userId));
         metadata.setProperty("roomId", Long.toString(session.roomId));
+        metadata.setProperty("membershipGeneration",session.membershipGeneration);
         metadata.setProperty("originalName", session.originalName);
         metadata.setProperty("mimeType", session.mimeType);
         metadata.setProperty("size", Long.toString(session.size));
@@ -650,6 +669,8 @@ public final class FileStorageService implements TransferStorage {
     }
 
     public static final class Session implements UploadSession {
+        private String membershipGeneration="";
+        public String membershipGeneration() {return membershipGeneration;}
         private final UUID id;
         private final long userId;
         private final long roomId;

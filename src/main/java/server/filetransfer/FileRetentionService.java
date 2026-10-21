@@ -13,6 +13,27 @@ public final class FileRetentionService {
     public FileRetentionService(FileMetadataRepository repository, TransferStorage storage) {
         this.repository = repository; this.storage = storage;
     }
+    public boolean pending(long roomId) throws IOException {
+        return storage.pendingSessions().stream().anyMatch(session -> session.roomId()==roomId) || !storage.roomObjects(roomId,1).isEmpty();
+    }
+    /** One bounded pass. Errors preserve metadata; the coordinator retries before allowing reopen. */
+    public void sweepRoom(long roomId) throws SQLException,IOException {
+        Instant cutoff=Instant.now();
+        for(var session:storage.pendingSessions()) {
+            if(session.roomId()!=roomId) continue;
+            if(!session.lock().tryLock()) throw new IOException("UPLOAD_STILL_ACTIVE");
+            try {
+                repository.inExpiredRoom(roomId,cutoff,connection -> {
+                    if(repository.findByTransfer(session.id())!=null) storage.completed(session);
+                    else storage.discardExpiredRoomUpload(session);
+                });
+            } finally {session.lock().unlock();}
+        }
+        for(var file:repository.closedRoomFiles(roomId))
+            repository.retireFile(file,cutoff,connection -> storage.deleteStoredFile(file.storageKey()));
+        for(String key:storage.roomObjects(roomId,100))
+            repository.retireOrphan(roomId,key,cutoff,connection -> storage.deleteStoredFile(key));
+    }
     public void sweep(Instant closedBefore) throws SQLException {
         // Match the upload worker's lock order: session, then room. Never wait for a live upload.
         try {

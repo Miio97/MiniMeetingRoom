@@ -16,6 +16,8 @@ import server.database.DatabaseConnection;
 /** Duc: authenticated membership and host commands; live participants are never generated. */
 public final class LegacyRoomService implements AutoCloseable {
     private final ConnectionProvider connections;
+    private String legacyOwner;
+    void legacyOwner(String instance) {legacyOwner=instance;}
     private final Clock clock;
     private final PasswordHasher pins = new PasswordHasher();
     private final Map<Long, Room> rooms = new LinkedHashMap<>();
@@ -74,6 +76,7 @@ public final class LegacyRoomService implements AutoCloseable {
             try (ResultSet keys = sql.getGeneratedKeys()) { if (!keys.next()) throw new SQLException("Missing room ID"); room.id = keys.getLong(1); }
         }
         admit(connection, room, new Member(user, UUID.randomUUID().toString(), now()));
+        if(legacyOwner!=null) RoomRepository.markLegacyOwnership(connection,room.id,legacyOwner,clock.instant());
         rooms.put(room.id, room); return view(room, user.id(), false);
     }
     private RoomResponse join(Connection connection, RoomRequest request, User user) throws SQLException {
@@ -196,7 +199,11 @@ public final class LegacyRoomService implements AutoCloseable {
             if (code == null) sql.setLong(1, id); else sql.setString(1, code);
             try (ResultSet result = sql.executeQuery()) {
                 if (!result.next()) return null;
-                Room room = new Room(); room.id = result.getLong(1); room.name = result.getString(2); room.code = result.getString(3); room.pin = result.getString(4); room.host = result.getLong(5); room.locked = result.getBoolean(6); room.capacity = result.getInt(7); room.closed = "DA_DONG".equals(result.getString(8)); rooms.put(room.id, room); return room;
+                Room room = new Room(); room.id = result.getLong(1); room.name = result.getString(2); room.code = result.getString(3); room.pin = result.getString(4); room.host = result.getLong(5); room.locked = result.getBoolean(6); room.capacity = result.getInt(7); room.closed = "DA_DONG".equals(result.getString(8));
+                if(legacyOwner!=null) try(var owner=connection.prepareStatement("SELECT Instance_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
+                    owner.setLong(1,room.id);try(var rows=owner.executeQuery()) {if(rows.next() && !legacyOwner.equals(rows.getString(1))) return null;}
+                }
+                rooms.put(room.id, room); return room;
             }
         }
     }

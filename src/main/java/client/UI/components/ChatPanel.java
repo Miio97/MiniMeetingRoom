@@ -25,6 +25,10 @@ public final class ChatPanel extends BorderPane {
     private static final int MAX_MESSAGES = 500;
     private final VBox messages = new VBox(18);
     private final ScrollPane scroll = Ui.scroll(messages);
+    private record ChatRow(String nonce,ChatMessage message,String state) { }
+    private final javafx.collections.ObservableList<ChatRow> rows=javafx.collections.FXCollections.observableArrayList();
+    private final ListView<ChatRow> virtualMessages=new ListView<>(rows);
+    private final java.util.Map<String,ChatRow> pending=new java.util.LinkedHashMap<>();
     private final TextField input = new TextField();
     private final IconButton send = new IconButton("send", "Gửi tin nhắn");
     private final Label status = Ui.label("", "error-text");
@@ -49,7 +53,23 @@ public final class ChatPanel extends BorderPane {
 
         messages.setId("chat-messages");
         messages.setPadding(new Insets(16));
-        setCenter(scroll);
+        if(isVideo) {
+            virtualMessages.setId("chat-messages");
+            virtualMessages.setCellFactory(list -> new ListCell<>() {
+                @Override protected void updateItem(ChatRow row,boolean empty) {
+                    super.updateItem(row,empty);setText(null);setGraphic(null);
+                    if(!empty && row!=null) {
+                        VBox content=entry(row.message());
+                        if(!row.state().isEmpty()) {
+                            content.getChildren().add(Ui.label(row.state(),"caption"));
+                            if(!row.state().equals("Đang gửi…") && !row.state().startsWith("Không thể thử lại")) content.getChildren().add(Ui.button("Thử lại","small-button",() -> sendPending(row)));
+                        }
+                        setGraphic(content);
+                    }
+                }
+            });
+            setCenter(virtualMessages);
+        } else setCenter(scroll);
 
         input.setId("chat-input");
         input.setPromptText("Viết tin nhắn...");
@@ -62,9 +82,8 @@ public final class ChatPanel extends BorderPane {
         status.managedProperty().bind(status.textProperty().isNotEmpty());
         status.visibleProperty().bind(status.managedProperty());
 
-        Label notice = Ui.label(
-                isVideo ? "Tin nhắn bị xóa vĩnh viễn 20 phút sau khi phòng đóng" : "Bản xem trước (demo)",
-                "caption");
+        Label notice = Ui.label(isVideo ? "" : "Bản xem trước (demo)","caption");
+        notice.setManaged(!isVideo);notice.setVisible(!isVideo);
         notice.setStyle("-fx-font-style: italic; -fx-text-fill: -text-muted;");
         notice.setWrapText(true);
 
@@ -78,11 +97,16 @@ public final class ChatPanel extends BorderPane {
                 @Override public void onChatMessage(ChatMessage message) {
                     Platform.runLater(() -> append(List.of(message), message.userId() == userId));
                 }
+                @Override public void onChatMessage(ChatMessage message,String nonce) {
+                    Platform.runLater(() -> appendVideo(message,nonce,message.userId()==userId));
+                }
                 @Override public void onChatCleared() {
                     Platform.runLater(ChatPanel.this::clear);
                 }
+                @Override public void onChatResync() {Platform.runLater(ChatPanel.this::resyncChat);}
             };
             session.addChatListener(chatListener);
+            input.setText(session.chatDraft());input.textProperty().addListener((observable,before,after) -> session.chatDraft(after));
             loadRealHistory();
         } else {
             chatListener = null;
@@ -96,12 +120,40 @@ public final class ChatPanel extends BorderPane {
         session.chatHistory(null, 50).thenAccept(batch -> Platform.runLater(() -> {
             if (disposed) return;
             append(batch, false);
+            installHistoryPaging();
         })).exceptionally(error -> {
             Platform.runLater(() -> {
                 if (!disposed) status.setText(SceneManager.connectionError(error));
             });
             return null;
         });
+    }
+    private void resyncChat() {
+        if(disposed || session==null) return;
+        loadRealHistory();if(pending.isEmpty()) return;
+        session.acknowledgedChats(List.copyOf(pending.keySet())).thenAccept(saved -> Platform.runLater(() -> {
+            if(disposed) return;
+            for(var ack:saved) {var row=pending.get(ack.clientMessageId());if(row!=null) appendVideo(new ChatMessage(ack.id(),roomId,userId,"Bạn",row.message().text(),ack.sentAt()),ack.clientMessageId(),false);}
+        }));
+    }
+    private boolean loadingOlder,historyExhausted;
+    private void installHistoryPaging() {
+        if(getTop()!=null) return;
+        var older=Ui.button("Tin nhắn trước","small-button",() -> {
+            if(loadingOlder || historyExhausted) return;
+            Long before=rows.stream().map(row -> row.message().id()).filter(id -> id>0).min(Long::compareTo).orElse(null);
+            if(before==null) return;
+            loadingOlder=true;
+            var anchor=rows.isEmpty()?null:rows.get(0);
+            session.chatHistory(before,50).whenComplete((batch,failure) -> Platform.runLater(() -> {
+                loadingOlder=false;if(disposed) return;
+                if(failure!=null) {status.setText(SceneManager.connectionError(failure));return;}
+                historyExhausted=batch.size()<50;
+                append(batch,false);
+                if(anchor!=null) virtualMessages.scrollTo(anchor);
+            }));
+        });
+        setTop(older);
     }
 
     private void connect() {
@@ -126,6 +178,13 @@ public final class ChatPanel extends BorderPane {
     }
 
     private void submit() {
+        if(session!=null) {
+            if(disposed || input.getText().isBlank() || pending.size()>=8) return;
+            String content=input.getText().strip();
+            if(content.length()>2000) {status.setText("Tin nhắn tối đa 2000 ký tự.");return;}
+            var row=new ChatRow(java.util.UUID.randomUUID().toString(),new ChatMessage(0,roomId,userId,"Bạn",content,Instant.now().toString()),"Đang gửi…");
+            rows.add(row);pending.put(row.nonce(),row);input.clear();trimRows();virtualMessages.scrollTo(rows.size()-1);sendPending(row);return;
+        }
         if (disposed || sending || input.getText().isBlank()) return;
         if (!manager.hasVideoRoom() && !connected) return;
         String draft = input.getText();
@@ -189,13 +248,49 @@ public final class ChatPanel extends BorderPane {
         messages.setDisable(sending);
         send.setDisable(sending || (!manager.hasVideoRoom() && !connected));
     }
+    private void sendPending(ChatRow row) {
+        if(disposed || session==null || !pending.containsKey(row.nonce())) return;
+        var sendingRow=new ChatRow(row.nonce(),row.message(),"Đang gửi…");replaceRow(row.nonce(),sendingRow);pending.put(row.nonce(),sendingRow);
+        session.sendChat(row.message().text(),row.nonce()).whenComplete((ack,failure) -> Platform.runLater(() -> {
+            if(disposed) return;
+            if(failure==null) appendVideo(new ChatMessage(ack.id(),roomId,userId,"Bạn",row.message().text(),ack.sentAt()),row.nonce(),true);
+            else {
+                if(!pending.containsKey(row.nonce())) return; // A push may already have confirmed this write.
+                var cause=failure;while((cause instanceof CompletionException || cause instanceof ExecutionException) && cause.getCause()!=null) cause=cause.getCause();
+                boolean unsafe=cause instanceof SignalException error && error.code().equals("CHAT_RETRY_UNSAFE");
+                String text=unsafe?"Không thể thử lại an toàn; hãy kiểm tra lịch sử.":cause instanceof SignalException error && java.util.Set.of("CHAT_BUSY","RATE_LIMIT","INVALID_REQUEST","DATABASE_UNAVAILABLE").contains(error.code())?"Chưa gửi được":"Chưa xác nhận gửi thành công";
+                var failed=new ChatRow(row.nonce(),row.message(),text);replaceRow(row.nonce(),failed);pending.put(row.nonce(),failed);
+                status.setText(SceneManager.connectionError(cause));
+            }
+        }));
+    }
+    private void replaceRow(String nonce,ChatRow replacement) {for(int i=0;i<rows.size();i++) if(java.util.Objects.equals(nonce,rows.get(i).nonce())) {rows.set(i,replacement);return;}}
+    private boolean atBottom() {
+        return virtualMessages.lookupAll(".scroll-bar").stream().filter(ScrollBar.class::isInstance).map(ScrollBar.class::cast)
+                .filter(bar -> bar.getOrientation()==javafx.geometry.Orientation.VERTICAL).allMatch(bar -> bar.getValue()>=bar.getMax()-.01);
+    }
+    private void trimRows() {while(rows.size()>MAX_MESSAGES) {var removed=rows.remove(0);received.remove(removed.message().id());if(removed.nonce()!=null) pending.remove(removed.nonce());}}
+    private void appendVideo(ChatMessage message,String nonce,boolean ownSend) {
+        if(disposed) return;
+        boolean bottom=ownSend || atBottom();
+        if(message.userId()==userId && nonce!=null && pending.remove(nonce)!=null) {
+            rows.removeIf(row -> row.message().id()==message.id());
+            replaceRow(nonce,new ChatRow(nonce,message,""));received.put(message.id(),message);
+        } else if(received.putIfAbsent(message.id(),message)==null) {
+            int index=0;while(index<rows.size() && rows.get(index).message().id()>0 && rows.get(index).message().id()<message.id()) index++;
+            rows.add(index,new ChatRow(nonce,message,""));
+        }
+        trimRows();if(bottom) virtualMessages.scrollTo(rows.size()-1);
+    }
 
     private void clear() {
         received.clear();
+        rows.clear();pending.clear();if(session!=null) session.chatDraft("");
         messages.getChildren().clear();
     }
 
     private void append(List<ChatMessage> batch, boolean ownSend) {
+        if(session!=null) {for(var message:batch) appendVideo(message,null,ownSend);return;}
         if (batch.isEmpty()) return;
         boolean bottom = ownSend || received.isEmpty() || scroll.getVvalue() >= .98;
         boolean changed = false;

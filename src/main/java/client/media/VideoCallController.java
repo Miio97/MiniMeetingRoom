@@ -15,7 +15,7 @@ import javafx.beans.property.*;
 /** Bounded media owner and coalesced poll; camera metadata/preferences never queue ahead of receive work. */
 public final class VideoCallController implements AutoCloseable {
     @FunctionalInterface public interface Signaling { CompletableFuture<JsonObject> request(String type, JsonObject body, String requestId); }
-    private record Subscription(String publication, NativeVideoSession.Peer peer) { }
+    private record Subscription(String publication,String transport,NativeVideoSession.Peer peer) { }
     private final Signaling signaling;
     private final AudioCallController audio;
     private final ScreenCallController screen;
@@ -34,6 +34,14 @@ public final class VideoCallController implements AutoCloseable {
     private final Set<CompletableFuture<?>> jobs = ConcurrentHashMap.newKeySet();
     private final Map<String, VideoFrameMailbox> frames = new ConcurrentHashMap<>();
     private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
+    private volatile java.util.Set<String> viewport;
+    private final AtomicBoolean viewportQueued=new AtomicBoolean();
+    public void visibleParticipants(java.util.Collection<String> participants) {
+        var selected=new java.util.LinkedHashSet<String>();
+        for(String id:participants) {if(selected.size()==6) break;if(id!=null) selected.add(id);}
+        viewport=java.util.Set.copyOf(selected);
+        if(viewportQueued.compareAndSet(false,true)) submit(() -> {synchronize();return null;}).whenComplete((v,e) -> viewportQueued.set(false));
+    }
     private final NetworkStatsConfig statsConfig=NetworkStatsConfig.load();
     private final NetworkStatsBuffer statsBuffer=new NetworkStatsBuffer(statsConfig.capacity());
     private final NetworkQualityAnalyzer analyzer=new NetworkQualityAnalyzer();
@@ -280,31 +288,40 @@ public final class VideoCallController implements AutoCloseable {
             show("Kết nối video gián đoạn. Camera đã tắt; hãy bật lại bằng tay khi server sẵn sàng."); throw failure;
         }
         if (appliedQuality == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {
-            subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear();
+            var stopped=new ArrayList<>(subscriptions.values());subscriptions.clear();unsubscribe(stopped);
             return;
         }
+        var stopped=new ArrayList<Subscription>();
         for (String target : new ArrayList<>(subscriptions.keySet())) {
             Subscription subscription = subscriptions.get(target);
-            if (!sources.has(target) || !sources.get(target).getAsString().equals(subscription.publication()) || subscription.peer().failed()) {
-                subscription.peer().close(); subscriptions.remove(target);
+            if (!sources.has(target) || viewport!=null && !viewport.contains(target) || !sources.get(target).getAsString().equals(subscription.publication()) || subscription.peer().failed()) {
+                subscription.peer().close(); subscriptions.remove(target);stopped.add(subscription);
             }
         }
+        unsubscribe(stopped);
         for (var source : sources.entrySet()) {
             if (closed.get()) return;
             String target = source.getKey(), publication = source.getValue().getAsString();
+            if(viewport!=null && !viewport.contains(target)) continue;
             if (target.equals(own) || subscriptions.containsKey(target) || current.participants().stream().noneMatch(p -> p.participantId().equals(target))) continue;
             if (nativeSession == null) nativeSession = new NativeVideoSession();
             NativeVideoSession.Peer peer = nativeSession.subscriber(frames(target));
             try {
                 JsonObject body = new JsonObject(); body.addProperty("source", target); body.addProperty("publication", publication); body.addProperty("sdp", peer.offer());
                 JsonObject answer = command("VIDEO_SUBSCRIBE", body); peer.answer(answer.get("sdp").getAsString());
-                subscriptions.put(target, new Subscription(publication, peer));
+                subscriptions.put(target, new Subscription(publication,answer.get("transport").getAsString(),peer));
             } catch (Exception failure) { peer.close(); mediaFailure("subscribe", failure); show("Không nhận được một video: " + CameraErrors.message(failure)); }
         }
         for (String participant : new ArrayList<>(frames.keySet())) if (current.participants().stream().noneMatch(p -> p.participantId().equals(participant))) {
             VideoFrameMailbox old = frames.remove(participant); if (old != null) old.close();
         }
         if (preview == null && (activeCamera || !subscriptions.isEmpty())) show("Video qua WebRTC/SFU • " + subscriptions.size() + " luồng camera nhận.");
+    }
+    private void unsubscribe(java.util.List<Subscription> subscriptions) throws Exception {
+        if(subscriptions.isEmpty()) return;
+        var ids=new com.google.gson.JsonArray();
+        for(var subscription:subscriptions) {subscription.peer().close();ids.add(subscription.transport());}
+        var body=new JsonObject();body.add("transports",ids);command("VIDEO_UNSUBSCRIBE",body);
     }
     // A room event may lag the VIDEO_PUBLISH reply. A confirmed host stop still applies immediately.
     static boolean shouldStopPublication(boolean requested, boolean confirmed, long elapsedNanos) {

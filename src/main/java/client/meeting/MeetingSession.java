@@ -12,6 +12,7 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import java.time.Instant;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -53,7 +54,7 @@ public final class MeetingSession implements AutoCloseable {
     private volatile String self;
     private volatile client.media.VideoCallController video;
     public CompletableFuture<JsonObject> videoRequest(String type, JsonObject body, String requestId) {
-        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
+        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
                 "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP",
                 "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STATE", "SCREEN_STOP").contains(type))
             return CompletableFuture.failedFuture(new SignalException("INVALID_REQUEST"));
@@ -82,12 +83,68 @@ public final class MeetingSession implements AutoCloseable {
     }
     public interface ChatListener {
         void onChatMessage(common.chat.ChatMessage message);
+        default void onChatMessage(common.chat.ChatMessage message,String clientMessageId) {onChatMessage(message);}
         default void onChatCleared() { }
+        default void onChatResync() { }
     }
     private final List<ChatListener> chatListeners = new CopyOnWriteArrayList<>();
+    public record CatalogUpdate(boolean snapshot,long revision,java.util.List<common.room.RoomInfo> rooms,java.util.Set<Long> removed,java.util.Set<Long> cleaning,java.util.Set<Long> evicted) { }
+    public final class CatalogWatch implements AutoCloseable {
+        private final java.util.function.Consumer<CatalogUpdate> listener;
+        private volatile java.util.Set<Long> focus;
+        private CatalogWatch(java.util.function.Consumer<CatalogUpdate> listener,java.util.Collection<Long> ids) {this.listener=listener;focus=boundedFocus(ids);}
+        public void rooms(java.util.Collection<Long> ids) {var next=boundedFocus(ids);if(!next.equals(focus)) {focus=next;refreshCatalogFocus();}}
+        @Override public void close() {catalogListeners.remove(this);if(catalogListeners.isEmpty()) {var transport=client;if(transport!=null) transport.request("ROOM_CATALOG_UNWATCH",null,new JsonObject());}else refreshCatalogFocus();}
+    }
+    private static java.util.Set<Long> boundedFocus(java.util.Collection<Long> ids) {return ids.stream().filter(id -> id!=null && id>0).limit(100).collect(java.util.stream.Collectors.toUnmodifiableSet());}
+    private final List<CatalogWatch> catalogListeners=new CopyOnWriteArrayList<>();
+    private final AtomicBoolean catalogFocusQueued=new AtomicBoolean();
+    private java.util.Set<Long> catalogFocus() {return catalogListeners.stream().flatMap(watch -> watch.focus.stream()).distinct().limit(100).collect(java.util.stream.Collectors.toUnmodifiableSet());}
+    private void refreshCatalogFocus() {
+        if(closed.get() || catalogListeners.isEmpty() || !catalogFocusQueued.compareAndSet(false,true)) return;
+        var before=catalogFocus();refreshCatalog().whenComplete((v,e) -> {catalogFocusQueued.set(false);if(!before.equals(catalogFocus())) refreshCatalogFocus();});
+    }
+    private volatile long catalogRevision;
+    private volatile String catalogWatchId="";
+    private final AtomicBoolean catalogRetry=new AtomicBoolean();
+    public CatalogWatch watchCatalog(java.util.function.Consumer<CatalogUpdate> listener) {return watchCatalog(listener,List.of());}
+    public CatalogWatch watchCatalog(java.util.function.Consumer<CatalogUpdate> listener,java.util.Collection<Long> focus) {
+        var watch=new CatalogWatch(listener,focus);catalogListeners.add(watch);
+        submit(() -> {if(client!=null && client.state()==SignalingClient.State.CONNECTED) subscribeCatalog();else connect();return null;}).whenComplete((v,e) -> {if(e!=null) retryCatalog();});
+        return watch;
+    }
+    private void subscribeCatalog() throws Exception {
+        if(catalogListeners.isEmpty()) return;
+        catalogWatchId=UUID.randomUUID().toString();catalogRevision=0;
+        var body=new JsonObject();body.addProperty("limit",200);body.addProperty("watchId",catalogWatchId);
+        body.add("roomIds",JSON.toJsonTree(catalogFocus()));
+        applyCatalog(client.request("ROOM_CATALOG_WATCH",null,body).get(16,TimeUnit.SECONDS).body());
+    }
+    private synchronized void applyCatalog(JsonObject body) {
+        if(!body.has("watchId") || !catalogWatchId.equals(body.get("watchId").getAsString())) return;
+        long revision=body.get("revision").getAsLong();if(revision<=catalogRevision) return;
+        boolean snapshot=body.get("snapshot").getAsBoolean();
+        if(!snapshot && revision!=catalogRevision+1) {retryCatalog();return;}
+        catalogRevision=revision;
+        var removed=new java.util.HashSet<Long>();for(var id:body.getAsJsonArray("removed")) removed.add(id.getAsLong());
+        var cleaning=new java.util.HashSet<Long>();for(var id:body.getAsJsonArray("cleaning")) cleaning.add(id.getAsLong());
+        var evicted=new java.util.HashSet<Long>();if(body.has("evicted")) for(var id:body.getAsJsonArray("evicted")) evicted.add(id.getAsLong());
+        var update=new CatalogUpdate(snapshot,revision,List.of(JSON.fromJson(body.get("rooms"),common.room.RoomInfo[].class)),java.util.Set.copyOf(removed),java.util.Set.copyOf(cleaning),java.util.Set.copyOf(evicted));
+        for(var watch:catalogListeners) watch.listener.accept(update);
+    }
+    private void retryCatalog() {
+        if(closed.get() || catalogListeners.isEmpty() || !catalogRetry.compareAndSet(false,true)) return;
+        try {recoveryTimer.schedule(() -> {catalogRetry.set(false);if(!closed.get() && recovery==null && !catalogListeners.isEmpty()) refreshCatalog();},2,TimeUnit.SECONDS);}
+        catch(RejectedExecutionException stopped) {catalogRetry.set(false);}
+    }
+    public CompletableFuture<Void> refreshCatalog() {
+        return this.<Void>submit(() -> {if(client!=null && client.state()==SignalingClient.State.CONNECTED) subscribeCatalog();else connect();return null;})
+                .whenComplete((v,e) -> {if(e!=null) retryCatalog();});
+    }
     public void addChatListener(ChatListener listener) { chatListeners.add(listener); }
     public void removeChatListener(ChatListener listener) { chatListeners.remove(listener); }
     private void clearChat() {
+        chatDraft="";
         for (ChatListener listener : chatListeners) {
             listener.onChatCleared();
         }
@@ -216,15 +273,40 @@ public final class MeetingSession implements AutoCloseable {
             snapshot = value; publish(State.CONNECTED, "Trạng thái được máy chủ xác nhận; chưa phát media."); return value; });
     }
     public CompletableFuture<Void> sendChat(String content) {
-        JsonObject body = new JsonObject(); body.addProperty("content", content);
-        return submit(() -> { command("CHAT_SEND", requireRoom().roomId(), body, UUID.randomUUID().toString()); return null; });
+        return sendChat(content,UUID.randomUUID().toString()).thenApply(ack -> null);
+    }
+    public record ChatAcknowledgement(long id,String clientMessageId,String sentAt) { }
+    private final java.util.concurrent.atomic.AtomicInteger pendingChats=new java.util.concurrent.atomic.AtomicInteger();
+    private record ChatAttempt(String context,long started) { }
+    private final java.util.Map<String,ChatAttempt> chatAttempts=new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile String chatDraft="";
+    public String chatDraft() {return chatDraft;}
+    public void chatDraft(String value) {chatDraft=value==null?"":value.substring(0,Math.min(2000,value.length()));}
+    public CompletableFuture<ChatAcknowledgement> sendChat(String content,String nonce) {
+        var transport=client;var expected=snapshot;
+        if(closed.get() || recovery!=null || transport==null || expected==null) return CompletableFuture.failedFuture(new SignalException("CONNECTION_STATE"));
+        String context=transport.serverEpoch()+":"+expected.roomId();long now=System.nanoTime();
+        var prior=chatAttempts.get(nonce);
+        if(prior!=null && (!context.equals(prior.context()) || now-prior.started()>TimeUnit.MINUTES.toNanos(9))) return CompletableFuture.failedFuture(new SignalException("CHAT_RETRY_UNSAFE"));
+        if(prior==null) {
+            if(chatAttempts.size()>=1024) return CompletableFuture.failedFuture(new SignalException("CHAT_BUSY"));
+            chatAttempts.put(nonce,new ChatAttempt(context,now));
+        }
+        if(pendingChats.incrementAndGet()>8) {pendingChats.decrementAndGet();return CompletableFuture.failedFuture(new SignalException("CHAT_BUSY"));}
+        var body=new JsonObject();body.addProperty("content",content);body.addProperty("clientMessageId",nonce);
+        return transport.request("CHAT_SEND",expected.roomId(),body,nonce).thenApply(reply -> {
+            if(snapshot==null || !expected.roomId().equals(snapshot.roomId())) throw new CompletionException(new SignalException("STALE_ROOM"));
+            return new ChatAcknowledgement(reply.body().get("id").getAsLong(),nonce,reply.body().get("sentAt").getAsString());
+        }).whenComplete((value,failure) -> {pendingChats.decrementAndGet();if(failure==null) chatAttempts.remove(nonce);});
     }
     public CompletableFuture<java.util.List<common.chat.ChatMessage>> chatHistory(Long beforeId, Integer limit) {
         JsonObject body = new JsonObject();
         if (beforeId != null) body.addProperty("beforeId", beforeId);
         if (limit != null) body.addProperty("limit", limit);
-        return submit(() -> {
-            SignalMessage reply = command("CHAT_HISTORY", requireRoom().roomId(), body, UUID.randomUUID().toString());
+        var expected=snapshot;var transport=client;
+        if(expected==null || transport==null || recovery!=null) return CompletableFuture.failedFuture(new SignalException("CONNECTION_STATE"));
+        return transport.request("CHAT_HISTORY",expected.roomId(),body).thenApply(reply -> {
+            if(snapshot==null || !snapshot.roomId().equals(expected.roomId())) throw new CompletionException(new SignalException("STALE_ROOM"));
             java.util.List<common.chat.ChatMessage> list = new java.util.ArrayList<>();
             if (reply.body().has("messages") && reply.body().get("messages").isJsonArray()) {
                 var array = reply.body().getAsJsonArray("messages");
@@ -239,6 +321,17 @@ public final class MeetingSession implements AutoCloseable {
                 }
             }
             return list;
+        });
+    }
+    public CompletableFuture<List<ChatAcknowledgement>> acknowledgedChats(java.util.Collection<String> ids) {
+        var expected=snapshot;var transport=client;
+        if(expected==null || transport==null || ids.size()>8) return CompletableFuture.failedFuture(new SignalException("CONNECTION_STATE"));
+        var body=new JsonObject();body.add("clientMessageIds",JSON.toJsonTree(ids));
+        return transport.request("CHAT_STATUS",expected.roomId(),body).thenApply(reply -> {
+            if(snapshot==null || !snapshot.roomId().equals(expected.roomId())) throw new CompletionException(new SignalException("STALE_ROOM"));
+            var result=new ArrayList<ChatAcknowledgement>();for(var item:reply.body().getAsJsonArray("messages")) {
+                var saved=item.getAsJsonObject();result.add(new ChatAcknowledgement(saved.get("id").getAsLong(),saved.get("clientMessageId").getAsString(),saved.get("sentAt").getAsString()));
+            }return List.copyOf(result);
         });
     }
     public CompletableFuture<Void> leave() {
@@ -282,7 +375,7 @@ public final class MeetingSession implements AutoCloseable {
                 client = connection;
             }
         }
-        try { connection.connect(token); if (!restoring) publish(State.CONNECTED, "Đã kết nối máy chủ phòng họp."); }
+        try { connection.connect(token);subscribeCatalog(); if (!restoring) publish(State.CONNECTED, "Đã kết nối máy chủ phòng họp."); }
         catch (Exception failure) { connection.close(); if (!restoring) publish(State.DISCONNECTED, "Không thể kết nối máy chủ phòng họp. Có thể thử lại."); throw failure; }
     }
     private void beginRecovery() {
@@ -319,6 +412,7 @@ public final class MeetingSession implements AutoCloseable {
                     snapshot = resumed.room(); recovery = null;
                     if (video != null) video.controlConnected(true);
                     publish(State.CONNECTED, "Đã kết nối lại. Bạn có thể bật lại camera và mic.");
+                    for(var listener:chatListeners) listener.onChatResync();
                 }
             } catch (Exception failure) {
                 Throwable cause = failure;
@@ -365,8 +459,14 @@ public final class MeetingSession implements AutoCloseable {
         SignalingClient connection = client;
         if (closed.get() || connection == null || !Objects.equals(message.connectionId(), connection.connectionId())
                 || message.generation() != connection.generation()) return;
+        if("ROOM_CATALOG_CHANGED".equals(message.type())) {applyCatalog(message.body());return;}
+        if("SERVER_DATABASE_STATUS".equals(message.type())) {
+            boolean available=message.body().get("available").getAsBoolean();
+            publish(State.CONNECTED,available?"Kết nối dữ liệu đã phục hồi.":"Database tạm gián đoạn. Dữ liệu đang hiển thị có thể chưa được cập nhật.");return;
+        }
         if ("CONNECTION_CLOSED".equals(message.type()) && snapshot != null) { beginRecovery(); return; }
         if ("CONNECTION_CLOSED".equals(message.type()) || "SESSION_ENDED".equals(message.type())) {
+            retryCatalog();
             submit(() -> { if (currentConnection(message)) { recovery = null; closeVideo(); snapshot = null; self = null; publish(State.DISCONNECTED, "Kết nối phòng họp đã kết thúc. Không tự bật lại media."); clearChat(); } return null; }); return;
         }
         RoomSnapshot active = snapshot;
@@ -391,7 +491,7 @@ public final class MeetingSession implements AutoCloseable {
             String sentAt = b.has("sentAt") ? b.get("sentAt").getAsString() : Instant.now().toString();
             common.chat.ChatMessage chatMsg = new common.chat.ChatMessage(id, 0, uId, name, text, sentAt);
             for (ChatListener listener : chatListeners) {
-                listener.onChatMessage(chatMsg);
+                listener.onChatMessage(chatMsg,b.has("clientMessageId")?b.get("clientMessageId").getAsString():null);
             }
             return;
         }
@@ -481,6 +581,7 @@ public final class MeetingSession implements AutoCloseable {
         }
         closeVideo(); closeTransport(); worker.shutdownNow(); snapshot = null; self = null; pin = ""; createIntent = null; reopenIntent = null; joinIntent = null;
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
+        catalogListeners.clear();chatListeners.clear();chatDraft="";
         publish(State.CLOSED, "Session đã đóng.");
     }
     private record Intent(String id, JsonObject body) { @Override public String toString() { return "Intent[redacted]"; } }

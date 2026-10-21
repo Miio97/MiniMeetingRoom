@@ -154,7 +154,7 @@ class RoomFileTransferCompatibilityTest {
     }
 
     @Test
-    void reopeningKeepsSharedFilesButRequiresFormerMembersToJoinAgain() throws Exception {
+    void reopeningClearsSharedFilesAndRequiresFormerMembersToJoinAgain() throws Exception {
         RoomInfo original = control.createRoom(host.token(), "Mở lại phòng chia sẻ", "543210", 10).room();
         assertTrue(control.joinRoom(guest.token(), original.code(), "543210").success());
         Path source = source("kept-after-reopen.bin", 1024);
@@ -166,20 +166,21 @@ class RoomFileTransferCompatibilityTest {
         assertDenied(() -> files.listFiles(host.token(), original.id(), 0));
         assertDenied(() -> files.listFiles(guest.token(), original.id(), 0));
 
+        assertEquals("ROOM_CLEANING",control.reopenRoom(host.token(),original.id()).code());
+        cleanClosedContent(original.id());
         AuthResponse reopened = control.reopenRoom(host.token(), original.id());
         assertTrue(reopened.success(), reopened.message());
         assertEquals(original.id(), reopened.room().id());
         assertEquals(original.code(), reopened.room().code());
         assertEquals(1, reopened.room().people());
         assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
-        assertEquals(List.of(metadata), files.listFiles(host.token(), original.id(), 0));
+        assertTrue(files.listFiles(host.token(), original.id(), 0).isEmpty());
         assertDenied(() -> files.listFiles(guest.token(), original.id(), 0));
         assertEquals("INVALID_ROOM_PIN", control.joinRoom(guest.token(), original.code(), "111111").code());
         assertTrue(control.joinRoom(guest.token(), original.code(), "543210").success());
-        assertEquals(List.of(metadata), files.listFiles(guest.token(), original.id(), 0));
+        assertTrue(files.listFiles(guest.token(), original.id(), 0).isEmpty());
         Path received = temporary.resolve("after-reopen.bin");
-        files.download(guest.token(), metadata, received, new Cancellation(), null);
-        assertEquals(sha256(source), sha256(received));
+        assertTrue(Files.exists(source),"Cleanup must preserve the sender personal file");
     }
 
     @Test
@@ -208,15 +209,16 @@ class RoomFileTransferCompatibilityTest {
             assertEquals(0, activeMembers());
             assertDenied(() -> files.listFiles(host.token(), roomId, 0));
             assertDenied(() -> files.listFiles(guest.token(), roomId, 0));
+            cleanClosedContent(roomId);
             var reopened = rooms.reopen(hostPrincipal, UUID.randomUUID().toString(), original.joinCode());
             assertEquals(roomId, reopened.collaborationRoom().id());
             assertNotEquals(original.roomId(), reopened.roomId());
             assertEquals(0, activeMembers(), "Opening the room must not revive past attendance");
             rooms.join(hostPrincipal, "file-reopen-host", 1, UUID.randomUUID().toString(), reopened.joinCode(), "", false, false);
-            assertEquals(List.of(metadata), files.listFiles(host.token(), roomId, 0));
+            assertTrue(files.listFiles(host.token(), roomId, 0).isEmpty());
             assertDenied(() -> files.listFiles(guest.token(), roomId, 0));
             rooms.join(guestPrincipal, "file-reopen-guest", 1, UUID.randomUUID().toString(), reopened.joinCode(), "543210", false, false);
-            assertEquals(List.of(metadata), files.listFiles(guest.token(), roomId, 0));
+            assertTrue(files.listFiles(guest.token(), roomId, 0).isEmpty());
             assertEquals(4, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
             assertEquals(2, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
         }
@@ -258,6 +260,10 @@ class RoomFileTransferCompatibilityTest {
         assertEquals(List.of(metadata), files.listFiles(host.token(), room.id(), 0));
     }
 
+    private void cleanClosedContent(long id) throws Exception {
+        String owner=support.RoomTestFixture.ownLegacyTestRoom(fixture::connection,id,"local");
+        try(var cleanup=new server.meeting.ImmediateRoomCleanup(fixture::connection,owner,fileServer::cleanupRoom,fileServer::hasPendingRoom,() -> {})) {assertTrue(cleanup.clean(id));}
+    }
     private long activeMembers() throws Exception {
         return fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL");
     }

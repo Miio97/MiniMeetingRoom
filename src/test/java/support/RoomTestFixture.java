@@ -24,6 +24,7 @@ import server.AuthServer;
 import server.auth.AuthService;
 import server.auth.PasswordHasher;
 import server.rooms.RoomService;
+import server.meeting.RoomRepository;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Real application services over TLS; every record and key is temporary test data. */
@@ -33,6 +34,7 @@ public final class RoomTestFixture implements AutoCloseable {
     private final String database = "jdbc:h2:mem:rooms_" + UUID.randomUUID()
             + ";MODE=MySQL;DATABASE_TO_UPPER=false;DB_CLOSE_DELAY=-1";
     public final AuthServer server;
+    public final RoomService rooms;
     private final SSLContext clientTls;
 
     public record Tls(SSLContext server, SSLContext client) { }
@@ -77,11 +79,13 @@ public final class RoomTestFixture implements AutoCloseable {
                     Tham_Gia_Luc TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     Roi_Phong_Luc TIMESTAMP NULL, Ly_Do_Roi VARCHAR(30))
                 """);
+        execute("CREATE TABLE Tin_Nhan (Ma_Tin_Nhan BIGINT AUTO_INCREMENT PRIMARY KEY,Ma_Phong BIGINT NOT NULL REFERENCES Phong_Hop(Ma_Phong),Ma_Nguoi_Gui BIGINT NOT NULL REFERENCES Nguoi_Dung(Ma_Nguoi_Dung),Loai_Tin_Nhan VARCHAR(20),Noi_Dung TEXT,Ngay_Gui TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,Ngay_Xoa TIMESTAMP)");
         Clock clock = Clock.systemUTC();
         PasswordHasher hasher = new PasswordHasher();
+        rooms=new RoomService(this::connection,hasher,clock);
         ApplicationService application = new ApplicationService(
                 new AuthService(this::connection, hasher, clock, Duration.ofHours(24)),
-                new RoomService(this::connection, hasher, clock));
+                rooms);
         server = new AuthServer(tls.server(), new InetSocketAddress("127.0.0.1", 0), request -> {
             beforeRequest.accept(request);
             return application.handle(request);
@@ -100,8 +104,24 @@ public final class RoomTestFixture implements AutoCloseable {
     }
 
     public Connection connection() throws java.sql.SQLException { return DriverManager.getConnection(database); }
+    public static void ownershipSchema(server.auth.ConnectionProvider provider) throws Exception {
+        try(var connection=provider.getConnection();var sql=connection.createStatement()) {
+            if(!connection.getMetaData().getURL().startsWith("jdbc:h2:mem:")) throw new IllegalStateException("TEST_DATABASE_REQUIRED");
+            sql.execute("CREATE TABLE IF NOT EXISTS MMR_Phong_Van_Hanh(Ma_Phong BIGINT PRIMARY KEY,Room_Opaque_ID VARCHAR(24) UNIQUE,Instance_ID VARCHAR(64),Server_Epoch VARCHAR(24),Ngay_Tao TIMESTAMP)");
+        }
+    }
+    public static String ownLegacyTestRoom(server.auth.ConnectionProvider provider,long id,String owner) throws Exception {
+        ownershipSchema(provider);
+        try(var connection=provider.getConnection()) {
+            try(var query=connection.prepareStatement("SELECT Instance_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
+                query.setLong(1,id);try(var rows=query.executeQuery()) {if(rows.next()) return rows.getString(1);}
+            }
+            RoomRepository.markLegacyOwnership(connection,id,owner,java.time.Instant.now());return owner;
+        }
+    }
 
     public void execute(String sql) throws Exception {
+        if(sql.stripLeading().startsWith("CREATE TABLE Tin_Nhan")) sql=sql.replaceFirst("CREATE TABLE Tin_Nhan","CREATE TABLE IF NOT EXISTS Tin_Nhan");
         try (Connection connection = connection(); Statement statement = connection.createStatement()) {
             statement.execute(sql);
         }

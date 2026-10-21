@@ -28,19 +28,24 @@ public final class SessionService {
 
     /** Always rechecks expiry, revocation and account status; tokens are never logged or cached. */
     public long authenticate(String token) throws SQLException, TransferException {
+        if(token==null || token.isBlank() || token.length()>256) throw invalidSession();
+        try(Connection connection=connections.getConnection()) {return authenticate(connection,token,false);}
+    }
+    /** Reuse the write transaction so revocation and final publication have one ordering. */
+    public long authenticate(Connection connection,String token,boolean lock) throws SQLException,TransferException {
         if (token == null || token.isBlank() || token.length() > 256) throw invalidSession();
-        try (Connection connection = connections.getConnection();
-                PreparedStatement statement = connection.prepareStatement("""
-                        SELECT p.Ma_Nguoi_Dung FROM Phien_Dang_Nhap p
+        String hash=AuthService.tokenHash(token);
+        try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT p.Ma_Nguoi_Dung,p.Token_Bam FROM Phien_Dang_Nhap p
                         JOIN Nguoi_Dung n ON n.Ma_Nguoi_Dung = p.Ma_Nguoi_Dung
                         WHERE p.Token_Bam = ? AND p.Thu_Hoi_Luc IS NULL
                         AND p.Het_Han_Luc > ? AND n.Trang_Thai = 'HOAT_DONG'
-                        """)) {
-            statement.setString(1, AuthService.tokenHash(token));
+                        """+(lock?" FOR UPDATE":""))) {
+            statement.setString(1, hash);
             statement.setTimestamp(2, Timestamp.from(clock.instant()),
                     Calendar.getInstance(TimeZone.getTimeZone("UTC")));
             try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) throw invalidSession();
+                if (!result.next() || !hash.equals(result.getString(2))) throw invalidSession();
                 return result.getLong(1);
             }
         }
