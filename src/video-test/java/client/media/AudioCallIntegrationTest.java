@@ -81,21 +81,36 @@ public class AudioCallIntegrationTest {
             } finally {host.close();guest.close();if(hostVideo!=null) hostVideo.closeComplete().get(20,TimeUnit.SECONDS);if(guestVideo!=null) guestVideo.closeComplete().get(20,TimeUnit.SECONDS);}
         }
     }
-    @Test void threeClientsExchangeAudioAndHostStopsOnlyAudio() throws Exception {
+    @Test void fourClientsExchangeAudioAndHostStopsOnlyAudio() throws Exception {
         try(VideoTestFixture fixture=new VideoTestFixture(tls,temporary.resolve("audio"))) {
             List<MeetingSession> clients=new ArrayList<>(); List<VideoCallController> videos=new ArrayList<>();
             try {
-                for(int i=0;i<3;i++) clients.add(fixture.session(fixture.database.account("audio"+i,"Audio "+i)));
-                MeetingSession host=clients.getFirst(); var preview=host.create(new CreateRoomParams("Audio", "1234",3,false)).get(10,TimeUnit.SECONDS);
-                for(int i=0;i<3;i++) {
+                for(int i=0;i<4;i++) clients.add(fixture.session(fixture.database.account("audio"+i,"Audio "+i)));
+                MeetingSession host=clients.getFirst(); var preview=host.create(new CreateRoomParams("Audio", "1234",4,false)).get(10,TimeUnit.SECONDS);
+                for(int i=0;i<4;i++) {
                     MeetingSession client=clients.get(i); if(i>0) client.lookup(preview.joinCode(),"1234").get(10,TimeUnit.SECONDS);
                     client.join(false,false).get(10,TimeUnit.SECONDS); var video=client.video();videos.add(video);
                     video.audio().access(true).get(5,TimeUnit.SECONDS); video.publishPreparedCamera().get(10,TimeUnit.SECONDS);
                     FxTestRuntime.call(() -> video.audio().toggle()).get(20,TimeUnit.SECONDS);
                 }
-                for(int receiver=0;receiver<3;receiver++) for(int sender=0;sender<3;sender++) if(receiver!=sender) {
+                for(int receiver=0;receiver<4;receiver++) for(int sender=0;sender<4;sender++) if(receiver!=sender) {
                     var audio=videos.get(receiver).audio(); String source=clients.get(sender).selfParticipantId();
                     await(() -> audio.receivedSamples(source)>4800);
+                }
+                // Stop pushing PCM without closing ICE. Decoded concealment still advances,
+                // so recovery must use real RTP progress rather than receivedSamples().
+                var hostAudio = videos.getFirst().audio();
+                var publisherField = AudioCallController.class.getDeclaredField("publisher"); publisherField.setAccessible(true);
+                Object originalPublisher = publisherField.get(hostAudio);
+                var generatedField = AudioCallController.class.getDeclaredField("generated"); generatedField.setAccessible(true);
+                ((ScheduledFuture<?>) generatedField.get(hostAudio)).cancel(false);
+                awaitChecked(() -> publisherField.get(hostAudio) != originalPublisher);
+                awaitChecked(() -> publisherField.get(hostAudio) != null);
+                assertTrue(FxTestRuntime.call(() -> hostAudio.requestedProperty().get()), "Repair must preserve mic intent");
+                // All four senders and all twelve receiving routes must carry actual RTP.
+                for (var video : videos) {
+                    Map<Object, Long> baseline = new IdentityHashMap<>();
+                    awaitChecked(() -> allAudioRoutesAdvance(video, baseline));
                 }
                 var guest=clients.get(1); var guestVideo=videos.get(1);
                 guestVideo.startInput(() -> new VideoCallIntegrationTest.GeneratedCamera(1)).get(20,TimeUnit.SECONDS);
@@ -123,8 +138,34 @@ public class AudioCallIntegrationTest {
             }
         }
     }
+    private static boolean allAudioRoutesAdvance(VideoCallController video, Map<Object, Long> baseline) throws Exception {
+        List<MediaStatsSource> routes = new ArrayList<>(); video.audio().statsSources(routes);
+        if (routes.size() != 4) return false;
+        boolean advancing = true;
+        for (var route : routes) {
+            long packets = audioPackets(route);
+            Long before = baseline.putIfAbsent(route.identity(), packets);
+            if (before == null || packets <= before + 5) advancing = false;
+        }
+        return advancing;
+    }
+    private static long audioPackets(MediaStatsSource route) throws Exception {
+        var report = route.read().get().get(3, TimeUnit.SECONDS);
+        if (report == null) return 0;
+        long count = 0;
+        for (var stat : report.getStats().values()) {
+            if (stat.getType() != (route.sending() ? dev.onvoid.webrtc.RTCStatsType.OUTBOUND_RTP : dev.onvoid.webrtc.RTCStatsType.INBOUND_RTP)) continue;
+            Object value = stat.getAttributes().get(route.sending() ? "packetsSent" : "packetsReceived");
+            if (value instanceof Number n) count += n.longValue();
+        }
+        return count;
+    }
     static void await(java.util.function.BooleanSupplier condition) throws Exception {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(18);
         while(!condition.getAsBoolean()) {if(System.nanoTime()>end) fail("Media condition timed out");Thread.sleep(50);}
+    }
+    private static void awaitChecked(Callable<Boolean> condition) throws Exception {
+        long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(22);
+        while(!condition.call()) { if(System.nanoTime()>end) fail("RTP recovery timed out"); Thread.sleep(50); }
     }
 }
