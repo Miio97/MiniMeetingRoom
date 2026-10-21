@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/pion/rtp"
@@ -276,8 +277,8 @@ func TestEngineConfigurableCapacity(t *testing.T) {
 	}
 	defer e.close()
 
-	if e.maxPeers != 5000 {
-		t.Fatalf("expected maxPeers=5000, got %d", e.maxPeers)
+	if e.maxPeers != 5050 {
+		t.Fatalf("expected maxPeers=5050 (camera, voice, screen), got %d", e.maxPeers)
 	}
 	if e.maxLeases != 256 {
 		t.Fatalf("expected maxLeases=256, got %d", e.maxLeases)
@@ -309,4 +310,71 @@ func TestEngineConfigurableCapacity(t *testing.T) {
 		t.Fatalf("expected 25 leases remaining, got %d", len(e.leases))
 	}
 	e.mu.Unlock()
+}
+func TestRoomPolicyRejectsMoreThanFifty(t *testing.T) {
+	t.Setenv("MINIMEETING_MAX_PEERS", "51")
+	if e, err := newEngine(testKey); err == nil {
+		e.close()
+		t.Fatal("capacity above fifty accepted")
+	}
+}
+func TestGlobalBudgetRejectsNewVideoAndReservesVoiceAdmission(t *testing.T) {
+	e, err := newEngine(testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	e.maxPeers = 16
+	lease(t, e, "budget-owner", "budget-room")
+	for i := 0; i < 14; i++ {
+		e.pending[fmt.Sprintf("pending-%d", i)] = true
+	}
+	request := controlRequest{Operation: "publish", Kind: "VIDEO", Room: "budget-room", Participant: "budget-owner", Generation: 1, Transport: "budget-transport", SDP: "v=0\r\n"}
+	status, body := control(t, e, request)
+	if status != 429 || body["code"] != "MEDIA_BUSY" {
+		t.Fatal("global budget did not reject new video", status, body)
+	}
+	request.Kind = "AUDIO"
+	_, body = control(t, e, request)
+	if body["code"] == "MEDIA_BUSY" {
+		t.Fatal("voice reserve was consumed by video")
+	}
+	e.pending["last-1"] = true
+	e.pending["last-2"] = true
+	status, body = control(t, e, request)
+	if status != 429 || body["code"] != "MEDIA_BUSY" {
+		t.Fatal("absolute budget not enforced")
+	}
+}
+func TestUnsubscribeIsImmediateIdempotentAndCannotStopAnotherOwnerOrPublisher(t *testing.T) {
+	e, err := newEngine(testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	lease(t, e, "owner-a", "room-a")
+	lease(t, e, "owner-b", "room-a")
+	makePeer := func(id, owner string, publisher bool) *mediaPeer {
+		pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		p := &mediaPeer{id: id, owner: owner, room: "room-a", generation: 1, kind: "VIDEO", publisher: publisher, pc: pc, ctx: ctx, cancel: cancel}
+		e.peers[id] = p
+		return p
+	}
+	ours := makePeer("receiver-a", "owner-a", false)
+	other := makePeer("receiver-b", "owner-b", false)
+	publisher := makePeer("publisher-a", "owner-a", true)
+	request := controlRequest{Operation: "unsubscribe", Kind: "VIDEO", Room: "room-a", Participant: "owner-a", Generation: 1, Transports: []string{ours.id, other.id, publisher.id}}
+	for repeat := 0; repeat < 2; repeat++ {
+		status, _ := control(t, e, request)
+		if status != 200 {
+			t.Fatal("unsubscribe failed", status)
+		}
+	}
+	if !ours.closed.Load() || other.closed.Load() || publisher.closed.Load() || len(e.peers) != 2 {
+		t.Fatal("unsubscribe ownership or immediate cleanup failed")
+	}
 }

@@ -262,7 +262,9 @@ public class VideoCallIntegrationTest {
                     temporary.resolve("main-ui-storage"), 1024 * 1024, 8 * 1024 * 1024, 4, java.time.Duration.ofHours(1), true);
             var storage = new server.filetransfer.FileStorageService(config.storagePath(), config.quotaBytes(), config.maxFileBytes(), config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());
             try (var files = new server.filetransfer.FileTransferServer(tls.server(), config,
-                    new server.filetransfer.FileMetadataRepository(fixture.database::connection), storage)) {
+                    new server.filetransfer.FileMetadataRepository(fixture.database::connection), storage);
+                    var cleanup=new server.meeting.ImmediateRoomCleanup(fixture.database::connection,"video-test",files::cleanupRoom,files::hasPendingRoom,() -> {})) {
+                fixture.roomRepository.setReopenGuard(cleanup);fixture.rooms.onRoomClosed(cleanup::request);cleanup.start();
                 files.start();
                 var host = fixture.database.account("mainHost", "Main Host"); var guest = fixture.database.account("mainGuest", "Main Guest");
                 var hostFiles = new client.filetransfer.FileTransferClient("localhost", files.port(), tls.client(), 5000);
@@ -505,8 +507,11 @@ public class VideoCallIntegrationTest {
                         find(stages.get(0).getScene().getRoot(), "chat-send", javafx.scene.control.Button.class).fire(); return null;
                     });
                     try {
-                        FxTestRuntime.await(() -> nodes(stages.get(1).getScene().getRoot()).filter(javafx.scene.control.Label.class::isInstance)
-                                .map(javafx.scene.control.Label.class::cast).anyMatch(label -> label.getText().equals("Video and chat in one room")));
+                        FxTestRuntime.await(() -> {
+                            var root=stages.get(1).getScene().getRoot();root.applyCss();root.layout();
+                            return nodes(root).filter(javafx.scene.control.Label.class::isInstance)
+                                .map(javafx.scene.control.Label.class::cast).anyMatch(label -> label.getText().equals("Video and chat in one room"));
+                        });
                     } catch (AssertionError failure) {
                         long stored = fixture.database.count("SELECT COUNT(*) FROM Tin_Nhan WHERE Loai_Tin_Nhan='VAN_BAN'");
                         var status = FxTestRuntime.call(() -> stages.stream().map(stage -> nodes(stage.getScene().getRoot()).filter(javafx.scene.control.Label.class::isInstance)
@@ -559,6 +564,10 @@ public class VideoCallIntegrationTest {
                     hostMedia.closeComplete().get(10, TimeUnit.SECONDS);
                     FxTestRuntime.await(() -> stages.get(0).getScene().getRoot() instanceof client.UI.screens.MeetingEndedScreen
                             && find(stages.get(0).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).getText().equals("Mở lại phòng"));
+                    FxTestRuntime.await(() -> !cleanup.isPending(room.id()));
+                    assertEquals(0,fixture.database.count("SELECT COUNT(*) FROM Tin_Nhan"));
+                    assertEquals(0,fixture.database.count("SELECT COUNT(*) FROM Tep_Dinh_Kem"));
+                    assertTrue(Files.exists(downloaded),"Server cleanup must preserve a personal download");
                     FxTestRuntime.call(() -> { find(stages.get(0).getScene().getRoot(), "reopen-room-submit", javafx.scene.control.Button.class).fire(); return null; });
                     FxTestRuntime.await(() -> stages.get(0).getScene().getRoot() instanceof client.UI.screens.PreJoinScreen);
                     FxTestRuntime.call(() -> {

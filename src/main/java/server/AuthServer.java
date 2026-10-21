@@ -317,6 +317,7 @@ public final class AuthServer implements AutoCloseable {
         Diagnostics diagnostics = Diagnostics.start("server");
         AtomicReference<AuthServer> runningServer = new AtomicReference<>();
         AtomicReference<FileTransferServer> runningFiles = new AtomicReference<>();
+        AtomicReference<server.meeting.ImmediateRoomCleanup> runningCleanup=new AtomicReference<>();
         AtomicBoolean cleanupStarted = new AtomicBoolean();
         Runnable cleanup = () -> {
             if (!cleanupStarted.compareAndSet(false, true)) return;
@@ -326,6 +327,7 @@ public final class AuthServer implements AutoCloseable {
             } catch (IOException error) {
                 diagnostics.failure("server.shutdown.failed", error, Map.of());
             } finally {
+                var roomCleanup=runningCleanup.get();if(roomCleanup!=null) roomCleanup.close();
                 FileTransferServer files = runningFiles.get();
                 if (files != null) try { files.close(); }
                 catch (IOException error) { diagnostics.failure("server.file_shutdown.failed", error, Map.of()); }
@@ -356,6 +358,7 @@ public final class AuthServer implements AutoCloseable {
                 statement.executeQuery("SELECT Ma_Phong, Ma_Phong_Tham_Gia, Ten_Phong, Ma_PIN_Bam, Ma_Chu_Phong, Trang_Thai, Da_Khoa, So_Nguoi_Toi_Da, Ngay_Tao, Ngay_Dong FROM Phong_Hop WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Thanh_Vien_Phong, Ma_Phong, Ma_Nguoi_Dung, Vai_Tro, Tham_Gia_Luc, Roi_Phong_Luc, Ly_Do_Roi FROM Thanh_Vien_Phong WHERE 1=0").close();
                 statement.executeQuery("SELECT Ma_Lich_Hen, Ma_Nguoi_Tao, Tieu_De, Mo_Ta, Bat_Dau_Luc, Ket_Thuc_Luc, Lap_Lai, Ma_Phong, Ngay_Tao, Ngay_Xoa FROM Lich_Hen WHERE 1=0").close();
+                statement.executeQuery("SELECT Ma_Phong, Room_Opaque_ID, Instance_ID, Server_Epoch FROM MMR_Phong_Van_Hanh WHERE 1=0").close();
                 if (transferConfig.enabled()) {
                     statement.executeQuery("SELECT Transfer_Id, Ma_Tep, Ma_Tin_Nhan, Duong_Dan_Luu_Tru FROM Tep_Dinh_Kem WHERE 1=0").close();
                     statement.executeQuery("SELECT Ma_Tin_Nhan, Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Ngay_Xoa FROM Tin_Nhan WHERE 1=0").close();
@@ -372,12 +375,21 @@ public final class AuthServer implements AutoCloseable {
             diagnostics.event("server.startup.tls_loaded", Map.of("tls_context_ms", elapsedMillis(tlsAt)));
             startupStep = "mở cổng TCP/TLS";
             startupPhase = "listener_bind";
+            var authRooms=new server.rooms.RoomService();
+            String legacyInstance=server.config.MeetingSecrets.load().instanceId();authRooms.legacyOwner(legacyInstance);
+            var contentCleanup=new server.meeting.ImmediateRoomCleanup(DatabaseConnection::getConnection,
+                    legacyInstance,
+                    id -> {var service=runningFiles.get();if(service!=null) service.cleanupRoom(id);},
+                    id -> runningFiles.get()!=null && runningFiles.get().hasPendingRoom(id),() -> { });
+            runningCleanup.set(contentCleanup);authRooms.setReopenGuard(contentCleanup);authRooms.onChanged(() -> contentCleanup.request(0));
+            var legacyRooms=new RoomService();legacyRooms.legacyOwner(legacyInstance);
             AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port),
-                    new ApplicationService()::handle, new RoomService());
+                    new ApplicationService(new server.auth.AuthService(),authRooms)::handle, legacyRooms);
             runningServer.set(server);
             startupPhase = "file_listener_bind";
-            FileTransferServer files = fileServer(tls, transferConfig);
+            FileTransferServer files = fileServer(tls, transferConfig,legacyInstance);
             runningFiles.set(files);
+            contentCleanup.start();
             server.start();
             if (files != null) {
                 files.start();
@@ -461,10 +473,13 @@ public final class AuthServer implements AutoCloseable {
     }
 
     static FileTransferServer fileServer(SSLContext tls, TransferConfig config) throws IOException {
+        return fileServer(tls,config,null);
+    }
+    static FileTransferServer fileServer(SSLContext tls, TransferConfig config,String instance) throws IOException {
         if (!config.enabled()) return null;
         FileStorageService storage = new FileStorageService(config.storagePath(), config.quotaBytes(),
                 config.maxFileBytes(), config.maxPendingPerUser(), config.expiry(), config.resumeEnabled());
-        try { return new FileTransferServer(tls, config, new FileMetadataRepository(), storage); }
+        try {var repository=new FileMetadataRepository();if(instance!=null) repository.legacyOwner(instance);return new FileTransferServer(tls, config,repository, storage); }
         catch (IOException | RuntimeException e) { storage.close(); throw e; }
     }
 }

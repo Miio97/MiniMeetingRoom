@@ -72,13 +72,15 @@ public final class FileTransferServer implements AutoCloseable {
         }
     }
     public int port() { return listener.getLocalPort(); }
+    public void cleanupRoom(long roomId) throws SQLException,IOException {retention.sweepRoom(roomId);}
+    public boolean hasPendingRoom(long roomId) throws IOException {return retention.pending(roomId);}
     public synchronized void start() {
         if (closed || acceptThread != null) throw new IllegalStateException("Server cannot be started twice");
         maintenance.scheduleAtFixedRate(this::timeouts, 1, 1, TimeUnit.SECONDS);
         maintenance.scheduleWithFixedDelay(() -> {
             try {
                 service.reconcile(); storage.cleanup();
-                if (!retentionPeriod.isZero()) retention.sweep(Instant.now().minus(retentionPeriod));
+                // Room content is retired by ImmediateRoomCleanup, including chat and reopen fencing.
             }
             catch (Exception e) { LOG.warning("STORAGE_ERROR cleanup=" + e.getClass().getSimpleName()); }
         }, 60, 60, TimeUnit.SECONDS);

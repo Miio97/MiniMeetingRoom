@@ -30,6 +30,9 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
     private final RoomService rooms;
     private final server.media.VideoCoordinator video;
     private final ConnectionProvider connections;
+    private final server.meeting.RoomCatalog catalog;
+    public void catalogChanged() {catalog.invalidate();}
+    public void cleanupStatus(java.util.function.LongPredicate status) {catalog.cleanupStatus(status);}
     private volatile ChatDispatcher dispatcher;
     private final ConcurrentHashMap<String, ChatRateLimiter> chatLimits = new ConcurrentHashMap<>();
     private final ThreadPoolExecutor chatExecutor = new ThreadPoolExecutor(
@@ -66,11 +69,12 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
     public MeetingHandler(RoomService rooms) {this(rooms,null,null,null);}
     public MeetingHandler(RoomService rooms,server.media.VideoCoordinator video) {this(rooms,video,null,null);}
     public MeetingHandler(RoomService rooms,server.media.VideoCoordinator video,ConnectionProvider connections,ChatDispatcher dispatcher) {
-        this.rooms=rooms;this.video=video;this.connections=connections!=null?connections:rooms.connectionProvider();this.dispatcher=dispatcher;
+        this.rooms=rooms;this.video=video;this.connections=connections!=null?connections:rooms.connectionProvider();this.dispatcher=dispatcher;this.catalog=new server.meeting.RoomCatalog(this.connections);
     }
 
     public void setDispatcher(ChatDispatcher dispatcher) { this.dispatcher = dispatcher; }
     public void bindSignaling(SignalingServer signaling) {
+        catalog.bind(signaling);
         this.dispatcher = (connId, rId, body) -> signaling.event(connId, "CHAT_MESSAGE", rId, null, body);
     }
     @Override public void bindServer(SignalingServer server) {
@@ -83,85 +87,32 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
         String type;
         try {
             switch (request.type()) {
-                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STOP", "SCREEN_STATE" -> {
+                case "ROOM_CATALOG_WATCH" -> {
+                    var focus=new java.util.HashSet<Long>();
+                    if(body.has("roomIds")) {
+                        var ids=body.getAsJsonArray("roomIds");if(ids.size()>100) throw new SignalException("INVALID_REQUEST");
+                        for(var id:ids) {if(!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isNumber()) throw new SignalException("INVALID_REQUEST");try {focus.add(id.getAsBigDecimal().longValueExact());} catch(ArithmeticException invalid) {throw new SignalException("INVALID_REQUEST");}}
+                    }
+                    response=catalog.subscribe(connection,body.has("limit")?integer(body,"limit"):20,body.has("watchId")?text(body,"watchId",64):request.requestId(),focus);type="ROOM_CATALOG_SNAPSHOT";
+                }
+                case "ROOM_CATALOG_UNWATCH" -> {catalog.unsubscribe(connection.id());response.addProperty("ok",true);type="ROOM_CATALOG_UNWATCHED";}
+                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STOP", "SCREEN_STATE" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     if (video == null) throw new SignalException("MEDIA_NOT_READY");
                     response = video.handle(connection, request); type = request.type().substring(0, request.type().indexOf('_')) + "_REPLY";
                 }
-                case "CHAT_SEND" -> {
-                    rooms.assertMember(connection.id(), request.roomId());
-                    ChatRateLimiter limiter = chatLimits.computeIfAbsent(connection.id(), ignored -> new ChatRateLimiter());
-                    if (!limiter.tryConsume()) throw new SignalException("RATE_LIMIT");
-                    String raw = text(body, "content", 4000);
-                    String content = raw.replaceAll("[\\p{Cntrl}&&[^\r\n\t]]", "").strip();
-                    if (content.isEmpty() || content.length() > 2000) throw new SignalException("INVALID_REQUEST");
-                    long storedRoomId = rooms.storedRoomId(request.roomId());
-                    var principal = connection.principal();
-                    long userId = principal.userId();
-                    String displayName = principal.displayName();
-                    String participantId = rooms.participantId(connection.id());
-                    CompletableFuture<SavedChatMessage> future = new CompletableFuture<>();
-                    try {
-                        chatExecutor.execute(() -> {
-                            try {
-                                future.complete(insertChatMessage(storedRoomId, userId, content));
-                            } catch (Exception failure) { future.completeExceptionally(failure); }
-                        });
-                    } catch (RejectedExecutionException full) {
-                        throw new SignalException("CHAT_BUSY");
+                case "CHAT_SEND", "CHAT_HISTORY" -> {return handleAsync(connection,request).toCompletableFuture().get(15,TimeUnit.SECONDS);}
+                case "CHAT_STATUS" -> {
+                    rooms.assertMember(connection.id(),request.roomId());
+                    var ids=request.body().getAsJsonArray("clientMessageIds");
+                    if(ids==null || ids.size()>8) throw new SignalException("INVALID_REQUEST");
+                    var saved=new JsonArray();
+                    for(var id:ids) {
+                        if(!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isString() || !id.getAsString().matches("[A-Za-z0-9_-]{1,64}")) throw new SignalException("INVALID_REQUEST");
+                        var receipt=receipts.get(connection.principal().sessionId()+":"+request.roomId()+":"+id.getAsString());
+                        if(receipt!=null && receipt.result().isDone() && !receipt.result().isCompletedExceptionally()) saved.add(receipt.result().getNow(null).body().deepCopy());
                     }
-                    SavedChatMessage saved;
-                    try { saved = future.get(5, TimeUnit.SECONDS); }
-                    catch (TimeoutException timeout) { throw new SignalException("CHAT_BUSY"); }
-                    catch (ExecutionException failure) { throw new SignalException("CHAT_FAILED"); }
-                    JsonObject eventBody = new JsonObject();
-                    eventBody.addProperty("id", saved.id());
-                    eventBody.addProperty("participantId", participantId);
-                    eventBody.addProperty("userId", userId);
-                    eventBody.addProperty("displayName", displayName);
-                    eventBody.addProperty("content", content);
-                    eventBody.addProperty("sentAt", saved.sentAt().toString());
-                    if (dispatcher != null) {
-                        for (String connId : rooms.roomConnections(request.roomId())) {
-                            dispatcher.sendChat(connId, request.roomId(), eventBody);
-                        }
-                    }
-                    response.addProperty("ok", true);
-                    response.addProperty("id", saved.id());
-                    response.addProperty("sentAt", saved.sentAt().toString());
-                    type = "CHAT_SENT";
-                }
-                case "CHAT_HISTORY" -> {
-                    rooms.assertMember(connection.id(), request.roomId());
-                    Long beforeId = body.has("beforeId") && !body.get("beforeId").isJsonNull() ? body.get("beforeId").getAsLong() : null;
-                    int limit = body.has("limit") && !body.get("limit").isJsonNull() ? Math.min(100, Math.max(1, body.get("limit").getAsInt())) : 50;
-                    long storedRoomId = rooms.storedRoomId(request.roomId());
-                    CompletableFuture<List<HistoryChatMessage>> future = new CompletableFuture<>();
-                    try {
-                        chatExecutor.execute(() -> {
-                            try {
-                                future.complete(queryChatHistory(storedRoomId, beforeId, limit));
-                            } catch (Exception failure) { future.completeExceptionally(failure); }
-                        });
-                    } catch (RejectedExecutionException full) {
-                        throw new SignalException("CHAT_BUSY");
-                    }
-                    List<HistoryChatMessage> history;
-                    try { history = future.get(5, TimeUnit.SECONDS); }
-                    catch (TimeoutException timeout) { throw new SignalException("CHAT_BUSY"); }
-                    catch (ExecutionException failure) { throw new SignalException("CHAT_FAILED"); }
-                    JsonArray array = new JsonArray();
-                    for (HistoryChatMessage item : history) {
-                        JsonObject msg = new JsonObject();
-                        msg.addProperty("id", item.id());
-                        msg.addProperty("userId", item.userId());
-                        msg.addProperty("displayName", item.displayName());
-                        msg.addProperty("content", item.content());
-                        msg.addProperty("sentAt", item.sentAt().toString());
-                        array.add(msg);
-                    }
-                    response.add("messages", array);
-                    type = "CHAT_HISTORY_RESULT";
+                    response.add("messages",saved);type="CHAT_STATUS_RESULT";
                 }
                 case "NETWORK_STATS" -> {
                     // Transitional ACK for older clients. No queue, sample parsing, persistence or retention task.
@@ -240,24 +191,80 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
         } catch (IllegalArgumentException | IllegalStateException invalid) { throw new SignalException("INVALID_REQUEST"); }
         common.diagnostics.Diagnostics.current().event("meeting.state", java.util.Map.of(
                 "room_count", rooms.roomCount(), "participant_count", rooms.participantCount()));
+        if(java.util.Set.of("CREATE_ROOM","REOPEN_ROOM","JOIN_ROOM","ADMISSION_STATUS","LEAVE_ROOM","SET_LOCKED","KICK").contains(request.type())) catalog.invalidate();
         return connection.message(type, request.requestId(), request.roomId(), null, response);
     }
 
-    private SavedChatMessage insertChatMessage(long roomId, long userId, String content) throws SQLException {
-        Instant now = rooms.clock().instant();
-        String sql = "INSERT INTO Tin_Nhan (Ma_Phong, Ma_Nguoi_Gui, Loai_Tin_Nhan, Noi_Dung, Ngay_Gui) VALUES (?, ?, 'VAN_BAN', ?, ?)";
-        try (var conn = connections.getConnection();
-             var ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setLong(1, roomId);
-            ps.setLong(2, userId);
-            ps.setString(3, content);
-            ps.setTimestamp(4, Timestamp.from(now));
-            ps.executeUpdate();
-            try (var rs = ps.getGeneratedKeys()) {
-                if (rs.next()) return new SavedChatMessage(rs.getLong(1), now);
-            }
+    private final server.meeting.RoomWorkQueue chatWrites=new server.meeting.RoomWorkQueue("chat-room",2,128);
+    private record ChatReceipt(String content,CompletableFuture<SignalMessage> result,long at) { }
+    private final ConcurrentHashMap<String,ChatReceipt> receipts=new ConcurrentHashMap<>();
+    private final java.util.Set<CompletableFuture<SignalMessage>> historyJobs=ConcurrentHashMap.newKeySet();
+    @Override public java.util.concurrent.CompletionStage<SignalMessage> handleAsync(SignalingServer.Connection connection,SignalMessage request) throws Exception {
+        if(!request.type().equals("CHAT_SEND") && !request.type().equals("CHAT_HISTORY")) return SignalingServer.Handler.super.handleAsync(connection,request);
+        rooms.assertMember(connection.id(),request.roomId());
+        long storedRoom=rooms.storedRoomId(request.roomId());var principal=connection.principal();
+        if(request.type().equals("CHAT_HISTORY")) {
+            var result=new CompletableFuture<SignalMessage>();
+            historyJobs.add(result);result.whenComplete((v,e) -> historyJobs.remove(result));
+            try {chatExecutor.execute(() -> {try {
+                rooms.assertMember(connection.id(),request.roomId());
+                Long before=request.body().has("beforeId") && !request.body().get("beforeId").isJsonNull()?request.body().get("beforeId").getAsLong():null;
+                int limit=request.body().has("limit")?Math.min(100,Math.max(1,request.body().get("limit").getAsInt())):50;
+                var history=queryChatHistory(storedRoom,before,limit);
+                rooms.assertMember(connection.id(),request.roomId());
+                JsonArray array=new JsonArray();for(var item:history) {var value=new JsonObject();value.addProperty("id",item.id());value.addProperty("userId",item.userId());value.addProperty("displayName",item.displayName());value.addProperty("content",item.content());value.addProperty("sentAt",item.sentAt().toString());array.add(value);}
+                var body=new JsonObject();body.add("messages",array);result.complete(connection.message("CHAT_HISTORY_RESULT",request.requestId(),request.roomId(),null,body));
+            } catch(Exception failure) {result.completeExceptionally(failure);}});}
+            catch(RejectedExecutionException full) {result.completeExceptionally(new SignalException("CHAT_BUSY"));}return result;
         }
-        throw new SQLException("Failed to retrieve generated message key");
+        String content=text(request.body(),"content",4000).replaceAll("[\\p{Cntrl}&&[^\\r\\n\\t]]","").strip();
+        if(content.isEmpty() || content.length()>2000) throw new SignalException("INVALID_REQUEST");
+        String nonce=request.body().has("clientMessageId")?text(request.body(),"clientMessageId",64):request.requestId();
+        if(nonce==null || !nonce.matches("[A-Za-z0-9_-]{1,64}")) throw new SignalException("INVALID_REQUEST");
+        long now=System.nanoTime();receipts.entrySet().removeIf(e -> e.getValue().result().isDone() && now-e.getValue().at()>TimeUnit.MINUTES.toNanos(10));
+        String key=principal.sessionId()+":"+request.roomId()+":"+nonce;
+        var receipt=new ChatReceipt(content,new CompletableFuture<>(),now);var existing=receipts.putIfAbsent(key,receipt);
+        if(existing!=null) {if(!existing.content().equals(content)) throw new SignalException("REQUEST_ID_REUSED");return existing.result().thenApply(reply -> connection.message(reply.type(),request.requestId(),request.roomId(),null,reply.body()));}
+        if(receipts.size()>1024) {receipts.remove(key,receipt);throw new SignalException("CHAT_BUSY");}
+        if(!chatLimits.computeIfAbsent(connection.id(),id -> new ChatRateLimiter()).tryConsume()) {receipts.remove(key,receipt);throw new SignalException("RATE_LIMIT");}
+        try {chatWrites.execute(request.roomId(),() -> {
+            try {
+                rooms.assertMember(connection.id(),request.roomId());
+                var saved=insertChatMessage(storedRoom,principal,request.roomId(),content);
+                var body=new JsonObject();body.addProperty("id",saved.id());body.addProperty("clientMessageId",nonce);body.addProperty("userId",principal.userId());body.addProperty("displayName",principal.displayName());body.addProperty("content",content);body.addProperty("sentAt",saved.sentAt().toString());
+                // Closing may win just after commit; never deliver old content into a new generation.
+                try {rooms.assertMember(connection.id(),request.roomId());if(dispatcher!=null) for(String target:rooms.roomConnections(request.roomId())) dispatcher.sendChat(target,request.roomId(),body);} catch(server.meeting.RoomException ended) { }
+                var ack=new JsonObject();ack.addProperty("ok",true);ack.addProperty("id",saved.id());ack.addProperty("clientMessageId",nonce);ack.addProperty("sentAt",saved.sentAt().toString());
+                receipt.result().complete(connection.message("CHAT_SENT",request.requestId(),request.roomId(),null,ack));
+            } catch(Exception failure) {
+                if(failure instanceof SignalException signal && !signal.code().equals("CHAT_OUTCOME_UNKNOWN")) receipts.remove(key,receipt);
+                receipt.result().completeExceptionally(failure);
+            }
+        });} catch(RejectedExecutionException full) {receipts.remove(key,receipt);throw new SignalException("CHAT_BUSY");}
+        return receipt.result();
+    }
+    private SavedChatMessage insertChatMessage(long roomId,server.auth.SessionPrincipal principal,String opaque,String content) throws Exception {
+        Instant now=rooms.clock().instant();boolean committing=false;
+        try(var conn=connections.getConnection()) {
+            conn.setTransactionIsolation(java.sql.Connection.TRANSACTION_READ_COMMITTED);conn.setAutoCommit(false);
+            try {
+                try(var query=conn.prepareStatement("SELECT p.Token_Bam FROM Phien_Dang_Nhap p JOIN Nguoi_Dung n ON n.Ma_Nguoi_Dung=p.Ma_Nguoi_Dung WHERE p.Ma_Phien=? AND p.Thu_Hoi_Luc IS NULL AND p.Het_Han_Luc>? AND n.Trang_Thai='HOAT_DONG' FOR UPDATE")) {
+                    query.setLong(1,principal.sessionId());query.setTimestamp(2,Timestamp.from(now));try(var rows=query.executeQuery()) {if(!rows.next() || !principal.tokenHash().equals(rows.getString(1))) throw new SignalException("SESSION_INVALID");}
+                }
+                try(var query=conn.prepareStatement("SELECT x.Room_Opaque_ID,p.Trang_Thai FROM Phong_Hop p JOIN MMR_Phong_Van_Hanh x ON x.Ma_Phong=p.Ma_Phong WHERE p.Ma_Phong=? FOR UPDATE")) {
+                    query.setLong(1,roomId);try(var rows=query.executeQuery()) {if(!rows.next() || !opaque.equals(rows.getString(1)) || !java.util.Set.of("CHO","DANG_HOAT_DONG").contains(rows.getString(2))) throw new SignalException("STALE_ROOM");}
+                }
+                try(var query=conn.prepareStatement("SELECT Ma_Thanh_Vien_Phong FROM Thanh_Vien_Phong WHERE Ma_Phong=? AND Ma_Nguoi_Dung=? AND Roi_Phong_Luc IS NULL FOR UPDATE")) {
+                    query.setLong(1,roomId);query.setLong(2,principal.userId());try(var rows=query.executeQuery()) {if(!rows.next()) throw new SignalException("NOT_A_MEMBER");}
+                }
+                long id;
+                try(var query=conn.prepareStatement("INSERT INTO Tin_Nhan (Ma_Phong,Ma_Nguoi_Gui,Loai_Tin_Nhan,Noi_Dung,Ngay_Gui) VALUES (?,?,'VAN_BAN',?,?)",Statement.RETURN_GENERATED_KEYS)) {
+                    query.setLong(1,roomId);query.setLong(2,principal.userId());query.setString(3,content);query.setTimestamp(4,Timestamp.from(now));query.executeUpdate();
+                    try(var keys=query.getGeneratedKeys()) {if(!keys.next()) throw new SQLException("CHAT_KEY_MISSING");id=keys.getLong(1);}
+                }
+                committing=true;conn.commit();return new SavedChatMessage(id,now);
+            } catch(Exception failure) {try {conn.rollback();} catch(SQLException ignored) {}if(committing) throw new SignalException("CHAT_OUTCOME_UNKNOWN");throw failure;}
+        } catch(SQLException failure) {throw new SignalException(committing?"CHAT_OUTCOME_UNKNOWN":"DATABASE_UNAVAILABLE");}
     }
 
     private List<HistoryChatMessage> queryChatHistory(long roomId, Long beforeId, int limit) throws SQLException {
@@ -292,6 +299,7 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
     }
 
     @Override public void disconnected(SignalingServer.Connection connection, String reason) {
+        catalog.unsubscribe(connection.id());catalog.invalidate();
         chatLimits.remove(connection.id());
         if (video != null) video.revoke(connection.id());
         if (java.util.Set.of("MAT_KET_NOI", "REQUEST_TIMEOUT").contains(reason)) rooms.suspend(connection.id());
@@ -302,7 +310,10 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
     @Override public void validated(SignalingServer.Connection connection) { if (video != null) video.validated(connection); }
 
     @Override public void close() {
-        chatExecutor.shutdownNow();
+        catalog.close();
+        receipts.values().forEach(receipt -> receipt.result().completeExceptionally(new SignalException("CONNECTION_CLOSED")));
+        historyJobs.forEach(job -> job.completeExceptionally(new SignalException("CONNECTION_CLOSED")));historyJobs.clear();
+        chatWrites.close();receipts.clear();chatExecutor.shutdownNow();
         try { chatExecutor.awaitTermination(1, TimeUnit.SECONDS); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
     }

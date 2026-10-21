@@ -63,6 +63,7 @@ public final class SignalingClient implements AutoCloseable {
 
     public State state() { return state; }
     public long generation() { return welcome == null ? 0 : welcome.generation(); }
+    public String serverEpoch() {return welcome==null?null:welcome.serverEpoch();}
     public String connectionId() { return welcome == null ? null : welcome.connectionId(); }
     public int serverMaxParticipants() { return serverMaxParticipants; }
 

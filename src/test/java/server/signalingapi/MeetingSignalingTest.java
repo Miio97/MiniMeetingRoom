@@ -43,6 +43,9 @@ class MeetingSignalingTest {
     private final List<SignalingClient> clients = new ArrayList<>();
     private final java.util.concurrent.atomic.AtomicInteger snapshotRequests = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicInteger sessionDbQueries = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicBoolean databaseUnavailable=new java.util.concurrent.atomic.AtomicBoolean();
+    private MeetingHandler meetingHandler;
+    private final java.util.Map<String,String> catalogWatchIds=new java.util.concurrent.ConcurrentHashMap<>();
 
     @BeforeAll static void certificates() throws Exception { tls = RoomTestFixture.certificates(temporary); }
 
@@ -74,12 +77,18 @@ class MeetingSignalingTest {
         rooms.start();
         server.auth.ConnectionProvider countingProvider = () -> {
             sessionDbQueries.incrementAndGet();
+            if(databaseUnavailable.get()) throw new java.sql.SQLException("TEST_DATABASE_UNAVAILABLE");
             return fixture.connection();
         };
+        meetingHandler=new MeetingHandler(rooms);
         server = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
                 new SessionValidator(countingProvider, Clock.systemUTC()), new SignalingServer.Handler() {
-                    private final MeetingHandler delegate = new MeetingHandler(rooms);
+                    private final MeetingHandler delegate = meetingHandler;
+                    @Override public java.util.concurrent.CompletionStage<SignalMessage> handleAsync(SignalingServer.Connection connection,SignalMessage request) throws Exception {
+                        return delegate.handleAsync(connection,request);
+                    }
                     public SignalMessage handle(SignalingServer.Connection connection, SignalMessage request) throws Exception {
+                        if(request.type().equals("ROOM_CATALOG_WATCH") && request.body().has("watchId")) catalogWatchIds.put(connection.id(),request.body().get("watchId").getAsString());
                         if (request.type().equals("GET_ROOM")) snapshotRequests.incrementAndGet();
                         return delegate.handle(connection, request);
                     }
@@ -93,6 +102,7 @@ class MeetingSignalingTest {
     @AfterEach void close() throws Exception {
         clients.forEach(SignalingClient::close);
         if (server != null) server.close();
+        if(meetingHandler!=null) meetingHandler.close();
         if (rooms != null) rooms.close();
         if (fixture != null) fixture.close();
     }
@@ -610,6 +620,73 @@ class MeetingSignalingTest {
         assertEquals(19, joinedEventsReceived, "Host must receive PARTICIPANT_JOINED for all 19 guests");
     }
 
+    @Test void catalogPushIsPermissionFilteredRevisionedAndUnsubscribed() throws Exception {
+        var events=new CopyOnWriteArrayList<SignalMessage>();var outsiderEvents=new CopyOnWriteArrayList<SignalMessage>();
+        var host=login("catalogHost",events);var outsider=login("catalogOther",outsiderEvents);
+        var watch=new JsonObject();watch.addProperty("watchId","catalog-test");watch.addProperty("limit",20);
+        assertEquals(0,request(host,"ROOM_CATALOG_WATCH",null,watch).body().getAsJsonArray("rooms").size());
+        request(outsider,"ROOM_CATALOG_WATCH",null,watch);
+        var room=create(host,3,UUID.randomUUID().toString());
+        await(() -> events.stream().anyMatch(event -> event.type().equals("ROOM_CATALOG_CHANGED")));
+        var delta=events.stream().filter(event -> event.type().equals("ROOM_CATALOG_CHANGED")).findFirst().orElseThrow();
+        assertEquals(2,delta.body().get("revision").getAsLong());assertEquals(1,delta.body().getAsJsonArray("rooms").size());
+        assertTrue(outsiderEvents.stream().noneMatch(event -> event.type().equals("ROOM_CATALOG_CHANGED")));
+        request(host,"ROOM_CATALOG_UNWATCH",null,new JsonObject());events.clear();
+        join(host,room,"1234",UUID.randomUUID().toString());Thread.sleep(120);
+        assertTrue(events.stream().noneMatch(event -> event.type().equals("ROOM_CATALOG_CHANGED")));
+    }
+    @Test void chatRetryUsesSameReceiptAndDifferentContentCannotReuseNonce() throws Exception {
+        var events=new CopyOnWriteArrayList<SignalMessage>();var account=fixture.account("receiptHost","Host");var host=connect(account.token(),events);var room=create(host,3,UUID.randomUUID().toString());
+        var joined=join(host,room,"1234",UUID.randomUUID().toString());String participant=joined.body().getAsJsonObject("join").get("selfParticipantId").getAsString();
+        var body=new JsonObject();body.addProperty("content","one saved message");body.addProperty("clientMessageId","stable_nonce");
+        var first=request(host,"CHAT_SEND",room.roomId(),body);var second=request(host,"CHAT_SEND",room.roomId(),body);
+        assertEquals(first.body().get("id"),second.body().get("id"));
+        assertEquals(1,request(host,"CHAT_HISTORY",room.roomId(),new JsonObject()).body().getAsJsonArray("messages").size());
+        await(() -> events.stream().anyMatch(event -> event.type().equals("CHAT_MESSAGE")));
+        assertEquals(1,events.stream().filter(event -> event.type().equals("CHAT_MESSAGE")).count());
+        body.addProperty("content","changed");code("REQUEST_ID_REUSED",() -> request(host,"CHAT_SEND",room.roomId(),body));
+        host.close();var resumed=connect(account.token(),new CopyOnWriteArrayList<>());
+        var resume=new JsonObject();resume.addProperty("participantId",participant);request(resumed,"RESUME_ROOM",room.roomId(),resume);
+        var status=new JsonObject();var ids=new com.google.gson.JsonArray();ids.add("stable_nonce");ids.add("unknown_nonce");status.add("clientMessageIds",ids);
+        var confirmed=request(resumed,"CHAT_STATUS",room.roomId(),status).body().getAsJsonArray("messages");assertEquals(1,confirmed.size());
+        assertEquals(first.body().get("id"),confirmed.get(0).getAsJsonObject().get("id"));
+        assertEquals(1,request(resumed,"CHAT_HISTORY",room.roomId(),new JsonObject()).body().getAsJsonArray("messages").size());
+    }
+    @Test void catalogCanWatchAnOlderVisibleRoomWithoutLeakingAnotherUsersRoom() throws Exception {
+        var account=fixture.account("olderCatalogHost","Host");var events=new CopyOnWriteArrayList<SignalMessage>();var host=connect(account.token(),events);
+        var room=create(host,3,UUID.randomUUID().toString());join(host,room,"1234",UUID.randomUUID().toString());
+        for(int index=0;index<205;index++) fixture.execute("INSERT INTO Phong_Hop(Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da,Ngay_Tao) VALUES('OLDER-"+index+"','History',"+account.user().id()+",'DA_DONG',FALSE,3,TIMESTAMP '2026-10-22 00:00:00')");
+        var outsider=fixture.account("privateCatalogHost","Private");fixture.execute("INSERT INTO Phong_Hop(Ma_Phong,Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da) VALUES(9999,'PRIVATE-ROOM','Private',"+outsider.user().id()+",'DA_DONG',FALSE,3)");
+        var body=new JsonObject();body.addProperty("limit",20);body.addProperty("watchId","older-window");
+        var ordinary=request(host,"ROOM_CATALOG_WATCH",null,body).body();assertTrue(ordinary.getAsJsonArray("rooms").asList().stream().noneMatch(value -> value.getAsJsonObject().get("id").getAsLong()==room.collaborationRoom().id()));
+        var focus=new com.google.gson.JsonArray();focus.add(room.collaborationRoom().id());focus.add(9999);body.add("roomIds",focus);
+        var focused=request(host,"ROOM_CATALOG_WATCH",null,body).body();
+        assertTrue(focused.getAsJsonArray("rooms").asList().stream().anyMatch(value -> value.getAsJsonObject().get("id").getAsLong()==room.collaborationRoom().id()));
+        assertTrue(focused.getAsJsonArray("rooms").asList().stream().noneMatch(value -> value.getAsJsonObject().get("id").getAsLong()==9999));
+        events.clear();var lock=new JsonObject();lock.addProperty("locked",true);request(host,"SET_LOCKED",room.roomId(),lock);
+        await(() -> events.stream().filter(event -> event.type().equals("ROOM_CATALOG_CHANGED")).flatMap(event -> event.body().getAsJsonArray("rooms").asList().stream()).anyMatch(value -> value.getAsJsonObject().get("id").getAsLong()==room.collaborationRoom().id() && value.getAsJsonObject().get("locked").getAsBoolean()));
+    }
+    @Test void catalogRevisionGapTriggersSnapshotResyncWithoutPolling() throws Exception {
+        support.FxTestRuntime.start();var account=fixture.account("catalogGap","Gap");var updates=new CopyOnWriteArrayList<client.meeting.MeetingSession.CatalogUpdate>();var transport=new AtomicReference<SignalingClient>();
+        try(var session=new client.meeting.MeetingSession(account.token(),java.time.Instant.parse(account.expiresAt()),listener -> {
+            var client=new SignalingClient(new SignalingClient.Settings("localhost",server.port(),null,SignalWire.DEFAULT_MAX_BYTES),tls.client(),listener);transport.set(client);return client;
+        });var watch=session.watchCatalog(updates::add)) {
+            await(() -> updates.stream().filter(client.meeting.MeetingSession.CatalogUpdate::snapshot).count()==1);
+            var gap=new JsonObject();gap.addProperty("watchId",catalogWatchIds.get(transport.get().connectionId()));gap.addProperty("snapshot",false);gap.addProperty("revision",3);
+            server.event(transport.get().connectionId(),"ROOM_CATALOG_CHANGED",null,null,gap);
+            await(() -> updates.stream().filter(client.meeting.MeetingSession.CatalogUpdate::snapshot).count()==2);
+        }
+    }
+    @Test void temporaryDatabaseOutageRetainsExistingRoomButRejectsNewWrites() throws Exception {
+        var events=new CopyOnWriteArrayList<SignalMessage>();var host=login("databaseGrace",events);var room=create(host,3,UUID.randomUUID().toString());join(host,room,"1234",UUID.randomUUID().toString());
+        databaseUnavailable.set(true);
+        assertEquals(room.roomId(),get(host,room.roomId()).roomId());
+        var body=new JsonObject();body.addProperty("content","must not claim saved");
+        code("DATABASE_UNAVAILABLE",() -> request(host,"CHAT_SEND",room.roomId(),body));
+        assertEquals(1,rooms.participantCount());
+        assertTrue(events.stream().noneMatch(event -> event.type().equals("CONNECTION_CLOSED")));
+        databaseUnavailable.set(false);assertEquals(1,get(host,room.roomId()).participants().size());
+    }
     private SignalingClient login(String user, List<SignalMessage> events) throws Exception {
         return connect(fixture.account(user, user).token(), events);
     }

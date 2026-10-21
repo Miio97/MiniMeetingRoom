@@ -20,6 +20,7 @@ import server.signalingapi.*;
 public final class VideoTestFixture implements AutoCloseable {
     public final RoomTestFixture database;
     public final RoomService rooms;
+    public final RoomRepository roomRepository;
     public final server.AuthServer collaboration;
     private final javax.net.ssl.SSLContext clientTls;
     public final SignalingServer signaling;
@@ -57,7 +58,8 @@ public final class VideoTestFixture implements AutoCloseable {
         engine = ready;
         AtomicReference<SignalingServer> signalReference = new AtomicReference<>();
         AtomicReference<VideoCoordinator> mediaReference = new AtomicReference<>(); Gson json = new Gson();
-        rooms = new RoomService(new RoomRepository(database::connection), Clock.systemUTC(), "video-test", new byte[32], 10, event -> {
+        roomRepository=new RoomRepository(database::connection);
+        rooms = new RoomService(roomRepository, Clock.systemUTC(), "video-test", new byte[32], 10, event -> {
             VideoCoordinator media = mediaReference.get(); if (media != null) media.roomEvent(event);
             SignalingServer server = signalReference.get(); if (server != null) server.event(event.recipientConnectionId(), event.type(), event.roomId(),
                     event.revision(), json.toJsonTree(event.body()).getAsJsonObject());

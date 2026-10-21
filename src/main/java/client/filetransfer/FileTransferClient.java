@@ -29,7 +29,10 @@ import javax.net.ssl.SSLSocket;
 /** Blocking TLS/TCP API. All calls, including source hashing, belong on a background worker. */
 public final class FileTransferClient implements AutoCloseable {
     public record Upload(UUID transferId, long roomId, Path source, String originalName, String mimeType,
-            long sizeBytes, long modifiedMillis, String checksum) { }
+            long sizeBytes, long modifiedMillis, String checksum,String roomIdentity) {
+        public Upload(UUID transferId,long roomId,Path source,String originalName,String mimeType,long sizeBytes,long modifiedMillis,String checksum) {this(transferId,roomId,source,originalName,mimeType,sizeBytes,modifiedMillis,checksum,null);}
+        public Upload inMeeting(String identity) {return new Upload(transferId,roomId,source,originalName,mimeType,sizeBytes,modifiedMillis,checksum,identity);}
+    }
     public record Progress(String status, long transferred, long total, double bytesPerSecond) { }
     @FunctionalInterface public interface ProgressListener { void onProgress(Progress progress); }
     private static final ProgressListener SILENT = progress -> { };
@@ -114,6 +117,7 @@ public final class FileTransferClient implements AutoCloseable {
         JsonObject header = authenticated(token); header.addProperty("roomId", upload.roomId());
         header.addProperty("originalName", upload.originalName()); header.addProperty("mimeType", upload.mimeType());
         header.addProperty("sizeBytes", upload.sizeBytes()); header.addProperty("checksum", upload.checksum());
+        if(upload.roomIdentity()!=null) header.addProperty("roomIdentity",upload.roomIdentity());
         try (Connection connection = connect(cancellation)) {
             connection.send(Type.UPLOAD_INIT, upload.transferId(), header, new byte[0]);
             Frame accepted = connection.receive(upload.transferId());

@@ -16,6 +16,39 @@ class AutoVideoHdIntegrationTest {
     @TempDir static Path temporary;
     static RoomTestFixture.Tls tls;
     @BeforeAll static void runtime() throws Exception {FxTestRuntime.start();tls=RoomTestFixture.certificates(temporary);}
+    @Test void installedSdkSimulcastCapabilitiesAreMeasuredWithoutUsingARealDevice() throws Exception {
+        try(var nativeOwner=new NativeVideoSession()) {
+            var field=NativeVideoSession.class.getDeclaredField("factory");field.setAccessible(true);
+            var factory=(dev.onvoid.webrtc.PeerConnectionFactory)field.get(nativeOwner);
+            var source=new CustomVideoSource();var track=factory.createVideoTrack("layers-probe",source);
+            var peer=factory.createPeerConnection(new dev.onvoid.webrtc.RTCConfiguration(),new dev.onvoid.webrtc.PeerConnectionObserver() {
+                public void onIceCandidate(dev.onvoid.webrtc.RTCIceCandidate candidate) { }
+            });
+            try {
+                var init=new dev.onvoid.webrtc.RTCRtpTransceiverInit();init.direction=dev.onvoid.webrtc.RTCRtpTransceiverDirection.SEND_ONLY;
+                var high=new dev.onvoid.webrtc.RTCRtpEncodingParameters();high.maxBitrate=2500000;high.maxFramerate=30.0;
+                var low=new dev.onvoid.webrtc.RTCRtpEncodingParameters();low.maxBitrate=200000;low.maxFramerate=10.0;low.scaleResolutionDownBy=4.0;init.sendEncodings=java.util.List.of(high,low);
+                boolean rid=java.util.Arrays.stream(dev.onvoid.webrtc.RTCRtpEncodingParameters.class.getFields()).anyMatch(f -> f.getName().equalsIgnoreCase("rid"));
+                String result;
+                try {
+                    var transceiver=peer.addTransceiver(track,init);var sender=transceiver.getSender();
+                    try {
+                        var parameters=sender.getParameters();result="nativeEncodings="+parameters.encodings.size();
+                        var rejected=assertThrows(RuntimeException.class,() -> sender.setParameters(parameters));
+                        assertTrue(rejected.getMessage().contains("RID"),"Expected missing RID binding to prevent safe adaptive updates");
+                        result+=", adaptiveUpdate=INVALID_MODIFICATION_RID";
+                    } finally {sender.dispose();transceiver.dispose();}
+                    var offer=new CompletableFuture<String>();peer.createOffer(new dev.onvoid.webrtc.RTCOfferOptions(),new dev.onvoid.webrtc.CreateSessionDescriptionObserver() {
+                        public void onSuccess(dev.onvoid.webrtc.RTCSessionDescription value) {offer.complete(value.sdp);}
+                        public void onFailure(String message) {offer.completeExceptionally(new IllegalStateException("SIMULCAST_OFFER_FAILED"));}
+                    });
+                    String sdp=offer.get(5,TimeUnit.SECONDS);result+=", SDP_RID="+sdp.contains("a=rid:")+", SDP_SIMULCAST="+sdp.contains("a=simulcast:");
+                } catch(RuntimeException failure) {result="nativeRejected="+failure.getClass().getSimpleName();}
+                System.out.println("SIMULCAST_SDK_PROBE publicRid="+rid+", "+result);
+                assertFalse(rid,"Revisit RID routing design if a future SDK changes this capability");
+            } finally {peer.close();track.dispose();source.dispose();}
+        }
+    }
     @Test void nativePixelConversionPreservesColorsRotationAndBindingLifetime() throws Exception {
         try(var runtime=new NativeVideoSession();var mailbox=new VideoFrameMailbox()) {
             for(int rotation:new int[]{0,90,180,270}) {
@@ -36,6 +69,41 @@ class AutoVideoHdIntegrationTest {
             int color=FxTestRuntime.call(() -> mailbox.imageProperty().get().getPixelReader().getArgb(0,0));
             assertEquals(255,(color>>>24)&255);assertTrue(((color>>>16)&255)>240);assertTrue(((color>>>8)&255)<20);assertTrue((color&255)<20);
             mailbox.pause();FxTestRuntime.await(() -> mailbox.imageProperty().get()==null);
+        }
+    }
+    @Test void viewportStopsReceivingCameraThatIsNoLongerDisplayed() throws Exception {
+        try(var fixture=new VideoTestFixture(tls,temporary.resolve("native-layers"))) {
+            var host=fixture.session(fixture.database.account("layerHost","Host"));
+            var main=fixture.session(fixture.database.account("layerMain","Main"));
+            var small=fixture.session(fixture.database.account("layerSmall","Small"));
+            VideoCallController h=null,m=null,s=null;
+            try {
+                var room=host.create(new common.meeting.CreateRoomParams("Layers","1234",3,false)).get(10,TimeUnit.SECONDS);
+                host.join(false,false).get(10,TimeUnit.SECONDS);
+                for(var guest:java.util.List.of(main,small)) {guest.lookup(room.joinCode(),"1234").get(10,TimeUnit.SECONDS);guest.join(false,false).get(10,TimeUnit.SECONDS);}
+                h=host.video();m=main.video();s=small.video();
+                s.visibleParticipants(java.util.List.of(small.selfParticipantId(),host.selfParticipantId()));
+                h.publishPreparedCamera().get(10,TimeUnit.SECONDS);m.publishPreparedCamera().get(10,TimeUnit.SECONDS);s.publishPreparedCamera().get(10,TimeUnit.SECONDS);
+                h.startInput(HdFrames::new).get(15,TimeUnit.SECONDS);
+                var mainFrames=m.frames(host.selfParticipantId());var smallFrames=s.frames(host.selfParticipantId());
+                FxTestRuntime.await(() -> mainFrames.imageProperty().get()!=null && smallFrames.imageProperty().get()!=null);
+                Thread.sleep(2500);
+                double mainWidth=FxTestRuntime.call(() -> mainFrames.imageProperty().get().getWidth());
+                double smallWidth=FxTestRuntime.call(() -> smallFrames.imageProperty().get().getWidth());
+                System.out.println("VIEWPORT_NATIVE_PION firstWidth="+mainWidth+", secondWidth="+smallWidth);
+                assertTrue(mainWidth>0 && smallWidth>0);
+                s.visibleParticipants(java.util.List.of(small.selfParticipantId()));
+                FxTestRuntime.await(() -> smallFrames.imageProperty().get()==null);
+                for(int repeat=0;repeat<3;repeat++) {
+                    s.visibleParticipants(java.util.List.of(host.selfParticipantId()));
+                    FxTestRuntime.await(() -> smallFrames.imageProperty().get()!=null);
+                    s.visibleParticipants(java.util.List.of(small.selfParticipantId()));
+                    FxTestRuntime.await(() -> smallFrames.imageProperty().get()==null);
+                }
+            } finally {
+                host.close();main.close();small.close();
+                for(var controller:new VideoCallController[]{h,m,s}) if(controller!=null) controller.closeComplete().get(20,TimeUnit.SECONDS);
+            }
         }
     }
     static void pushPixels(VideoTrackSink sink,int rotation,boolean red) {

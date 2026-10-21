@@ -17,6 +17,7 @@ public final class FxTestRuntime {
 
     public static synchronized void start() throws Exception {
         if (!requested) {
+            System.setProperty("mmr.test.disableCatalog","true");
             requested = true;
             // Automatic camera controls must never ask for or enumerate real devices in tests.
             var cameraPreferences = java.nio.file.Path.of("target", "test-camera-preferences.properties").toAbsolutePath();

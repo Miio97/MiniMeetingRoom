@@ -17,12 +17,15 @@ public final class ChatService implements AutoCloseable {
     private final RoomService rooms;
     private final Clock clock;
     private final Set<Subscription> subscribers = new LinkedHashSet<>();
-    private boolean closed;
+    private volatile boolean closed;
+    private final Object[] roomLocks=java.util.stream.IntStream.range(0,16).mapToObj(i -> new Object()).toArray();
+    private Object roomLock(ChatRequest request) {return roomLocks[Math.floorMod(Long.hashCode(request==null?0:request.roomId()),roomLocks.length)];}
 
     public ChatService(RoomService rooms) { this(rooms, Clock.systemUTC()); }
     public ChatService(RoomService rooms, Clock clock) { this.rooms = rooms; this.clock = clock; }
 
-    public synchronized ChatResponse send(ChatRequest request) throws SQLException, ChatException {
+    public ChatResponse send(ChatRequest request) throws SQLException, ChatException {
+        synchronized(roomLock(request)) {
         require(request, "CHAT_SEND");
         String text = request.text() == null ? "" : request.text().strip();
         if (text.isBlank() || text.length() > MAX_TEXT_LENGTH || !validText(text)) {
@@ -49,15 +52,18 @@ public final class ChatService implements AutoCloseable {
             }
         });
         ChatResponse event = ChatResponse.ok(List.of(message));
-        for (Subscription subscriber : List.copyOf(subscribers)) {
+        List<Subscription> targets;synchronized(this) {targets=List.copyOf(subscribers);}
+        for (Subscription subscriber : targets) {
             if (subscriber.request.roomId() == request.roomId() && !subscriber.events.offer(event)) subscriber.close();
         }
         return event;
+        }
     }
 
-    public synchronized Subscription subscribe(ChatRequest request, Runnable disconnect) throws SQLException, ChatException {
+    public Subscription subscribe(ChatRequest request, Runnable disconnect) throws SQLException, ChatException {
+        synchronized(roomLock(request)) {
         require(request, "CHAT_LISTEN");
-        if (subscribers.size() >= MAX_SUBSCRIPTIONS) throw new ChatException("SERVER_BUSY", "Chat đang bận. Vui lòng thử lại.");
+        synchronized(this) {if (subscribers.size() >= MAX_SUBSCRIPTIONS) throw new ChatException("SERVER_BUSY", "Chat đang bận. Vui lòng thử lại.");}
         // Registration and history lookup share the send lock, so no message falls between them.
         List<ChatMessage> history = rooms.chat(request.token(), request.roomId(), request.ticket(), (connection, sender) -> {
             List<ChatMessage> messages = new ArrayList<>();
@@ -70,7 +76,9 @@ public final class ChatService implements AutoCloseable {
             Collections.reverse(messages); return List.copyOf(messages);
         });
         Subscription subscription = new Subscription(request, history, disconnect);
-        subscribers.add(subscription); return subscription;
+        synchronized(this) {require(request,"CHAT_LISTEN");if(subscribers.size()>=MAX_SUBSCRIPTIONS) throw new ChatException("SERVER_BUSY","Chat đang bận. Vui lòng thử lại.");subscribers.add(subscription);}
+        return subscription;
+        }
     }
 
     public void validate(Subscription subscription) throws SQLException, ChatException {

@@ -41,6 +41,8 @@ public final class FileMetadataRepository {
     private final Clock clock;
     private final PasswordHasher passwords = new PasswordHasher();
     private final SecureRandom random = new SecureRandom();
+    private String legacyOwner;
+    public void legacyOwner(String instance) {legacyOwner=Objects.requireNonNull(instance);}
 
     public FileMetadataRepository() { this(DatabaseConnection::getConnection); }
 
@@ -52,6 +54,15 @@ public final class FileMetadataRepository {
         sessions = new SessionService(connections, clock);
     }
 
+    public List<RetiredFile> closedRoomFiles(long roomId) throws SQLException {
+        try(var connection=connections.getConnection();var query=connection.prepareStatement(
+                "SELECT f.Ma_Tep,f.Duong_Dan_Luu_Tru,t.Ma_Tin_Nhan,t.Ma_Phong FROM Tep_Dinh_Kem f JOIN Tin_Nhan t ON t.Ma_Tin_Nhan=f.Ma_Tin_Nhan WHERE t.Ma_Phong=? ORDER BY f.Ma_Tep LIMIT 100")) {
+            query.setLong(1,roomId);var result=new ArrayList<RetiredFile>();
+            try(var rows=query.executeQuery()) {while(rows.next()) result.add(new RetiredFile(rows.getLong(1),rows.getString(2),rows.getLong(3),rows.getLong(4)));}
+            return result;
+        }
+    }
+
     public long authenticate(String token) throws SQLException, TransferException {
         return sessions.authenticate(token);
     }
@@ -59,13 +70,41 @@ public final class FileMetadataRepository {
     public void authorize(long userId, long roomId) throws SQLException, TransferException {
         try (Connection connection = connections.getConnection()) { authorize(connection, userId, roomId); }
     }
+    public String membershipGeneration(long userId,long roomId) throws SQLException,TransferException {
+        try(var connection=connections.getConnection()) {authorize(connection,userId,roomId);return membershipGeneration(connection,userId,roomId);}
+    }
+    public record BoundUpload(TransferStorage.UploadSession session,String generation) { }
+    @FunctionalInterface public interface UploadBegin {TransferStorage.UploadSession begin(String generation) throws IOException;}
+    public BoundUpload beginUpload(long user,long room,String opaque,UploadBegin action) throws SQLException,TransferException,IOException {
+        return beginUpload(user,room,opaque,null,action);
+    }
+    public BoundUpload beginUpload(long user,long room,String opaque,String token,UploadBegin action) throws SQLException,TransferException,IOException {
+        try(var connection=connections.getConnection()) {
+            beginMutation(connection);
+            try {
+                if(token!=null && sessions.authenticate(connection,token,true)!=user) throw new TransferException("INVALID_SESSION","Phiên đăng nhập không hợp lệ.");
+                requireOpenRoom(lockRoom(connection,room));authorize(connection,user,room);
+                if(opaque!=null && !opaque.isBlank()) try(var query=connection.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
+                    query.setLong(1,room);try(var rows=query.executeQuery()) {if(!rows.next() || !opaque.equals(rows.getString(1))) throw new TransferException("STALE_TRANSFER","Phòng đã được mở lại.");}
+                }
+                String generation=membershipGeneration(connection,user,room);
+                var session=action.begin(generation);connection.commit();return new BoundUpload(session,generation);
+            } catch(SQLException | IOException | RuntimeException failure) {rollback(connection,failure);throw failure;}
+        }
+    }
+    private static String membershipGeneration(Connection connection,long userId,long roomId) throws SQLException,TransferException {
+        try(var query=connection.prepareStatement("SELECT Ma_Thanh_Vien_Phong FROM Thanh_Vien_Phong WHERE Ma_Phong=? AND Ma_Nguoi_Dung=? AND Roi_Phong_Luc IS NULL ORDER BY Ma_Thanh_Vien_Phong DESC LIMIT 1")) {
+            query.setLong(1,roomId);query.setLong(2,userId);try(var rows=query.executeQuery()) {if(rows.next()) return Long.toString(rows.getLong(1));}
+        }
+        throw denied();
+    }
 
     public RoomInfo createRoom(long userId, String name, String pin, int capacity)
             throws SQLException, TransferException {
         String roomName = name == null ? "" : name.strip();
         String cleanPin = pin == null ? "" : pin;
         if (roomName.isEmpty() || roomName.length() > 100 || hasControl(roomName)
-                || capacity < 2 || capacity > 250 || (!cleanPin.isEmpty() && !cleanPin.matches("[0-9]{4,6}"))) {
+                || capacity < 2 || capacity > 50 || (!cleanPin.isEmpty() && !cleanPin.matches("[0-9]{4,6}"))) {
             throw invalid("Tên phòng, PIN hoặc số người tối đa không hợp lệ.");
         }
         String pinHash = cleanPin.isEmpty() ? null : passwords.hash(cleanPin);
@@ -89,6 +128,7 @@ public final class FileMetadataRepository {
                         statement.executeUpdate();
                         roomId = generatedId(statement);
                     }
+                    if(legacyOwner!=null) server.meeting.RoomRepository.markLegacyOwnership(connection,roomId,legacyOwner,clock.instant());
                     addMembership(connection, roomId, userId, "CHU_PHONG");
                     connection.commit();
                     return new RoomInfo(roomId, code, roomName, capacity, userId);
@@ -126,7 +166,7 @@ public final class FileMetadataRepository {
                         statement.setLong(1, room.info().id());
                         try (ResultSet result = statement.executeQuery()) {
                             result.next();
-                            if (result.getLong(1) >= room.info().capacity()) {
+                            if (result.getLong(1) >= Math.min(50,room.info().capacity())) {
                                 throw new TransferException("ROOM_FULL", "Phòng đã đủ người.");
                             }
                         }
@@ -262,6 +302,15 @@ public final class FileMetadataRepository {
         }
     }
 
+    public void retireOrphan(long roomId,String key,Instant cutoff,RetirementAction deleteObject) throws SQLException,IOException {
+        if(roomId<1 || key==null || !key.startsWith("rooms/"+roomId+"/files/")) throw new IOException("INVALID_ROOM_OBJECT");
+        inExpiredRoom(roomId,cutoff,connection -> {
+            try(var query=connection.prepareStatement("SELECT 1 FROM Tep_Dinh_Kem f JOIN Tin_Nhan t ON t.Ma_Tin_Nhan=f.Ma_Tin_Nhan WHERE t.Ma_Phong=? AND f.Duong_Dan_Luu_Tru=? LIMIT 1")) {
+                query.setLong(1,roomId);query.setString(2,key);try(var rows=query.executeQuery()) {if(rows.next()) return;}
+            }
+            deleteObject.run(connection);
+        });
+    }
     /** Disk errors roll back metadata so reopening preserves files that could not yet be removed. */
     public boolean retireFile(RetiredFile file, Instant cutoff, RetirementAction deleteObject) throws SQLException, IOException {
         return inExpiredRoom(file.roomId(), cutoff, connection -> {
@@ -292,13 +341,21 @@ public final class FileMetadataRepository {
     public FileMetadata complete(UUID transferId, long userId, long roomId, String originalName,
             String mimeType, long size, String checksum, String storageKey)
             throws SQLException, TransferException {
+        return complete(transferId,userId,roomId,originalName,mimeType,size,checksum,storageKey,null);
+    }
+    public FileMetadata complete(UUID transferId,long userId,long roomId,String originalName,String mimeType,long size,String checksum,String storageKey,String generation) throws SQLException,TransferException {
+        return complete(transferId,userId,roomId,originalName,mimeType,size,checksum,storageKey,generation,null);
+    }
+    public FileMetadata complete(UUID transferId,long userId,long roomId,String originalName,String mimeType,long size,String checksum,String storageKey,String generation,String token) throws SQLException,TransferException {
         validateFile(transferId, originalName, mimeType, size, checksum, storageKey);
         String normalizedChecksum = checksum.toLowerCase(Locale.ROOT);
         try (Connection connection = connections.getConnection()) {
             beginMutation(connection);
             try {
+                if(token!=null && sessions.authenticate(connection,token,true)!=userId) throw new TransferException("INVALID_SESSION","Phiên đăng nhập không hợp lệ.");
                 requireOpenRoom(lockRoom(connection, roomId));
                 authorize(connection, userId, roomId);
+                if(generation!=null && !generation.equals(membershipGeneration(connection,userId,roomId))) throw new TransferException("STALE_TRANSFER","Lượt truyền thuộc lần tham gia phòng cũ.");
                 StoredFile existing = findFile(connection, "f.Transfer_Id = ?", transferId.toString());
                 if (existing != null) {
                     requireSameFile(existing, userId, roomId, originalName, mimeType, size,
@@ -393,8 +450,12 @@ public final class FileMetadataRepository {
             statement.setObject(1, idOrCode);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) throw new TransferException("ROOM_NOT_FOUND", "Không tìm thấy phòng.");
-                return new RoomRow(new RoomInfo(result.getLong(1), result.getString(2), result.getString(3),
+                RoomRow room=new RoomRow(new RoomInfo(result.getLong(1), result.getString(2), result.getString(3),
                         result.getInt(4), result.getLong(5)), result.getString(6), result.getBoolean(7), result.getString(8));
+                if(legacyOwner!=null) try(var owner=connection.prepareStatement("SELECT Instance_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
+                    owner.setLong(1,room.info().id());try(var rows=owner.executeQuery()) {if(!rows.next() || !legacyOwner.equals(rows.getString(1))) throw new TransferException("PERMISSION_DENIED","Phòng không thuộc server quản lý hiện tại.");}
+                }
+                return room;
             }
         }
     }

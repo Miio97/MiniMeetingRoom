@@ -212,7 +212,7 @@ class UnifiedRoomCompatibilityTest {
         assertThrows(common.filetransfer.TransferException.class, () -> files.authorize(guest.user().id(), id));
         assertEquals(1, database.count("SELECT COUNT(*) FROM Phong_Hop"));
     }
-    @Test void transferredHostCanReopenWithFreshRightsAndPreservedChatHistory() throws Exception {
+    @Test void transferredHostCanReopenWithFreshRightsAfterContentCleanup() throws Exception {
         var owner = database.account("owner", "Owner"); var successor = database.account("successor", "Successor");
         var a = session(owner); var b = session(successor);
         a.create(new CreateRoomParams("Reopened unified room", "1234", 3, false)).get(10, TimeUnit.SECONDS);
@@ -226,6 +226,10 @@ class UnifiedRoomCompatibilityTest {
         waitFor(() -> b.snapshot() == null && rooms.participantCount() == 0);
         var forbidden = assertThrows(ExecutionException.class, () -> a.reopen(code).get(10, TimeUnit.SECONDS));
         assertEquals("HOST_REQUIRED", ((common.signaling.SignalException) forbidden.getCause()).code());
+        var cleaning=assertThrows(ExecutionException.class,() -> b.reopen(code).get(10,TimeUnit.SECONDS));
+        assertEquals("ROOM_CLEANING",((common.signaling.SignalException)cleaning.getCause()).code());
+        database.execute("CREATE TABLE IF NOT EXISTS Tep_Dinh_Kem(Ma_Tep BIGINT PRIMARY KEY,Ma_Tin_Nhan BIGINT)");
+        try(var cleanup=new ImmediateRoomCleanup(database::connection,"unified-test",room -> {},room -> false,() -> {})) {assertTrue(cleanup.clean(id));}
         var preview = b.reopen(code).get(10, TimeUnit.SECONDS);
         assertNotEquals(original.roomId(), preview.roomId()); assertEquals(code, preview.joinCode());
         var files = new FileMetadataRepository(database::connection);
@@ -238,8 +242,8 @@ class UnifiedRoomCompatibilityTest {
         transport.chat(ChatRequest.send(successor.token(), id, b.selfParticipantId(), "after reopening"));
         var history = new CopyOnWriteArrayList<ChatMessage>();
         chats.add(transport.listenChat(ChatRequest.listen(successor.token(), id, b.selfParticipantId()), response -> history.addAll(response.messages()), error -> { }));
-        waitFor(() -> history.stream().anyMatch(message -> message.text().equals("before reopening"))
-                && history.stream().anyMatch(message -> message.text().equals("after reopening")));
+        waitFor(() -> history.stream().anyMatch(message -> message.text().equals("after reopening")));
+        assertFalse(history.stream().anyMatch(message -> message.text().equals("before reopening")));
         var numericJoin = assertThrows(ExecutionException.class, () -> a.lookup(Long.toString(id), "1234").get(10, TimeUnit.SECONDS));
         assertEquals("ROOM_NOT_FOUND", ((common.signaling.SignalException) numericJoin.getCause()).code());
         a.lookup(code, "1234").get(10, TimeUnit.SECONDS); a.join(false, false).get(10, TimeUnit.SECONDS);

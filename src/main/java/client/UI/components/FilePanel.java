@@ -22,6 +22,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
     private final SceneManager manager;
     private final FileTransferClient client;
     private final String token;
+    private final String roomIdentity;
     private final long roomId;
     private final VBox list = new VBox(12);
     private final Label status = Ui.label("Đang lấy danh sách tệp…", "caption");
@@ -36,6 +37,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
 
     public FilePanel(SceneManager manager) {
         this.manager = manager; client = manager.fileTransferClient(); token = manager.sessionToken(); roomId = manager.serverRoom().id();
+        roomIdentity=manager.hasVideoRoom() && manager.sfuSession().snapshot()!=null?manager.sfuSession().snapshot().roomId():null;
         list.setPadding(new Insets(16)); setCenter(Ui.scroll(list));
         Button send = Ui.button("+  Gửi tệp", "primary", this::chooseUpload); send.setMaxWidth(Double.MAX_VALUE);
         VBox bottom = Ui.column(8, send, status); bottom.setPadding(new Insets(12)); setBottom(bottom);
@@ -80,7 +82,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
         try {
             FileMetadata completed = null;
             if (row.source != null) {
-                if (row.upload == null) row.upload = client.prepareUpload(roomId, row.source, row.uploadId, row.cancellation, p -> progress(row, p));
+                if (row.upload == null) row.upload = client.prepareUpload(roomId, row.source, row.uploadId, row.cancellation, p -> progress(row, p)).inMeeting(roomIdentity);
                 completed = client.upload(token, row.upload, row.cancellation, p -> progress(row, p));
             } else client.download(token, row.file, row.destination, row.cancellation, p -> progress(row, p));
             FileMetadata uploaded = completed;

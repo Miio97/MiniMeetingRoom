@@ -64,6 +64,7 @@ class FileTransferIntegrationTest {
         }
         repository = new FileMetadataRepository(this::db); start();
         room = client.createRoom(token(1), "Phòng kiểm thử", "1234", 20);
+        support.RoomTestFixture.ownLegacyTestRoom(this::db,room.id(),"local");
         for (int i = 2; i <= 6; i++) client.joinRoom(token(i), room.code(), "1234");
     }
     @AfterEach void cleanup() throws Exception {
@@ -304,62 +305,53 @@ class FileTransferIntegrationTest {
         assertEquals(200, storage.accountedBytes());
     }
 
-    @Test void retentionWaitsTwentyMinutesAndReopeningRestartsTheDeadline() throws Exception {
-        var file = client.upload(token(1), prepare(file("meeting.txt", 300)), new Cancellation(), null);
-        String key = repository.storageKey(file.id());
-        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
-        closeRoomAt(closed);
-        var retention = new FileRetentionService(repository, storage);
-        retention.sweep(closed.minusSeconds(1)); // 19:59 after close, with a 20-minute policy.
-        assertTrue(Files.exists(storage.resolve(key)));
-        assertEquals(1, count("Tep_Dinh_Kem"));
-
-        roomCommand("REOPEN_ROOM", closed.plusSeconds(19 * 60));
-        retention.sweep(closed.plusSeconds(10 * 60)); // Old deadline has passed, but room is open.
-        assertEquals(file.id(), repository.find(1, file.id()).id());
-        assertTrue(Files.exists(storage.resolve(key)));
-
-        Instant closedAgain = closed.plusSeconds(31 * 60);
-        roomCommand("LEAVE_ROOM", closedAgain);
-        retention.sweep(closedAgain.minusSeconds(1));
-        assertTrue(Files.exists(storage.resolve(key)));
-        retention.sweep(closedAgain); // Exactly 20 minutes since the most recent close.
-        assertFalse(Files.exists(storage.resolve(key)));
-        assertEquals(0, count("Tep_Dinh_Kem"));
-        assertEquals(0, storage.accountedBytes());
-    }
-
-    @Test void staleRetentionCandidateCannotDeleteAfterReopenOrANewClose() throws Exception {
-        var file = client.upload(token(1), prepare(file("race.txt", 300)), new Cancellation(), null);
-        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
-        closeRoomAt(closed);
-        var candidate = repository.retirementCandidates(closed, 0).getFirst();
-        roomCommand("REOPEN_ROOM", closed.plusSeconds(60));
-        assertFalse(repository.retireFile(candidate, closed, connection -> fail("Reopened room must retain files")));
-        roomCommand("LEAVE_ROOM", closed.plusSeconds(120));
-        assertFalse(repository.retireFile(candidate, closed, connection -> fail("New close must reset the deadline")));
-        assertEquals(1, count("Tep_Dinh_Kem"));
-        assertTrue(Files.exists(storage.resolve(candidate.storageKey())));
-    }
-
-    @Test void retentionDefersOpenDownloadsAndPreservesFailedDeletesWhenReopened() throws Exception {
-        var file = client.upload(token(1), prepare(file("reading.txt", 300)), new Cancellation(), null);
-        String key = repository.storageKey(file.id());
-        Instant closed = Instant.parse("2026-10-16T10:00:00Z");
-        var retention = new FileRetentionService(repository, storage);
-        try (InputStream reading = storage.open(key)) {
-            closeRoomAt(closed);
-            retention.sweep(closed);
-            assertEquals(1, count("Tep_Dinh_Kem"));
-            assertEquals(300, reading.readAllBytes().length);
+    private void cleanClosedContent() throws Exception {
+        var retention=new FileRetentionService(repository,storage);
+        try(var cleanup=new server.meeting.ImmediateRoomCleanup(this::db,"local",retention::sweepRoom,retention::pending,() -> {})) {
+            assertTrue(cleanup.clean(room.id()));
         }
-        roomCommand("REOPEN_ROOM", closed.plusSeconds(60));
-        retention.sweep(closed.plusSeconds(3600));
-        assertEquals(file.id(), repository.find(1, file.id()).id());
-        assertEquals(1, client.listFiles(token(1), room.id(), 0).size());
-        roomCommand("LEAVE_ROOM", closed.plusSeconds(120));
-        retention.sweep(closed.plusSeconds(120));
-        assertFalse(Files.exists(storage.resolve(key)));
+    }
+    @Test void closedRoomOrphanObjectsAreRemovedButPersonalSourcesAndActiveRoomFilesStay() throws Exception {
+        var source=file("orphan-source.txt",300);var uploaded=client.upload(token(1),prepare(source),new Cancellation(),null);
+        String key=repository.storageKey(uploaded.id());
+        try(var connection=db();var sql=connection.createStatement()) {sql.executeUpdate("DELETE FROM Tep_Dinh_Kem");sql.executeUpdate("DELETE FROM Tin_Nhan");}
+        var retention=new FileRetentionService(repository,storage);
+        try(var cleanup=new server.meeting.ImmediateRoomCleanup(this::db,"local",retention::sweepRoom,retention::pending,() -> {})) {
+            assertTrue(cleanup.clean(room.id()));assertTrue(Files.exists(storage.resolve(key)),"Active room must not be swept");
+            closeRoomAt(Instant.parse("2026-10-16T10:00:00Z"));
+            try(var connection=db()) {assertThrows(server.meeting.RoomException.class,() -> cleanup.check(connection,room.id()));}
+            assertTrue(cleanup.clean(room.id()));assertFalse(Files.exists(storage.resolve(key)));assertTrue(Files.exists(source));assertEquals(0,storage.accountedBytes());
+        }
+    }
+    @Test void immediateCleanupBlocksReopenUntilFilesAndMessagesAreGone() throws Exception {
+        var file=client.upload(token(1),prepare(file("meeting.txt",300)),new Cancellation(),null);
+        String key=repository.storageKey(file.id());
+        Instant closed=Instant.parse("2026-10-16T10:00:00Z");closeRoomAt(closed);
+        assertThrows(AssertionError.class,() -> roomCommand("REOPEN_ROOM",closed.plusSeconds(1)));
+        cleanClosedContent();assertFalse(Files.exists(storage.resolve(key)));assertEquals(0,count("Tep_Dinh_Kem"));assertEquals(0,count("Tin_Nhan"));
+        roomCommand("REOPEN_ROOM",closed.plusSeconds(2));assertTrue(client.listFiles(token(1),room.id(),0).isEmpty());
+    }
+    @Test void staleRetentionCandidateCannotDeleteNewSessionContent() throws Exception {
+        client.upload(token(1),prepare(file("race.txt",300)),new Cancellation(),null);
+        Instant closed=Instant.parse("2026-10-16T10:00:00Z");closeRoomAt(closed);
+        var candidate=repository.retirementCandidates(closed,0).getFirst();
+        cleanClosedContent();roomCommand("REOPEN_ROOM",closed.plusSeconds(1));
+        var fresh=client.upload(token(1),prepare(file("fresh.txt",300)),new Cancellation(),null);
+        assertFalse(repository.retireFile(candidate,closed,c -> fail("Old candidate must not delete new files")));
+        assertEquals(fresh.id(),repository.find(1,fresh.id()).id());assertEquals(1,count("Tep_Dinh_Kem"));
+    }
+    @Test void immediateCleanupDefersOpenDownloadsThenReopensWithoutOldFiles() throws Exception {
+        var file=client.upload(token(1),prepare(file("reading.txt",300)),new Cancellation(),null);
+        String key=repository.storageKey(file.id());Instant closed=Instant.parse("2026-10-16T10:00:00Z");
+        var retention=new FileRetentionService(repository,storage);
+        try(var cleanup=new server.meeting.ImmediateRoomCleanup(this::db,"local",retention::sweepRoom,retention::pending,() -> {})) {
+            try(InputStream reading=storage.open(key)) {
+                closeRoomAt(closed);assertThrows(java.io.IOException.class,() -> cleanup.clean(room.id()));
+                assertEquals(1,count("Tep_Dinh_Kem"));assertEquals(300,reading.readAllBytes().length);
+            }
+            assertTrue(cleanup.clean(room.id()));
+        }
+        roomCommand("REOPEN_ROOM",closed.plusSeconds(1));assertFalse(Files.exists(storage.resolve(key)));assertTrue(client.listFiles(token(1),room.id(),0).isEmpty());
     }
 
     @Test void retentionRemovesPartialAndUnpublishedPromotedUploadsAfterRestart() throws Exception {

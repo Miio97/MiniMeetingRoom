@@ -122,7 +122,10 @@ public final class FileTransferService {
             reconcileOne(request.transferId(), user);
             send(output, Type.UPLOAD_COMPLETE, request, done); return;
         }
-        var session = storage.begin(request.transferId(), user, room, name, mime, size, checksum);
+        final String selectedMime=mime;
+        var bound=repository.beginUpload(user,room,optional(request.header(),"roomIdentity",96),token,
+                generation -> storage.begin(request.transferId(),user,room,name,selectedMime,size,checksum,generation));
+        String generation=bound.generation();var session=bound.session();
         if (!session.lock().tryLock()) throw failure("TRANSFER_BUSY", "Lượt truyền đang hoạt động.");
         long started = System.nanoTime();
         try {
@@ -169,7 +172,7 @@ public final class FileTransferService {
             activity.run();
             reauthorize(token, user, room);
             // On DB failure keep promoted object + manifest for deterministic retry/recovery.
-            FileMetadata metadata = repository.complete(request.transferId(), user, room, name, mime, size, checksum, key);
+            FileMetadata metadata = repository.complete(request.transferId(), user, room, name, mime, size, checksum, key,generation,token);
             storage.completed(session);
             send(output, Type.UPLOAD_COMPLETE, request, metadata);
             event("UPLOAD_COMPLETED durationMs=" + (System.nanoTime() - started) / 1_000_000, request, user, room, size);

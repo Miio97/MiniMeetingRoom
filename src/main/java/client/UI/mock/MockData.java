@@ -4,7 +4,7 @@ import java.util.List;
 
 /** Dữ liệu minh họa; không đọc database, camera, mạng hay hệ thống tệp. */
 public final class MockData {
-    public static final int MAX_ROOM_CAPACITY = 250;
+    public static final int MAX_ROOM_CAPACITY = 50;
     public record Room(String name, String code, int people, String time, String pin, int capacity) {
         public Room(String name, String code, int people, String time, String pin) { this(name, code, people, time, pin, 50); }
         public Room {

@@ -41,6 +41,18 @@ public final class RoomService {
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
     private final boolean excludeSignalingRooms;
+    private volatile String legacyOwner;
+    public void legacyOwner(String instance) {
+        if(instance==null || !instance.matches("[A-Za-z0-9_-]{1,64}")) throw new IllegalArgumentException("INSTANCE_ID");legacyOwner=instance;
+    }
+    private void markLegacyOwner(Connection connection,long roomId) throws SQLException {
+        if(legacyOwner==null) return;
+        server.meeting.RoomRepository.markLegacyOwnership(connection,roomId,legacyOwner,clock.instant());
+    }
+    private volatile server.meeting.RoomReopenGuard reopenGuard=server.meeting.RoomReopenGuard::requireEmpty;
+    public void setReopenGuard(server.meeting.RoomReopenGuard guard) {reopenGuard=Objects.requireNonNull(guard);}
+    private volatile Runnable changed=() -> { };
+    public void onChanged(Runnable listener) {changed=Objects.requireNonNull(listener);}
 
     public RoomService() {
         this(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC());
@@ -103,6 +115,7 @@ public final class RoomService {
                 if (readOnly) return response;
                 if (response.success()) {
                     connection.commit();
+                    changed.run();
                 } else {
                     connection.rollback();
                 }
@@ -149,7 +162,7 @@ public final class RoomService {
                 }
             }
         }
-        addMember(connection, roomId, userId, "CHU_PHONG", createdAt);
+        markLegacyOwner(connection,roomId);addMember(connection, roomId, userId, "CHU_PHONG", createdAt);
         return AuthResponse.roomOk("Tạo phòng thành công.", snapshot(connection, findRoom(connection, roomId), true));
     }
 
@@ -176,7 +189,7 @@ public final class RoomService {
             return AuthResponse.error("INVALID_ROOM_PIN", "PIN phòng không đúng.");
         }
         if (!isActiveMember(connection, room.id(), userId)) {
-            if (activeCount(connection, room.id()) >= room.capacity()) {
+            if (activeCount(connection, room.id()) >= Math.min(50,room.capacity())) {
                 return AuthResponse.error("ROOM_FULL", "Phòng đã đủ số người tham gia.");
             }
             addMember(connection, room.id(), userId, room.hostId() == userId ? "CHU_PHONG" : "THANH_VIEN", clock.instant());
@@ -203,8 +216,12 @@ public final class RoomService {
         if (!"DA_DONG".equals(room.status())) {
             return AuthResponse.error("ROOM_ALREADY_ACTIVE", "Phòng chưa kết thúc hoặc đã được mở lại.");
         }
+        if(room.capacity()>50) return AuthResponse.error("ROOM_CAPACITY_POLICY","Phòng cũ vượt giới hạn 50 người. Cần điều chỉnh sức chứa trước khi mở lại.");
         Instant now = clock.instant();
         // Keep every previous attendance record ended, including stale active rows from an older server.
+        try {reopenGuard.check(connection,room.id());}
+        catch(server.meeting.RoomException cleaning) {return AuthResponse.error(cleaning.code(),cleaning.code().equals("ROOM_CLEANUP_OWNER_REQUIRED")?"Phòng legacy cũ chưa xác định server quản lý. Cần xác nhận trước khi dọn và mở lại.":"Đang dọn dữ liệu phòng. Vui lòng thử lại sau.");}
+        markLegacyOwner(connection,room.id());
         try (PreparedStatement statement = connection.prepareStatement(
                 "UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = ?, Ly_Do_Roi = 'PHONG_DONG' "
                         + "WHERE Ma_Phong = ? AND Roi_Phong_Luc IS NULL")) {
@@ -361,9 +378,11 @@ public final class RoomService {
     private RoomRow findRoom(Connection connection, String column, Object value, boolean forUpdate) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + ROOM_COLUMNS + " FROM Phong_Hop p WHERE " + column + " = ?"
-                        + (excludeSignalingRooms ? " AND NOT EXISTS (SELECT 1 FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong)" : "")
+                        + (excludeSignalingRooms || legacyOwner!=null ? " AND NOT EXISTS (SELECT 1 FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong AND x.Server_Epoch<>'legacy')" : "")
+                        + (legacyOwner!=null ? " AND NOT EXISTS (SELECT 1 FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong AND x.Instance_ID<>?)" : "")
                         + (forUpdate ? " FOR UPDATE" : ""))) {
             statement.setObject(1, value);
+            if(legacyOwner!=null) statement.setString(2,legacyOwner);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? readRoom(result) : null;
             }
