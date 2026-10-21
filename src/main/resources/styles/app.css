@@ -270,14 +270,23 @@
 .sidebar-icon { -fx-fill: transparent; -fx-stroke: -text-muted; -fx-stroke-line-cap: round; -fx-stroke-line-join: round; }
 .brand-logo { -fx-background-color: linear-gradient(to bottom right, #6C5CE7, #8E7CFF); -fx-background-radius: 10; }
 .brand-logo .sidebar-icon { -fx-stroke: white; }
-.workspace-nav {
+.workspace-nav, .light-mode .workspace-nav {
     -fx-alignment: center-left; -fx-padding: 0 14; -fx-background-color: transparent;
     -fx-background-radius: 10; -fx-border-radius: 10; -fx-border-color: transparent;
     -fx-border-width: 0 0 0 3; -fx-text-fill: -text-muted; -fx-font-weight: normal;
 }
-.workspace-nav:hover, .light-mode .workspace-nav:hover { -fx-background-color: -bg-elevated; }
-.workspace-nav-active, .workspace-nav-active:hover, .light-mode .workspace-nav-active, .light-mode .workspace-nav-active:hover {
-    -fx-background-color: -bg-selected; -fx-text-fill: -text-selected;
+/* Mouse focus must not leave a second highlighted page after navigation. */
+.workspace-nav:focused, .light-mode .workspace-nav:focused {
+    -fx-background-color: transparent; -fx-border-color: transparent; -fx-opacity: 1;
+}
+.workspace-nav:hover, .workspace-nav:pressed,
+.light-mode .workspace-nav:hover, .light-mode .workspace-nav:pressed {
+    -fx-background-color: -bg-elevated; -fx-border-color: transparent; -fx-opacity: 1;
+}
+.workspace-nav-active, .workspace-nav-active:focused, .workspace-nav-active:hover, .workspace-nav-active:pressed,
+.light-mode .workspace-nav-active, .light-mode .workspace-nav-active:focused,
+.light-mode .workspace-nav-active:hover, .light-mode .workspace-nav-active:pressed {
+    -fx-background-color: -bg-selected; -fx-text-fill: -text-main;
     -fx-border-color: transparent transparent transparent -primary; -fx-font-weight: bold;
 }
 .workspace-nav .sidebar-icon { -fx-stroke: -text-muted; }
@@ -285,15 +294,14 @@
 .sidebar-user { -fx-background-color: -bg-elevated; -fx-background-radius: 12; -fx-padding: 8 10; }
 .user-name { -fx-font-size: 13.5px; -fx-font-weight: bold; }
 .user-caption { -fx-font-size: 12px; -fx-text-fill: -text-muted; }
-.profile-hit { -fx-cursor: hand; }
 .logout-button {
     -fx-background-color: transparent; -fx-border-color: transparent; -fx-background-radius: 999;
-    -fx-padding: 0; -fx-min-width: 32; -fx-min-height: 32; -fx-max-width: 32; -fx-max-height: 32;
+    -fx-padding: 0; -fx-alignment: center;
+    -fx-min-width: 32; -fx-min-height: 32; -fx-pref-width: 32; -fx-pref-height: 32; -fx-max-width: 32; -fx-max-height: 32;
 }
 .logout-button .sidebar-icon { -fx-stroke: -text-muted; }
 .logout-button:hover, .light-mode .logout-button:hover { -fx-background-color: -bg-danger; }
 .logout-button:hover .sidebar-icon { -fx-stroke: -danger; }
-.profile-menu { -fx-background-radius: 12; -fx-border-radius: 12; -fx-effect: dropshadow(gaussian, rgba(31,36,48,.16), 18, 0, 0, 5); }
 .context-menu.light-mode, .context-menu.theme-dark { -fx-background-color: -bg-elevated; }
 .danger, .light-mode .danger:hover { -fx-background-color: #E5484D; -fx-border-color: #E5484D; -fx-text-fill: white; }
 .light-mode .danger:focused { -fx-border-color: #E5484D; }
@@ -318,12 +326,6 @@
 .settings-tabs .tab:selected .tab-label { -fx-text-fill: -text-selected; }
 .settings-tabs .tab-content-area { -fx-background-color: transparent; }
 .settings-tabs .focus-indicator { -fx-border-color: transparent; }
-.settings-switch, .settings-switch:hover, .settings-switch:selected,
-.light-mode .settings-switch, .light-mode .settings-switch:hover, .light-mode .settings-switch:selected {
-    -fx-background-color: transparent; -fx-border-color: transparent; -fx-padding: 2;
-}
-.switch-track { -fx-background-color: -text-muted; -fx-background-radius: 999; }
-.settings-switch:selected .switch-track { -fx-background-color: #6C5CE7; }
 
 /* Disabled must also win over selected/hover colors in both palettes. */
 .button:disabled, .toggle-button:disabled,
@@ -359,122 +361,3 @@
     -fx-border-color: -border;
     -fx-effect: dropshadow(gaussian, rgba(30,40,70,.14), 16, 0, 0, 4);
 }
-
-/* Month Calendar */
-.month-calendar {
-    -fx-background-color: -bg-surface;
-    -fx-background-radius: 14;
-    -fx-border-color: -border;
-    -fx-border-radius: 14;
-    -fx-padding: 16;
-}
-.calendar-popup-container {
-    -fx-background-color: -bg-surface;
-    -fx-background-radius: 14;
-    -fx-padding: 6;
-    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.35), 18, 0, 0, 4);
-}
-.calendar-header {
-    -fx-alignment: center;
-    -fx-padding: 0 4 8 4;
-}
-.calendar-month-title {
-    -fx-font-weight: bold;
-    -fx-font-size: 14px;
-    -fx-text-fill: -text-main;
-}
-.calendar-nav-btn {
-    -fx-background-color: transparent;
-    -fx-border-color: transparent;
-    -fx-text-fill: -text-muted;
-    -fx-font-size: 16px;
-    -fx-padding: 4 8;
-    -fx-cursor: hand;
-}
-.calendar-nav-btn:hover {
-    -fx-text-fill: -text-main;
-    -fx-background-color: -bg-hover;
-    -fx-background-radius: 8;
-}
-.calendar-weekday {
-    -fx-alignment: center;
-    -fx-font-size: 11px;
-    -fx-text-fill: -text-muted;
-    -fx-font-weight: bold;
-}
-.calendar-day {
-    -fx-background-color: transparent;
-    -fx-border-color: transparent;
-    -fx-text-fill: -text-main;
-    -fx-font-size: 13px;
-    -fx-padding: 0;
-    -fx-background-radius: 8;
-    -fx-cursor: hand;
-}
-.calendar-day:hover {
-    -fx-background-color: -bg-hover;
-}
-.calendar-day:disabled {
-    -fx-opacity: 0.35;
-    -fx-cursor: default;
-}
-.calendar-day-other-month {
-    -fx-text-fill: -text-muted;
-    -fx-opacity: 0.4;
-}
-.calendar-day-today {
-    -fx-border-color: -primary;
-    -fx-border-width: 1.5;
-    -fx-border-radius: 8;
-}
-.calendar-day-selected {
-    -fx-background-color: -primary;
-    -fx-border-color: -primary;
-    -fx-text-fill: white;
-    -fx-font-weight: bold;
-}
-.calendar-event-dot {
-    -fx-fill: -primary;
-}
-.calendar-day-selected .calendar-event-dot {
-    -fx-fill: white;
-}
-
-/* Schedule Card in Lobby */
-.schedule-card {
-    -fx-background-color: -bg-surface;
-}
-.schedule-row {
-    -fx-background-color: -bg-elevated;
-    -fx-background-radius: 12;
-    -fx-padding: 10 14;
-    -fx-border-color: -border;
-    -fx-border-radius: 12;
-}
-.schedule-time {
-    -fx-font-weight: bold;
-    -fx-text-fill: -primary;
-    -fx-font-size: 12px;
-}
-.schedule-title {
-    -fx-font-weight: bold;
-    -fx-text-fill: -text-main;
-    -fx-font-size: 13.5px;
-}
-.schedule-desc {
-    -fx-text-fill: -text-muted;
-    -fx-font-size: 11.5px;
-}
-.schedule-delete-btn {
-    -fx-background-color: transparent;
-    -fx-border-color: transparent;
-    -fx-text-fill: -danger;
-    -fx-font-size: 11px;
-    -fx-cursor: hand;
-    -fx-padding: 4 8;
-}
-.schedule-delete-btn:hover {
-    -fx-background-color: -bg-danger;
-    -fx-background-radius: 6;
-}
-

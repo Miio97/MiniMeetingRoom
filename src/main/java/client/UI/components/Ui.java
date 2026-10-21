@@ -36,7 +36,16 @@ public final class Ui {
         style(alert); alert.showAndWait();
     }
     public static void style(Dialog<?> dialog) {
-        dialog.getDialogPane().getStylesheets().add(Ui.class.getResource("/styles/app.css").toExternalForm());
-        ThemeManager.attach(dialog.getDialogPane());
+        DialogPane pane = dialog.getDialogPane();
+        String css = Ui.class.getResource("/styles/app.css").toExternalForm();
+        if (!pane.getStylesheets().contains(css)) pane.getStylesheets().add(css);
+        ThemeManager.attach(pane);
+        if (pane.getScene() != null) ThemeManager.attachScene(pane.getScene());
+        if (!pane.getProperties().containsKey("dialog-theme-scene-listener")) {
+            pane.sceneProperty().addListener((obs, old, scene) -> {
+                if (scene != null) ThemeManager.attachScene(scene);
+            });
+            pane.getProperties().put("dialog-theme-scene-listener", Boolean.TRUE);
+        }
     }
 }

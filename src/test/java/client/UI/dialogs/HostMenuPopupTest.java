@@ -27,4 +27,25 @@ class HostMenuPopupTest {
             return null;
         });
     }
+    @Test void pendingDisablesEveryActionAndRestoresUnavailableMediaStates() throws Exception {
+        FxTestRuntime.call(() -> {
+            var pending = new javafx.beans.property.SimpleBooleanProperty(false);
+            var menu = new HostMenuPopup(false, true, false, () -> { }, () -> { }, () -> { }, () -> { }, () -> { });
+            menu.bindPending(pending); pending.set(true);
+            assertTrue(menu.getItems().stream().allMatch(MenuItem::isDisable));
+            pending.set(false);
+            for (MenuItem item : menu.getItems()) {
+                if (item instanceof javafx.scene.control.SeparatorMenuItem) continue;
+                assertEquals(List.of("Tắt microphone", "Dừng chia sẻ").contains(item.getText()), item.isDisable());
+            }
+            pending.set(true); menu.mediaState(true, false, true);
+            assertTrue(menu.getItems().stream().allMatch(MenuItem::isDisable));
+            pending.set(false);
+            for (MenuItem item : menu.getItems()) {
+                if (item instanceof javafx.scene.control.SeparatorMenuItem) continue;
+                assertEquals("Tắt camera".equals(item.getText()), item.isDisable());
+            }
+            return null;
+        });
+    }
 }

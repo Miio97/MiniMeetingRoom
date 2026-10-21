@@ -36,11 +36,6 @@ public final class VietnamTime {
         return days[dayIndex] + ", " + date.getDayOfMonth() + " thg " + date.getMonthValue();
     }
 
-    public static String formatScheduleDate(LocalDate date) {
-        if (date == null) return "";
-        return date.getDayOfMonth() + " thg " + date.getMonthValue() + ", " + date.getYear();
-    }
-
     public static String timeNow() { return formatTime(Instant.now()); }
 
     private static DateTimeFormatter formatter(String pattern) {

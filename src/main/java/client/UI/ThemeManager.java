@@ -7,6 +7,8 @@ import javafx.beans.value.ChangeListener;
 import javafx.beans.value.WeakChangeListener;
 import javafx.css.PseudoClass;
 import javafx.scene.Parent;
+import javafx.scene.Scene;
+import javafx.scene.paint.Color;
 import javafx.scene.control.Button;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
@@ -18,6 +20,10 @@ import java.util.WeakHashMap;
 /** Theme dùng chung trong phiên chạy; đổi màu tại chỗ, giữ nguyên dữ liệu và control. */
 public final class ThemeManager {
     private static final BooleanProperty LIGHT = new SimpleBooleanProperty(true);
+    private static final Object SCENE_THEME_LISTENER = new Object();
+    // Keep these aligned with the final -bg-main tokens in app.css.
+    private static final Color LIGHT_BACKGROUND = Color.web("#F7F8FC");
+    private static final Color DARK_BACKGROUND = Color.web("#0F1117");
     // Value is true only for PopupControl CSS bridges that need an explicit dark palette.
     private static final WeakHashMap<Parent, Boolean> ROOTS = new WeakHashMap<>();
     static {
@@ -42,6 +48,16 @@ public final class ThemeManager {
     }
     private ThemeManager() { }
     public static boolean isLight() { return LIGHT.get(); }
+    public static Color backgroundColor() { return isLight() ? LIGHT_BACKGROUND : DARK_BACKGROUND; }
+    /** Scene fill remains visible while a root fades; keep it in the same palette. */
+    public static void attachScene(Scene scene) {
+        scene.setFill(backgroundColor());
+        if (scene.getProperties().containsKey(SCENE_THEME_LISTENER)) return;
+        ChangeListener<Boolean> update = (obs, old, value) -> scene.setFill(backgroundColor());
+        LIGHT.addListener(new WeakChangeListener<>(update));
+        // The scene owns its listener; the global preference must not retain old scenes.
+        scene.getProperties().put(SCENE_THEME_LISTENER, update);
+    }
     public static void setLight(boolean value) {
         LIGHT.set(value);
         // Snapshot weakly held roots after property listeners run; closing native dialogs can release roots.

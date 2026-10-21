@@ -114,9 +114,6 @@ class AuthFlowTest {
             if ("LIST_ROOMS".equals(request.action())) {
                 return AuthResponse.roomsOk("Đã tải danh sách phòng.", List.of());
             }
-            if ("LIST_SCHEDULES".equals(request.action())) {
-                return AuthResponse.schedulesOk("Đã tải danh sách lịch.", List.of());
-            }
             actions.add(request.action());
             if ("REGISTER".equals(request.action())) {
                 registrationReceived.countDown();

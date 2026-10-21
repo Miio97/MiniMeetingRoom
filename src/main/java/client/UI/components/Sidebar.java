@@ -3,7 +3,6 @@ package client.UI.components;
 import client.UI.SceneManager;
 import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
-import javafx.geometry.Side;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 
@@ -28,40 +27,27 @@ public final class Sidebar extends VBox {
         VBox text = Ui.column(2, name, Ui.label(manager.username(), "user-caption"));
         text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
         HBox profile = Ui.row(8, Ui.avatar(manager.user(), 36), text);
-        profile.setMinWidth(0); HBox.setHgrow(profile, Priority.ALWAYS); profile.getStyleClass().add("profile-hit");
-        ContextMenu menu = new ContextMenu();
-        MenuItem account = new MenuItem("Hồ sơ của tôi", Icons.icon("user", 18));
-        account.setOnAction(e -> manager.settingsAccount());
-        MenuItem logout = new MenuItem("Đăng xuất", Icons.icon("logout", 16));
-        logout.disableProperty().bind(manager.logoutPendingProperty());
-        logout.textProperty().bind(Bindings.when(manager.logoutPendingProperty()).then("Đang đăng xuất…").otherwise("Đăng xuất"));
-        logout.setOnAction(e -> confirmLogout(manager)); menu.getItems().addAll(account, logout);
-        menu.getStyleClass().add("profile-menu");
-        profile.setOnMouseClicked(e -> {
-            if (menu.isShowing()) menu.hide();
-            else {
-                var anchor = profile.getParent();
-                menu.show(anchor, Side.TOP, 0, -12);
-                // The first show measures the skin with CSS/shadow; position using its actual height.
-                var bounds = anchor.localToScreen(anchor.getBoundsInLocal());
-                if (bounds != null) menu.setY(bounds.getMinY() - menu.getHeight() - 10);
-            }
-        });
-        IconButton exit = new IconButton("close", "Đăng xuất");
-        exit.setGraphic(Icons.icon("logout", 16)); exit.getStyleClass().add("logout-button");
+        profile.setMinWidth(0); HBox.setHgrow(profile, Priority.ALWAYS);
+        Button exit = Ui.button("", "logout-button", () -> confirmLogout(manager));
+        exit.setAccessibleText("Đăng xuất"); exit.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
+        // Keep the vector at its native size so StackPane centers its actual bounds.
+        StackPane logoutIcon = Icons.icon("logout", 24);
+        logoutIcon.setScaleX(2.0 / 3); logoutIcon.setScaleY(2.0 / 3);
+        exit.setGraphic(logoutIcon);
         exit.disableProperty().bind(manager.logoutPendingProperty());
         Tooltip logoutHint = new Tooltip();
         logoutHint.textProperty().bind(Bindings.when(manager.logoutPendingProperty()).then("Đang đăng xuất…").otherwise("Đăng xuất"));
         exit.setTooltip(logoutHint);
-        exit.setOnAction(e -> confirmLogout(manager));
         HBox user = Ui.row(6, profile, exit); user.getStyleClass().add("sidebar-user");
         user.setMinHeight(56); user.setMaxHeight(56); getChildren().add(user);
     }
     private Button nav(String title, String icon, boolean active, Runnable action) {
         Button button = Ui.button(title, "workspace-nav", action);
+        button.getStyleClass().setAll(active
+                ? new String[] {"button", "workspace-nav", "workspace-nav-active"}
+                : new String[] {"button", "workspace-nav"});
         button.setGraphic(Icons.icon(icon, 18)); button.setGraphicTextGap(12);
         button.setMaxWidth(Double.MAX_VALUE); button.setMinHeight(44); button.setMaxHeight(44);
-        if (active) button.getStyleClass().add("workspace-nav-active");
         return button;
     }
     private void confirmLogout(SceneManager manager) {

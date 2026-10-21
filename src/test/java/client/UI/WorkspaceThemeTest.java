@@ -78,31 +78,34 @@ class WorkspaceThemeTest {
         });
     }
 
-    @Test void realAccountMenuHasTransparentOuterRootAndTracksThemeWhileOpen() throws Exception {
+    @Test void sidebarHasOneCenteredLogoutButtonAndNoRedundantProfileMenu() throws Exception {
         FxTestRuntime.call(() -> {
             boolean original = ThemeManager.isLight(); Stage stage = new Stage(); SceneManager manager = manager(stage);
             manager.cacheRecentRooms(List.of()); LobbyScreen lobby = new LobbyScreen(manager);
             try {
                 Scene scene = new Scene(lobby, 1380, 915); scene.getStylesheets().add(Ui.class.getResource("/styles/app.css").toExternalForm());
-                stage.setScene(scene); ThemeManager.attach(lobby); stage.show(); css(lobby);
-                HBox hit = (HBox) lobby.lookup(".profile-hit");
+                stage.setScene(scene); ThemeManager.attach(lobby); css(lobby);
+                HBox user = (HBox) lobby.lookup(".sidebar-user");
+                assertEquals(1, user.lookupAll(".button").size());
+                HBox profile = (HBox) user.getChildren().getFirst();
+                assertNull(profile.getOnMouseClicked());
+                assertNull(lobby.lookup(".profile-hit"));
+                Button exit = (Button) user.lookup(".logout-button");
+                assertEquals("Đăng xuất", exit.getAccessibleText());
+                assertNotNull(exit.getOnAction());
                 for (boolean light : new boolean[] {true, false, true, false}) {
-                    ThemeManager.setLight(light); css(lobby); hit.getOnMouseClicked().handle(null);
-                    ContextMenu menu = Window.getWindows().stream().filter(ContextMenu.class::isInstance).map(ContextMenu.class::cast).findFirst().orElseThrow();
-                    Parent root = menu.getScene().getRoot(); css(root);
-                    Region surface = root.lookupAll(".context-menu").stream().filter(Region.class::isInstance).map(Region.class::cast)
-                            .filter(region -> region.getBorder() != null).findFirst().orElseThrow();
-                    assertNotNull(surface);
-                    assertEquals(Color.TRANSPARENT, background((Region) root));
-                    assertEquals(1, surface.getBorder().getStrokes().getFirst().getWidths().getTop());
-                    var anchor = hit.getParent().localToScreen(hit.getParent().getBoundsInLocal());
-                    assertTrue(menu.getY() + menu.getHeight() <= anchor.getMinY(), "Menu must sit above the whole profile card");
-                    for (boolean switched : new boolean[] {!light, light}) {
-                        ThemeManager.setLight(switched); css(lobby); css(root);
-                        assertEquals(switched, background(surface).getBrightness() > .5);
-                        for (var node : root.lookupAll(".menu-item .label")) readable(((Label) node).getTextFill(), background(surface));
+                    ThemeManager.setLight(light); css(lobby);
+                    assertEquals(light, background(user).getBrightness() > .5);
+                    for (boolean hover : new boolean[] {true, false}) {
+                        exit.pseudoClassStateChanged(PseudoClass.getPseudoClass("hover"), hover); css(lobby);
+                        var icon = exit.getGraphic().lookup(".sidebar-icon");
+                        var iconBounds = icon.localToScene(icon.getBoundsInLocal());
+                        var buttonBounds = exit.localToScene(exit.getLayoutBounds());
+                        assertEquals(buttonBounds.getCenterX(), iconBounds.getCenterX(), .6);
+                        assertEquals(buttonBounds.getCenterY(), iconBounds.getCenterY(), .6);
+                        assertEquals(32, exit.getWidth()); assertEquals(32, exit.getHeight());
                     }
-                    snapshot(root, light ? "account-light" : "account-dark"); menu.hide();
+                    snapshot(lobby, light ? "account-light" : "account-dark");
                 }
             } finally { lobby.dispose(); manager.shutdown(); stage.close(); ThemeManager.setLight(original); }
             return null;
@@ -148,7 +151,7 @@ class WorkspaceThemeTest {
         });
     }
 
-    @Test void settingsTabsAndSwitchesKeepTheirThemeInPlace() throws Exception {
+    @Test void settingsTabsAndDeviceControlsKeepTheirThemeInPlace() throws Exception {
         FxTestRuntime.call(() -> {
             boolean original = ThemeManager.isLight(); Stage stage = new Stage(); SceneManager manager = manager(stage);
             SettingsScreen settings = new SettingsScreen(manager, false);
@@ -208,10 +211,13 @@ class WorkspaceThemeTest {
                 assertNotNull(settings.lookup("#theme-dark"));
                 assertNotNull(settings.lookup("#settings-video-quality"));
                 assertNotNull(settings.lookup("#camera-controls"));
+                assertTrue(settings.lookupAll(".settings-switch").isEmpty());
 
                 for (var node : settings.lookupAll(".label")) {
                     Label label = (Label) node;
                     assertFalse(label.getText().toLowerCase().contains("(demo)"), "Found demo label: " + label.getText());
+                    assertFalse(List.of("Âm thanh thông báo", "Tự tắt mic khi vào phòng", "Tự tắt camera khi vào phòng")
+                            .contains(label.getText()), "Removed setting is still visible: " + label.getText());
                 }
             } finally { settings.dispose(); manager.shutdown(); stage.close(); }
             return null;

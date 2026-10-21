@@ -2,10 +2,54 @@ package client.media;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CameraSwitchTest {
+    @Test void preparedPreviewPublicationIsPendingAndRapidPressesKeepTheLastChoice() throws Exception {
+        var publication = new CompletableFuture<Void>();
+        AtomicBoolean prepared = new AtomicBoolean(true);
+        AtomicInteger publishes = new AtomicInteger(), stops = new AtomicInteger();
+        try (var camera = new CameraSwitch(() -> { })) {
+            java.util.function.Supplier<CompletableFuture<Void>> publish = () -> { publishes.incrementAndGet(); return publication; };
+            java.util.function.Supplier<CompletableFuture<Void>> stop = () -> { stops.incrementAndGet(); return CompletableFuture.completedFuture(null); };
+            var first = camera.publishPrepared(prepared::get, publish, stop);
+            assertTrue(camera.pending()); assertTrue(camera.wanted()); assertEquals(1, publishes.get());
+            var duplicate = camera.publishPrepared(prepared::get, publish, stop);
+            for (int i = 0; i < 100; i++) assertSame(first, camera.toggle(true, publish, stop));
+            prepared.set(false); publication.complete(null);
+            first.get(1, TimeUnit.SECONDS); duplicate.get(1, TimeUnit.SECONDS);
+            assertEquals(1, publishes.get()); assertEquals(0, stops.get()); assertFalse(camera.pending());
+            assertTrue(camera.wanted());
+        }
+    }
+
+    @Test void enteringDuringPreviewWaitsThenPublishesWithoutReopeningCapture() throws Exception {
+        var preview = new CompletableFuture<Void>(); var publication = new CompletableFuture<Void>();
+        AtomicBoolean prepared = new AtomicBoolean(); AtomicInteger publishes = new AtomicInteger();
+        try (var camera = new CameraSwitch(() -> { })) {
+            camera.toggle(false, () -> preview, () -> CompletableFuture.completedFuture(null));
+            var entered = camera.publishPrepared(prepared::get, () -> { publishes.incrementAndGet(); return publication; },
+                    () -> CompletableFuture.completedFuture(null));
+            assertEquals(0, publishes.get()); assertTrue(camera.pending());
+            prepared.set(true); preview.complete(null);
+            assertTrue(camera.pending()); assertTrue(camera.wanted()); assertFalse(entered.isDone());
+            assertEquals(1, publishes.get()); publication.complete(null); entered.get(1, TimeUnit.SECONDS);
+            assertFalse(camera.pending()); assertTrue(camera.wanted());
+        }
+    }
+
+    @Test void finalOffDuringPreparedPublicationCancelsWithoutAnErrorOrAnotherStart() throws Exception {
+        var publication = new CompletableFuture<Void>(); AtomicInteger stops = new AtomicInteger();
+        try (var camera = new CameraSwitch(() -> { })) {
+            var entered = camera.publishPrepared(() -> true, () -> publication,
+                    () -> { stops.incrementAndGet(); return CompletableFuture.completedFuture(null); });
+            camera.toggle(true, () -> { fail("Must not reopen the camera"); return null; }, () -> CompletableFuture.completedFuture(null));
+            publication.completeExceptionally(new CancellationException()); entered.get(1, TimeUnit.SECONDS);
+            assertFalse(camera.pending()); assertFalse(camera.wanted()); assertEquals(0, stops.get());
+        }
+    }
     @Test void rapidPressesKeepOneStartAndApplyTheFinalOffChoice() throws Exception {
         var start = new CompletableFuture<Void>(); AtomicInteger starts = new AtomicInteger(), stops = new AtomicInteger();
         try (var camera = new CameraSwitch(() -> { })) {

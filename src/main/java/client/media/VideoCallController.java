@@ -76,6 +76,8 @@ public final class VideoCallController implements AutoCloseable {
     private final CompletableFuture<Void> closeComplete = new CompletableFuture<>();
     public CompletableFuture<Void> closeComplete() { return closeComplete; }
     private volatile boolean activeCamera;
+    private long publishedAt;
+    private boolean cameraRequestConfirmed;
     private NativeVideoSession nativeSession;
     private volatile NativeVideoSession.Peer publisher;
     private NativeVideoSession.Preview preview;
@@ -181,7 +183,8 @@ public final class VideoCallController implements AutoCloseable {
     }
     public CompletableFuture<Void> publishPreparedCamera() {
         inMeeting = true; audio.enter(); screen.enter();
-        return submit(() -> { if (preview != null && input != null && (!cameraSwitch.pending() || cameraSwitch.wanted())) publishInput(() -> !cameraSwitch.pending() || cameraSwitch.wanted()); return null; });
+        return cameraSwitch.publishPrepared(() -> activeCamera && publisher == null,
+                () -> submit(() -> { publishInput(cameraSwitch::wanted); return null; }), this::stopCamera);
     }
     public CompletableFuture<Void> startInput(Supplier<VideoInput> source) {
         return startInput(source, () -> true);
@@ -214,6 +217,7 @@ public final class VideoCallController implements AutoCloseable {
             if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
             publisher.answer(answer.get("sdp").getAsString()); requireWanted(wanted);
             publisher.quality(appliedQuality,appliedLimitation,statsConfig); activeCamera = true;
+            publishedAt = System.nanoTime(); cameraRequestConfirmed = false;
             show("Camera đang bật; đang thiết lập kết nối WebRTC với SFU.");
         } catch (Exception | LinkageError failure) {
             stopLocalCamera(); if (publicationAttempted) try { command("VIDEO_STOP", new JsonObject()); } catch (Exception ignored) { }
@@ -232,7 +236,10 @@ public final class VideoCallController implements AutoCloseable {
         requireWanted(wanted);
     }
     private void mediaFailure(String phase, Throwable failure) {
-        common.diagnostics.Diagnostics.current().failure("video.client.operation.failed", failure, Map.of("phase", phase, "code", CameraErrors.code(failure)));
+        Throwable cause = CameraErrors.unwrap(failure);
+        String original = cause instanceof SignalException signal ? signal.code() : "UNCLASSIFIED";
+        common.diagnostics.Diagnostics.current().failure("video.client.operation.failed", failure,
+                Map.of("phase", phase, "code", CameraErrors.code(failure), "response_code", original));
     }
     public CompletableFuture<Void> stopCamera() {
         return submit(() -> {
@@ -243,6 +250,7 @@ public final class VideoCallController implements AutoCloseable {
     }
     private void stopLocalCamera() {
         activeCamera = false;
+        publishedAt = 0; cameraRequestConfirmed = false;
         // Stop capture before dropping native tracks; borrowed view mailboxes stay reusable.
         VideoInput current = input; input = null; inputStarted = false;
         try { if (current != null) current.close(); }
@@ -257,8 +265,13 @@ public final class VideoCallController implements AutoCloseable {
         RoomSnapshot current = room.get();
         if (current == null) { stopLocalCamera(); return; }
         String own = self.get();
-        if (publisher != null && (publisher.failed() || current.participants().stream().filter(p -> p.participantId().equals(own))
-                .noneMatch(p -> p.mediaState().cameraRequested()))) { cameraSwitch.resetOff(); stopLocalCamera(); }
+        boolean requested = current.participants().stream().anyMatch(p -> p.participantId().equals(own) && p.mediaState().cameraRequested());
+        if (publisher != null) {
+            cameraRequestConfirmed |= requested;
+            if (publisher.failed() || shouldStopPublication(requested, cameraRequestConfirmed, System.nanoTime() - publishedAt)) {
+                cameraSwitch.resetOff(); stopLocalCamera();
+            }
+        }
         JsonObject sources;
         try { sources = command("VIDEO_STATE", new JsonObject()).getAsJsonObject("sources"); }
         catch (Exception failure) {
@@ -292,6 +305,10 @@ public final class VideoCallController implements AutoCloseable {
             VideoFrameMailbox old = frames.remove(participant); if (old != null) old.close();
         }
         if (preview == null && (activeCamera || !subscriptions.isEmpty())) show("Video qua WebRTC/SFU • " + subscriptions.size() + " luồng camera nhận.");
+    }
+    // A room event may lag the VIDEO_PUBLISH reply. A confirmed host stop still applies immediately.
+    static boolean shouldStopPublication(boolean requested, boolean confirmed, long elapsedNanos) {
+        return !requested && (confirmed || elapsedNanos >= TimeUnit.SECONDS.toNanos(5));
     }
     private JsonObject command(String type, JsonObject body) throws Exception {
         if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");

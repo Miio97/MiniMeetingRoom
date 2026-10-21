@@ -577,8 +577,6 @@ public final class SceneManager {
     public void preJoin(RoomInfo next) {
         if (!hasSession()) return;
         updateRoom(next); roomJoined = true;
-        if (Boolean.parseBoolean(preference("muteMic", "false"))) mic = false;
-        if (Boolean.parseBoolean(preference("muteCamera", "false"))) camera = false;
         PreJoinScreen view = new PreJoinScreen(this);
         show(view, 1100, 700, true, view::dispose);
         // Pre-join can stack its panels and scroll independently of its pinned footer.
@@ -594,7 +592,7 @@ public final class SceneManager {
         }
         MeetingScreen view = new MeetingScreen(this);
         show(view, 1280, 800, true, view::dispose);
-        if (hasVideoRoom()) sfuSession.video().publishPreparedCamera();
+        if (hasVideoRoom()) view.publishPreparedCamera();
     }
     public void ended(long seconds, int count, String reason) { endReason = reason; ended(seconds, count); }
     public void ended(long seconds, int count) {
@@ -630,12 +628,18 @@ public final class SceneManager {
         stage.setMinWidth(0); stage.setMinHeight(0);
         if (!expanded) stage.setResizable(resize);
         Scene scene = stage.getScene();
+        // Screen roots follow the preference even before they belong to a Scene.
+        root.getStyleClass().remove("theme-dark");
+        ThemeManager.attach(root);
         if (scene == null) {
-            scene = new Scene(root, width, height);
+            scene = new Scene(root, width, height, ThemeManager.backgroundColor());
+            ThemeManager.attachScene(scene);
             scene.getStylesheets().add(SceneManager.class.getResource("/styles/app.css").toExternalForm());
             stage.setScene(scene);
-        } else scene.setRoot(root);
-        ThemeManager.attach(root);
+        } else {
+            ThemeManager.attachScene(scene);
+            scene.setRoot(root);
+        }
         if (!stage.isShowing()) stage.sizeToScene();
         else if (!expanded) {
             stage.setWidth(width + Math.max(0, stage.getWidth() - scene.getWidth()));

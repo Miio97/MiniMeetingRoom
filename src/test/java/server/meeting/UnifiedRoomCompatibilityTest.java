@@ -73,6 +73,27 @@ class UnifiedRoomCompatibilityTest {
                 new SignalingClient.Settings("localhost", signaling.port(), null, SignalWire.DEFAULT_MAX_BYTES), tls.client(), listener));
         sessions.add(session); return session;
     }
+    @Test void guestCannotManageRoomAndKickedGuestClosesMediaThenRejoinsWithCodeAndPin() throws Exception {
+        var host = database.account("moderator", "Host"); var guest = database.account("moderated", "Guest");
+        var a = session(host); var b = session(guest);
+        a.create(new CreateRoomParams("Moderation", "1234", 3, false)).get(10, TimeUnit.SECONDS);
+        a.join(false, false).get(10, TimeUnit.SECONDS);
+        String code = a.snapshot().joinCode();
+        b.lookup(code, "1234").get(10, TimeUnit.SECONDS); b.join(false, false).get(10, TimeUnit.SECONDS);
+        String previous = b.selfParticipantId(); var media = b.video();
+        for (String action : List.of("ROOM_SETTINGS", "ROOM_PENDING_APPROVE", "ROOM_PENDING_REJECT",
+                "ROOM_TRANSFER", "ROOM_KICK", "ROOM_MIC_OFF", "ROOM_CAMERA_OFF")) {
+            var denied = assertThrows(client.auth.RoomException.class,
+                    () -> transport.meeting(command(action, guest, b, host.user().id())));
+            assertEquals("HOST_REQUIRED", denied.code(), action);
+        }
+        assertTrue(transport.meeting(command("ROOM_KICK", host, a, guest.user().id())).success());
+        waitFor(() -> b.snapshot() == null && a.snapshot().participants().size() == 1);
+        media.closeComplete().get(5, TimeUnit.SECONDS);
+        b.lookup(code, "1234").get(10, TimeUnit.SECONDS); b.join(false, false).get(10, TimeUnit.SECONDS);
+        assertNotEquals(previous, b.selfParticipantId());
+        waitFor(() -> a.snapshot().participants().size() == 2);
+    }
     @Test void chosenSuccessorRatherThanEarliestJoinerKeepsRoomAndFileRightsUntilExplicitClose() throws Exception {
         var host = database.account("choiceHost", "Host"); var early = database.account("choiceEarly", "Early"); var chosen = database.account("choiceChosen", "Chosen");
         var a = session(host); var b = session(early); var c = session(chosen);
