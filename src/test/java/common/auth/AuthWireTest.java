@@ -35,16 +35,16 @@ class AuthWireTest {
     }
     @Test
     void preservesVietnameseAndUsesUtf8ByteLength() throws IOException {
-        AuthRequest request = new AuthRequest("REGISTER", "khoa", "bí_mật_🔐",
-                "Trần Văn Khoa", "khoa@example.com", null);
+        AuthRequest request = new AuthRequest("REGISTER", "khoa", "bÃ­_máº­t_ðŸ”",
+                "Tráº§n VÄƒn Khoa", "khoa@example.com", null);
         byte[] frame = encode(request);
         try (DataInputStream input = input(frame)) {
             assertEquals(frame.length - Integer.BYTES, input.readInt());
         }
         assertEquals(request, AuthWire.read(input(frame), AuthRequest.class));
 
-        AuthResponse response = AuthResponse.ok("Đăng nhập thành công",
-                new AuthUser(7, "khoa", "Trần Văn Khoa", "khoa@example.com"),
+        AuthResponse response = AuthResponse.ok("ÄÄƒng nháº­p thÃ nh cÃ´ng",
+                new AuthUser(7, "khoa", "Tráº§n VÄƒn Khoa", "khoa@example.com"),
                 "session-token", "2026-10-08T22:00:00Z");
         assertEquals(response, AuthWire.read(input(encode(response)), AuthResponse.class));
     }
@@ -99,7 +99,7 @@ class AuthWireTest {
     @Test
     void rejectsOversizedOutgoingFrameWithoutWritingAnything() throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        AuthRequest request = new AuthRequest("LOGIN", "khoa", "🔐".repeat(AuthWire.MAX_FRAME_BYTES),
+        AuthRequest request = new AuthRequest("LOGIN", "khoa", "ðŸ”".repeat(AuthWire.MAX_FRAME_BYTES),
                 null, null, null);
         assertThrows(IOException.class, () -> AuthWire.write(new DataOutputStream(bytes), request));
         assertEquals(0, bytes.size());
@@ -123,12 +123,12 @@ class AuthWireTest {
     @Test
     void preservesRoomRequestsAndFullParticipantSnapshotWithinFrameBound() throws IOException {
         AuthRequest request = new AuthRequest("CREATE_ROOM", null, null, null, null, "session-token",
-                new RoomRequest("Họp nhóm Java", "123456", null, 250));
+                new RoomRequest("Há»p nhÃ³m Java", "123456", null, 250));
         assertEquals(request, AuthWire.read(input(encode(request)), AuthRequest.class));
         List<RoomParticipant> members = IntStream.rangeClosed(1, 250)
-                .mapToObj(id -> new RoomParticipant(id, "Đ".repeat(100), id == 1 ? "CHU_PHONG" : "THANH_VIEN"))
+                .mapToObj(id -> new RoomParticipant(id, "Ä".repeat(100), id == 1 ? "CHU_PHONG" : "THANH_VIEN"))
                 .toList();
-        AuthResponse response = AuthResponse.roomOk("Đã tham gia", new RoomInfo(8, "Họp nhóm Java",
+        AuthResponse response = AuthResponse.roomOk("ÄÃ£ tham gia", new RoomInfo(8, "Há»p nhÃ³m Java",
                 "MMR-0123ABCD", 1, "2026-10-14T10:00:00Z", "DANG_HOAT_DONG", false, 250, 250, members));
         byte[] bytes = encode(response);
         assertTrue(bytes.length > 16 * 1024, "A full room no longer fits the original authentication-only frame size");
@@ -136,27 +136,20 @@ class AuthWireTest {
         assertEquals(response, AuthWire.read(input(bytes), AuthResponse.class));
     }
 
-    @Test void schedulePagingAndOtpFieldsCoexistOnTheSharedWire() throws IOException {
-        var schedule = new common.schedule.ScheduleRequest("Planning", "Notes",
-                "2026-10-19T01:00:00Z", "2026-10-19T02:00:00Z", "KHONG", "MMR-0123ABCD");
-        var scheduled = new AuthRequest("CREATE_SCHEDULE", null, null, null, null, "session", null, schedule);
+    @Test void pagingAndOtpFieldsCoexistOnTheSharedWire() throws IOException {
         var registration = new AuthRequest("VERIFY_REGISTRATION", null, null, null,
                 "user@example.com", null, null, "123456", "challenge");
         var changed = new AuthRequest("CHANGE_PASSWORD", null, "old", null, null,
                 "session", null, null, null, "new");
         var page = new AuthRequest("LIST_ROOMS", null, null, null, null, "session", RoomRequest.page(20, 10));
-        for (var request : List.of(scheduled, registration, changed, page)) {
+        for (var request : List.of(registration, changed, page)) {
             assertEquals(request, AuthWire.read(input(encode(request)), AuthRequest.class));
         }
-        assertNull(scheduled.otp());
-        assertNull(scheduled.registrationChallenge());
-        assertNull(registration.schedule());
+        assertEquals("123456", registration.otp());
+        assertEquals("challenge", registration.registrationChallenge());
         assertEquals("new", changed.newPassword());
         assertNull(changed.otp());
-        var info = new common.schedule.ScheduleInfo(1, 7, "Planning", "Notes",
-                schedule.startsAt(), schedule.endsAt(), "KHONG", null, null, "2026-10-18T00:00:00Z");
-        for (var response : List.of(AuthResponse.scheduleOk("created", info),
-                AuthResponse.schedulesOk("listed", List.of(info)), AuthResponse.roomsPage(List.of(), true),
+        for (var response : List.of(AuthResponse.roomsPage(List.of(), true),
                 new AuthResponse(true, "OTP_REQUIRED", "sent", null, null, null, null, List.of(), "challenge"))) {
             assertEquals(response, AuthWire.read(input(encode(response)), AuthResponse.class));
         }

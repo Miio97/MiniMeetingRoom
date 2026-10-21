@@ -20,6 +20,51 @@ public class VideoCallIntegrationTest {
     @TempDir static Path temporary;
     private static RoomTestFixture.Tls tls;
     @BeforeAll static void runtime() throws Exception { FxTestRuntime.start(); tls = RoomTestFixture.certificates(temporary); }
+    @Test void preparedPreviewPublishTracksPendingCoalescesClicksAndToleratesTheInitialRoomSnapshot() throws Exception {
+        try (VideoTestFixture fixture = new VideoTestFixture(tls, temporary.resolve("prepared-publication"))) {
+            var host = fixture.session(fixture.database.account("preparedHost", "Host"));
+            var guest = fixture.session(fixture.database.account("preparedGuest", "Guest"));
+            var release = new CompletableFuture<Void>(); var publishing = new CountDownLatch(1);
+            var synchronizedOnce = new CountDownLatch(1); var published = new AtomicBoolean();
+            VideoCallController camera = null;
+            try {
+                host.create(new CreateRoomParams("Prepared camera", "1234", 3, false)).get(10, TimeUnit.SECONDS);
+                host.join(false, false).get(10, TimeUnit.SECONDS);
+                guest.lookup(host.snapshot().joinCode(), "1234").get(10, TimeUnit.SECONDS);
+                guest.join(false, false).get(10, TimeUnit.SECONDS);
+                var current = new java.util.concurrent.atomic.AtomicReference<>(host.snapshot());
+                camera = new VideoCallController((type, body, id) -> {
+                    if (type.equals("VIDEO_PUBLISH")) {
+                        publishing.countDown();
+                        return release.thenCompose(ignored -> host.videoRequest(type, body, id));
+                    }
+                    if (type.equals("VIDEO_STATE") && published.get()) synchronizedOnce.countDown();
+                    return host.videoRequest(type, body, id);
+                }, current::get, host::selfParticipantId, new CameraConsentStore(temporary.resolve("prepared-camera.properties")),
+                        List::of, true, new MicrophoneConsentStore(temporary.resolve("prepared-mic.properties")));
+                var video = camera;
+                video.previewInput(() -> new GeneratedCamera(0)).get(10, TimeUnit.SECONDS);
+                var entered = FxTestRuntime.call(video::publishPreparedCamera);
+                assertTrue(publishing.await(8, TimeUnit.SECONDS));
+                FxTestRuntime.call(() -> {
+                    assertTrue(video.cameraPendingProperty().get()); assertTrue(video.cameraRequestedProperty().get());
+                    for (int i = 0; i < 100; i++) video.toggleInput(() -> { fail("Must reuse the preview source"); return null; }, false);
+                    assertTrue(video.cameraRequestedProperty().get()); return null;
+                });
+                release.complete(null); entered.get(10, TimeUnit.SECONDS); published.set(true);
+                assertTrue(synchronizedOnce.await(4, TimeUnit.SECONDS));
+                assertTrue(FxTestRuntime.call(() -> video.cameraRequestedProperty().get()), "A stale initial snapshot must not stop the publication");
+                assertFalse(FxTestRuntime.call(() -> video.cameraPendingProperty().get()));
+                current.set(host.snapshot());
+                FxTestRuntime.call(() -> video.toggleInput(() -> { fail("Off must not reopen capture"); return null; }, false)).get(10, TimeUnit.SECONDS);
+                var state = guest.videoRequest("VIDEO_STATE", new com.google.gson.JsonObject(), UUID.randomUUID().toString()).get(8, TimeUnit.SECONDS);
+                assertFalse(state.getAsJsonObject("sources").has(host.selfParticipantId()));
+            } finally {
+                release.complete(null); if (camera != null) { camera.close(); camera.closeComplete().get(10, TimeUnit.SECONDS); }
+                host.close(); guest.close();
+            }
+        }
+    }
     @Test void transportRecoveryKeepsMembershipAndBorrowedMediaOwnerWithoutReopeningCapture() throws Exception {
         try (VideoTestFixture fixture = new VideoTestFixture(tls, temporary.resolve("recovery"))) {
             var transport = new java.util.concurrent.atomic.AtomicReference<client.signalingapi.SignalingClient>();

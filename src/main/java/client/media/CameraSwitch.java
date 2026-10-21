@@ -12,6 +12,14 @@ final class CameraSwitch implements AutoCloseable {
     CameraSwitch(Runnable changed) { this.changed = changed; }
     synchronized boolean wanted() { return wanted; }
     synchronized boolean pending() { return pending; }
+    /** Finish any preview operation, then promote the prepared source as one tracked start. */
+    synchronized CompletableFuture<Void> publishPrepared(BooleanSupplier prepared,
+            Supplier<CompletableFuture<Void>> publish, Supplier<CompletableFuture<Void>> stop) {
+        if (closed) return CompletableFuture.failedFuture(new IllegalStateException("CONNECTION_CLOSED"));
+        if (pending) return settled.thenCompose(ignored -> publishPrepared(prepared, publish, stop));
+        if (!prepared.getAsBoolean()) return CompletableFuture.completedFuture(null);
+        return toggle(false, publish, stop);
+    }
     synchronized CompletableFuture<Void> toggle(boolean actual, Supplier<CompletableFuture<Void>> start,
                                                 Supplier<CompletableFuture<Void>> stop) {
         if (closed) return CompletableFuture.failedFuture(new IllegalStateException("CONNECTION_CLOSED"));

@@ -61,7 +61,7 @@ public final class MeetingScreen extends BorderPane {
     private void connectionState(client.meeting.MeetingSession.State state) {
         if (disposed) return;
         boolean waiting = state == client.meeting.MeetingSession.State.RECONNECTING;
-        controls.mic.setDisable(waiting); controls.camera.setDisable(waiting); controls.share.setDisable(waiting);
+        controls.mic.setDisable(waiting); controls.share.setDisable(waiting);
         tabs.setDisable(waiting);
         if (waiting && !reconnecting) {
             if (cameraSettings != null) cameraSettings.close();
@@ -74,7 +74,7 @@ public final class MeetingScreen extends BorderPane {
         reconnecting = waiting;
     }
     private List<RoomParticipant> participantSnapshot = List.of();
-    private boolean disposed, polling, leaving;
+    private boolean disposed, polling, leaving, managementPending;
     private boolean sharing, panelOpen = true;
     private long startNanos = System.nanoTime();
     private int peakPeople;
@@ -97,6 +97,15 @@ public final class MeetingScreen extends BorderPane {
     private void updateShareButton(boolean active) {controls.share.active(active);renderVideos();}
     private final javafx.beans.value.ChangeListener<Boolean> micListener = (o,b,a) -> updateMicButton(a);
     private java.util.concurrent.CompletableFuture<Void> cameraOperation;
+    private String cameraError = "";
+    private final javafx.beans.value.ChangeListener<Boolean> cameraPendingListener = (obs, before, pending) -> cameraPending(pending);
+    private void cameraPending(boolean pending) {
+        if (!disposed && (pending || mediaController.cameraRequestedProperty().get())) clearCameraError();
+    }
+    private void clearCameraError() {
+        if (!cameraError.isEmpty() && roomError.getText().equals(cameraError)) roomError.setText("");
+        cameraError = "";
+    }
     private final javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> videoRoomListener = (observable, before, after) -> {
         if (disposed || after == null) return;
         displayedRoom = after;
@@ -165,6 +174,9 @@ public final class MeetingScreen extends BorderPane {
             audioControls.errorProperty().addListener(audioErrorListener); video.screen().statusProperty().addListener(audioErrorListener);
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
             video.cameraRequestedProperty().addListener(cameraListener);
+            video.cameraPendingProperty().addListener(cameraPendingListener);
+            controls.camera.disableProperty().bind(video.cameraPendingProperty().or(
+                    mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING)));
             if (video.latestStats() != null) {
                 networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
             }
@@ -197,7 +209,7 @@ public final class MeetingScreen extends BorderPane {
             polling = true;
             manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> {
                 polling = false; if (disposed || leaving) return;
-                managedState = response; managedPeople.setAll(response.members());
+                managedState = response; updateManagedPeople(response.members());
                 updateManagement(response); participantPanel.status("");
                 updateLock();
             }, error -> {
@@ -221,17 +233,23 @@ public final class MeetingScreen extends BorderPane {
     private void toggleMic() { if(videoRoom) { audioControls.toggle(); return; } manager.mic(!manager.mic()); controls.mic(manager.mic()); updateSelf(); }
     private void toggleCamera() {
         if (videoRoom) {
-            var operation = mediaController.toggleSelectedCamera();
-            if (operation == cameraOperation) return;
-            cameraOperation = operation;
-            operation.whenComplete((value, failure) -> javafx.application.Platform.runLater(() -> {
-                if (disposed || cameraOperation != operation) return;
-                if (failure != null) { roomError.setText(client.media.CameraErrors.message(failure)); deviceSettings(); }
-                else roomError.setText("");
-            }));
+            if (mediaController.cameraPendingProperty().get() || reconnecting || disposed) return;
+            watchCameraOperation(mediaController.toggleSelectedCamera(), true);
             return;
         }
         manager.camera(!manager.camera()); controls.camera(manager.camera()); updateSelf();
+    }
+    public void publishPreparedCamera() { watchCameraOperation(mediaController.publishPreparedCamera(), false); }
+    private void watchCameraOperation(java.util.concurrent.CompletableFuture<Void> operation, boolean openSettings) {
+        if (operation == cameraOperation) return;
+        clearCameraError(); cameraOperation = operation;
+        operation.whenComplete((value, failure) -> javafx.application.Platform.runLater(() -> {
+            if (disposed || cameraOperation != operation) return;
+            if (failure == null) { clearCameraError(); return; }
+            if (client.media.CameraErrors.unwrap(failure) instanceof java.util.concurrent.CancellationException) return;
+            cameraError = client.media.CameraErrors.message(failure); roomError.setText(cameraError);
+            if (openSettings) deviceSettings();
+        }));
     }
     private void deviceSettings() {
         if (reconnecting) return;
@@ -362,7 +380,11 @@ public final class MeetingScreen extends BorderPane {
             next.add(new common.meeting.Participant(ids.get(i).userId(), person.displayName(), person.role() == common.meeting.RoomRole.HOST,
                     person.mediaState().micRequested(), person.mediaState().cameraRequested()));
         }
-        managedPeople.setAll(next);
+        updateManagedPeople(next);
+    }
+    private void updateManagedPeople(List<common.meeting.Participant> next) {
+        if (!managedPeople.equals(next)) managedPeople.setAll(next);
+        participantPanel.refreshMenu();
     }
     private common.meeting.ParticipantView screenParticipant(long userId) {
         if (!videoRoom || displayedRoom == null) return null;
@@ -377,19 +399,37 @@ public final class MeetingScreen extends BorderPane {
     }
     private void stopScreen(long userId) {
         var participant = screenParticipant(userId);
-        if (participant != null && mediaSession.isHost()) roomAction(mediaSession.stopPublish(participant.participantId(), "SCREEN"));
+        if (participant == null || !beginManagement()) return;
+        mediaSession.stopPublish(participant.participantId(), "SCREEN").whenComplete((value, failure) ->
+                javafx.application.Platform.runLater(() -> {
+                    setManagementPending(false);
+                    if (!disposed) roomError.setText(failure == null ? "" : SceneManager.connectionError(failure));
+                }));
     }
     private void invite() {
         if (!videoRoom || !manager.sfuSession().isHost()) return;
         new InviteDialog(manager.stage(), manager.room().name(), manager.room().code(), manager.invitationPin()).showAndWait();
     }
     private void hostCommand(String action, Long target) {
-        manager.runMeetingRequest(manager.roomCommand(action, target), this::managedReply,
-                error -> { if (!disposed) { admissions.retry(); roomError.setText(SceneManager.connectionError(error)); } });
+        if (!beginManagement()) return;
+        manager.runMeetingRequest(manager.roomCommand(action, target), response -> {
+            setManagementPending(false); managedReply(response);
+        }, error -> {
+            setManagementPending(false);
+            if (!disposed) { admissions.retry(); roomError.setText(SceneManager.connectionError(error)); }
+        });
+    }
+    private boolean beginManagement() {
+        if (disposed || reconnecting || managementPending || !videoRoom || !mediaSession.isHost()) return false;
+        setManagementPending(true); return true;
+    }
+    private void setManagementPending(boolean pending) {
+        managementPending = pending; participantPanel.pending(pending); admissions.setDisable(pending);
     }
     private void managedReply(common.meeting.RoomResponse response) {
         if (disposed) return;
-        managedState = response; managedPeople.setAll(response.members()); updateManagement(response);
+        if (!response.success()) { admissions.retry(); roomError.setText(response.message()); return; }
+        managedState = response; updateManagedPeople(response.members()); updateManagement(response);
         if (response.room().closed()) manager.ended(elapsed(), peakPeople);
         else roomAction(manager.sfuSession().refresh());
     }
@@ -429,6 +469,8 @@ public final class MeetingScreen extends BorderPane {
             adaptiveStatus.textProperty().unbind(); adaptiveStatus.visibleProperty().unbind(); adaptiveStatus.managedProperty().unbind();
             mediaSession.roomProperty().removeListener(videoRoomListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);
+            mediaController.cameraPendingProperty().removeListener(cameraPendingListener);
+            controls.camera.disableProperty().unbind();
             mediaController.audio().requestedProperty().removeListener(micListener); audioControls.errorProperty().removeListener(audioErrorListener); audioControls.dispose();
             mediaController.screen().requestedProperty().removeListener(shareListener); mediaController.screen().statusProperty().removeListener(audioErrorListener);
         }

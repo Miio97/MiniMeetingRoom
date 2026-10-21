@@ -10,8 +10,6 @@ import dev.onvoid.webrtc.media.audio.AudioDevice;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
-import javafx.scene.shape.Circle;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.util.Duration;
@@ -68,10 +66,7 @@ public final class SettingsScreen extends BorderPane {
                 Ui.row(12, microphoneTest, microphoneTestStatus),
                 microphoneLevel,
                 Ui.row(12, speakerTest, speakerTestStatus),
-                audioStatus,
-                toggle(manager, "notification", "Âm thanh thông báo", true),
-                toggle(manager, "muteMic", "Tự tắt mic khi vào phòng", false),
-                toggle(manager, "muteCamera", "Tự tắt camera khi vào phòng", false)
+                audioStatus
         );
         loadAudioDevices();
 
@@ -355,13 +350,5 @@ public final class SettingsScreen extends BorderPane {
         combo.setValue(manager.preference(key, choices.getFirst()));
         combo.valueProperty().addListener((o, old, value) -> manager.preferenceSet(key, value));
         return combo;
-    }
-    private HBox toggle(SceneManager manager, String key, String title, boolean initial) {
-        ToggleButton button = new ToggleButton(); button.getStyleClass().add("settings-switch"); button.setAccessibleText(title);
-        StackPane track = new StackPane(); track.setMinSize(40, 22); track.setMaxSize(40, 22); track.getStyleClass().add("switch-track");
-        Circle knob = new Circle(8, javafx.scene.paint.Color.WHITE); track.getChildren().add(knob); button.setGraphic(track);
-        button.setSelected(Boolean.parseBoolean(manager.preference(key, String.valueOf(initial)))); knob.setTranslateX(button.isSelected() ? 9 : -9);
-        button.selectedProperty().addListener((o, old, selected) -> { knob.setTranslateX(selected ? 9 : -9); manager.preferenceSet(key, selected.toString()); });
-        HBox row = Ui.row(16, Ui.label(title, "strong"), Ui.spacer(), button); row.setAlignment(Pos.CENTER_LEFT); return row;
     }
 }
