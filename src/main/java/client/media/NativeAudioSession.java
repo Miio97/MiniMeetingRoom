@@ -15,10 +15,18 @@ public final class NativeAudioSession implements AutoCloseable {
     private final AudioTrack track;
     private final Set<Peer> peers = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final boolean physicalPlayback;
+    private final AudioDevice playbackDevice;
+    private boolean playbackStarted;
     public NativeAudioSession(boolean headless, boolean capture, AudioDevice microphone, AudioDevice speaker) {
         AudioDeviceModuleBase adm = headless ? new HeadlessAudioDeviceModule() : new AudioDeviceModule();
         PeerConnectionFactory created = null; AudioTrackSource input = null; AudioTrack local = null;
+        AudioDevice output = null;
         try {
+            // Factory initialization selects Windows' communications defaults.
+            // Apply the user's devices afterwards, before any stream opens, so an
+            // HDMI communications endpoint cannot silently replace their speakers.
+            created = new PeerConnectionFactory(adm);
             if (!headless && capture) {
                 AudioDevice selected = microphone != null ? microphone : MediaDevices.getDefaultAudioCaptureDevice();
                 if (selected == null) throw new IllegalStateException("MICROPHONE_OPEN_FAILED");
@@ -27,9 +35,9 @@ public final class NativeAudioSession implements AutoCloseable {
             if (!headless && !capture) {
                 AudioDevice selected = speaker != null ? speaker : MediaDevices.getDefaultAudioRenderDevice();
                 if (selected == null) throw new IllegalStateException("AUDIO_OUTPUT_FAILED");
+                output = selected;
                 adm.setPlayoutDevice(selected);
             }
-            created = new PeerConnectionFactory(adm);
             if (capture && !headless) {
                 AudioOptions options = microphoneOptions();
                 input = created.createAudioSource(options);
@@ -39,6 +47,8 @@ public final class NativeAudioSession implements AutoCloseable {
             if (local != null) local.dispose(); if (input != null) input.dispose(); if (created != null) created.dispose(); adm.dispose(); throw failure;
         }
         audio=adm; factory=created; source=input; track=local;
+        physicalPlayback = !headless && !capture;
+        playbackDevice = output;
     }
     public Peer publisher() { return new Peer(track, true, (data, bits, rate, channels, frames) -> { }); }
     static AudioOptions microphoneOptions() {
@@ -66,12 +76,15 @@ public final class NativeAudioSession implements AutoCloseable {
         private final Object statsLifecycle = new Object();
         private volatile AudioTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
+        private final boolean sending;
+        private final AudioRtpWatchdog rtpWatchdog = new AudioRtpWatchdog(System.nanoTime());
         private Peer(AudioTrack track, boolean publisher, AudioTrackSink sink) {
             if (closed.get()) throw new IllegalStateException("VIDEO_OWNER_CLOSED");
 
             this.binding = (data, bits, rate, channels, frames) -> {
                 if (!closing.get() && frames > 0) sink.onData(data, bits, rate, channels, frames);
             };
+            sending = publisher;
             connection = factory.createPeerConnection(new RTCConfiguration(), this);
             if (connection == null) throw new IllegalStateException("VIDEO_PEER_FAILED");
             try {
@@ -91,6 +104,19 @@ public final class NativeAudioSession implements AutoCloseable {
         }
         public boolean failed() { return state == RTCPeerConnectionState.FAILED || state == RTCPeerConnectionState.CLOSED; }
         public boolean connected() { return state == RTCPeerConnectionState.CONNECTED; }
+        public boolean stalled() {
+            statsAsync().thenAccept(report -> {
+                if (report == null || closing.get()) return;
+                long packets = 0; boolean found = false;
+                for (var stat : report.getStats().values()) {
+                    if (stat.getType() != (sending ? RTCStatsType.OUTBOUND_RTP : RTCStatsType.INBOUND_RTP)) continue;
+                    var count = stat.getAttributes().get(sending ? "packetsSent" : "packetsReceived");
+                    if (count instanceof Number n) { packets += n.longValue(); found = true; }
+                }
+                if (found) rtpWatchdog.observe(packets, System.nanoTime());
+            });
+            return rtpWatchdog.stalled(System.nanoTime());
+        }
         @Override public void onIceCandidate(RTCIceCandidate candidate) { }
         @Override public void onIceGatheringChange(RTCIceGatheringState value) { if (value == RTCIceGatheringState.COMPLETE) gathered.complete(null); }
         @Override public void onConnectionChange(RTCPeerConnectionState value) { state = value; }
@@ -102,8 +128,7 @@ public final class NativeAudioSession implements AutoCloseable {
                     if (receiver.getTrack() instanceof AudioTrack audioTrack && remote == null) {
                         remote = audioTrack;
                         audioTrack.addSink(binding);
-                        // Never call ADM lifecycle methods on the signaling callback:
-                        // WebRTC activates playout itself while applying remote SDP.
+                        // Device lifecycle runs on the audio owner after SDP completes.
                     }
                 }
             } finally { transceiver.dispose(); }
@@ -119,7 +144,22 @@ public final class NativeAudioSession implements AutoCloseable {
             try { set(offer.get(10, TimeUnit.SECONDS), false); gathered.get(10, TimeUnit.SECONDS); return connection.getLocalDescription().sdp; }
             finally { pending.remove(offer); }
         }
-        public void answer(String sdp) throws Exception { set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true); }
+        public void answer(String sdp) throws Exception {
+            set(new RTCSessionDescription(RTCSdpType.ANSWER, sdp), true);
+            // Decoding callbacks can run even when Windows' render session is inactive.
+            // Start the shared receiver ADM once, outside WebRTC's signaling callback.
+            if (!sending && physicalPlayback && !playbackStarted) {
+                try {
+                    // WebRTC initializes its first audio channel with the Windows
+                    // communications device. Reopen after SDP to apply the actual
+                    // selected endpoint, rather than only changing its index.
+                    audio.stopPlayout();
+                    audio.setPlayoutDevice(playbackDevice);
+                    audio.initPlayout(); audio.startPlayout(); playbackStarted = true;
+                }
+                catch (RuntimeException | Error failure) { throw new IllegalStateException("AUDIO_OUTPUT_FAILED", failure); }
+            }
+        }
         private final SingleFlightStats statsFlight=new SingleFlightStats();
         public CompletableFuture<RTCStatsReport> statsAsync() {
             return statsFlight.request(callback -> {
@@ -160,6 +200,8 @@ public final class NativeAudioSession implements AutoCloseable {
     @Override public void close() {
         if (!closed.compareAndSet(false,true)) return;
         peers.forEach(Peer::close);
+        // Closing the last peer already stops WebRTC's ADM. A second explicit
+        // stop fails on Windows; factory disposal owns the remaining teardown.
         track.dispose(); source.dispose(); factory.dispose(); audio.dispose();
     }
 }

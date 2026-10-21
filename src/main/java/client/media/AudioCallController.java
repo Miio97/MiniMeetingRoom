@@ -12,13 +12,13 @@ import java.util.function.Supplier;
 import javafx.application.Platform;
 import javafx.beans.property.*;
 
-/** One bounded owner for audio. Views never own devices; capture is explicit and never reconnects itself. */
+/** One bounded owner for audio. Transport repair preserves the user's explicit microphone choice. */
 public final class AudioCallController implements AutoCloseable {
     @FunctionalInterface interface SessionFactory {
         NativeAudioSession create(boolean headless, boolean capture, AudioDevice microphone, AudioDevice speaker);
     }
     private final SessionFactory sessions;
-    private record Subscription(String publication, NativeAudioSession.Peer peer) { }
+    private record Subscription(String publication, String transport, NativeAudioSession.Peer peer) { }
     private final VideoCallController.Signaling signaling;
     private final Supplier<RoomSnapshot> room;
     private final Supplier<String> self;
@@ -88,6 +88,7 @@ public final class AudioCallController implements AutoCloseable {
         return submit(() -> {
             selectedSpeaker=device;
             if (device != null) consent.speaker(device.getDescriptor());
+            if (entered && controlConnected) for (var subscription : subscriptions.values()) release(subscription);
             closeSubscriptions(); if (receive != null) { receive.close(); receive=null; }
             return null;
         });
@@ -156,13 +157,24 @@ public final class AudioCallController implements AutoCloseable {
                 microphone.resetOff(); throw failure;
             }
         }
-        if (publisher!=null && (publisher.failed() || snapshot.participants().stream().filter(p -> p.participantId().equals(self.get())).noneMatch(p -> p.mediaState().micRequested()))) {
+        if (publisher!=null && snapshot.participants().stream().filter(p -> p.participantId().equals(self.get())).noneMatch(p -> p.mediaState().micRequested())) {
             microphone.resetOff(); stop(true);
+        }
+        if (publisher != null && (publisher.failed() || publisher.stalled()) && microphone.wanted()) {
+            // Repair the transport only while the user still wants the microphone on.
+            publisher.close(); publisher = null;
+            if (generated != null) { generated.cancel(false); generated = null; }
+            command("AUDIO_STOP", new JsonObject());
+            publish();
         }
         JsonObject sources=command("AUDIO_STATE",new JsonObject()).getAsJsonObject("sources");
         for(String target:new ArrayList<>(subscriptions.keySet())) {
             Subscription s=subscriptions.get(target);
-            if (!sources.has(target) || !s.publication().equals(sources.get(target).getAsString()) || s.peer().failed()) { s.peer().close(); subscriptions.remove(target); }
+            if (!sources.has(target) || !s.publication().equals(sources.get(target).getAsString()) || s.peer().failed() || s.peer().stalled()) {
+                try { release(s); }
+                catch (Exception failure) { report(failure); continue; }
+                s.peer().close(); subscriptions.remove(target);
+            }
         }
         if (subscriptions.isEmpty() && receive != null) {
             receive.close(); receive = null;
@@ -181,11 +193,24 @@ public final class AudioCallController implements AutoCloseable {
                 receive = sessions.create(headless, false, null, selectedSpeaker);
             }
             NativeAudioSession.Peer peer=receive.subscriber(count -> { receivedSamples.addAndGet(count); samplesBySource.computeIfAbsent(source.getKey(), ignored -> new AtomicLong()).addAndGet(count); });
+            String transport = null;
             try {
                 JsonObject body=new JsonObject(); body.addProperty("source",source.getKey()); body.addProperty("publication",source.getValue().getAsString()); body.addProperty("sdp",peer.offer());
-                peer.answer(command("AUDIO_SUBSCRIBE",body).get("sdp").getAsString()); subscriptions.put(source.getKey(),new Subscription(source.getValue().getAsString(),peer));
-            } catch (Exception | Error failure) { peer.close(); report(failure); }
+                JsonObject answer = command("AUDIO_SUBSCRIBE",body);
+                transport = answer.get("transport").getAsString();
+                peer.answer(answer.get("sdp").getAsString());
+                subscriptions.put(source.getKey(),new Subscription(source.getValue().getAsString(),transport,peer));
+            } catch (Exception | Error failure) {
+                if (transport != null) try { release(new Subscription(source.getValue().getAsString(), transport, peer)); }
+                catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+                peer.close(); report(failure);
+            }
         }
+    }
+    private void release(Subscription subscription) throws Exception {
+        JsonObject body = new JsonObject(); var ids = new com.google.gson.JsonArray();
+        ids.add(subscription.transport()); body.add("transports", ids);
+        command("AUDIO_UNSUBSCRIBE", body);
     }
     private JsonObject command(String type, JsonObject body) throws Exception {
         if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");

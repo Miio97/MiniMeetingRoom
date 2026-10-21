@@ -62,11 +62,11 @@ public final class VideoCoordinator implements AutoCloseable {
                 }
                 JsonObject result = new JsonObject(); result.add("sources", sources); return result;
             }
-            case "VIDEO_UNSUBSCRIBE" -> {
+            case "VIDEO_UNSUBSCRIBE", "AUDIO_UNSUBSCRIBE" -> {
                 var ids=request.body().getAsJsonArray("transports");
-                if(ids==null || ids.size()>6) throw new SignalException("INVALID_REQUEST");
+                if(ids==null || ids.size()>(kind.equals("AUDIO") ? 50 : 6)) throw new SignalException("INVALID_REQUEST");
                 for(var id:ids) if(!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isString() || !id.getAsString().matches("[A-Za-z0-9_-]{1,96}")) throw new SignalException("INVALID_REQUEST");
-                var body=envelope("unsubscribe",member);body.addProperty("kind","VIDEO");body.add("transports",ids.deepCopy());return engine.control(body);
+                var body=envelope("unsubscribe",member);body.addProperty("kind",kind);body.add("transports",ids.deepCopy());return engine.control(body);
             }
             case "VIDEO_STOP", "AUDIO_STOP", "SCREEN_STOP" -> {
                 JsonObject stop = envelope("stop", member); stop.addProperty("kind", kind); engine.control(stop); rooms.setMediaRequested(connection.id(), kind, false);
