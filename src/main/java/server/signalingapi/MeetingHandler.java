@@ -80,7 +80,7 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                     response=catalog.subscribe(connection,body.has("limit")?integer(body,"limit"):20,body.has("watchId")?text(body,"watchId",64):request.requestId(),focus);type="ROOM_CATALOG_SNAPSHOT";
                 }
                 case "ROOM_CATALOG_UNWATCH" -> {catalog.unsubscribe(connection.id());response.addProperty("ok",true);type="ROOM_CATALOG_UNWATCHED";}
-                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STOP", "SCREEN_STATE" -> {
+                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STOP", "SCREEN_STATE" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     if (video == null) throw new SignalException("MEDIA_NOT_READY");
                     response = video.handle(connection, request); type = request.type().substring(0, request.type().indexOf('_')) + "_REPLY";
