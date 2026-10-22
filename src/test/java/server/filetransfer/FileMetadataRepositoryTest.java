@@ -248,6 +248,19 @@ class FileMetadataRepositoryTest {
         repository.legacyOwner("file-owner-b");assertCode("PERMISSION_DENIED",() -> complete(UUID.randomUUID(),1,room.id(),"foreign.txt"));
         assertEquals(0,number("SELECT COUNT(*) FROM Tin_Nhan"));
     }
+    @Test void deviceSessionGateBlocksStaleFilesButPreservesLegacyRoomAccess() throws Exception {
+        var room = repository.createRoom(1, "Device gate", null, 3);
+        support.RoomTestFixture.ownLegacyTestRoom(() -> DriverManager.getConnection(url), room.id(), "local");
+        repository.roomSessionGate((roomId, userId, hash) -> hash.equals(server.auth.AuthService.tokenHash("new-device")));
+        repository.authorizeSession("old-device", 1, room.id()); // Legacy rooms retain their existing behavior.
+        execute("UPDATE MMR_Phong_Van_Hanh SET Server_Epoch='signaling-epoch'");
+        repository.authorizeSession("new-device", 1, room.id());
+        assertCode("DEVICE_REPLACED", () -> repository.authorizeSession("old-device", 1, room.id()));
+        execute("INSERT INTO Phien_Dang_Nhap(Ma_Nguoi_Dung,Token_Bam,Het_Han_Luc) VALUES(1,'"
+                + server.auth.AuthService.tokenHash("old-device") + "',TIMESTAMP '2099-01-01 00:00:00')");
+        assertCode("DEVICE_REPLACED", () -> repository.beginUpload(1, room.id(), null, "old-device",
+                generation -> { fail("A stale device must not allocate storage"); return null; }));
+    }
     private FileMetadata complete(UUID transfer, long user, long room, String name) throws Exception {
         return repository.complete(transfer, user, room, name, "text/plain", 17, CHECKSUM, "objects/" + transfer + ".bin");
     }

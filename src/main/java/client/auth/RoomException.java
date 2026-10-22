@@ -15,7 +15,7 @@ public final class RoomException extends IOException {
 
     public boolean admissionEnded() {
         return switch (code) {
-            case "SESSION_INVALID", "NOT_IN_ROOM", "ROOM_CLOSED", "ROOM_NOT_FOUND" -> true;
+            case "SESSION_INVALID", "NOT_IN_ROOM", "ROOM_CLOSED", "ROOM_NOT_FOUND", "DEVICE_REPLACED" -> true;
             default -> false;
         };
     }

@@ -11,6 +11,15 @@
 
 120 giây bắt đầu khi mỗi phía phát hiện mất kết nối; việc phát hiện phụ thuộc heartbeat và socket timeout (hiện khoảng 20 giây khi không nhận được phản hồi). Không thể phát hiện chính xác thời điểm rút mạng ngay lập tức.
 
+## Đóng ứng dụng và chuyển thiết bị
+
+- Bấm nút đóng cửa sổ hoặc Alt+F4: client gửi `LEAVE_ROOM`, chờ xác nhận rồi thu hồi phiên đăng nhập và đóng ứng dụng. Nếu là chủ phòng, server tự chọn một thành viên còn lại để chuyển quyền; người cuối cùng rời đi thì phòng đóng theo chính sách hiện có. Không mở hộp thoại chọn người kế nhiệm khi đóng ứng dụng.
+- Nếu đang chờ duyệt, client hủy yêu cầu chờ. Nếu đang khôi phục kết nối, client thử khôi phục đúng membership để gửi lệnh rời phòng. Chờ rời phòng tối đa 10 giây và toàn bộ quá trình đóng tối đa 15 giây khi server không phản hồi.
+- Đăng nhập cùng tài khoản ở thiết bị mới rồi nhập mã phòng/PIN để vào **cùng phòng**: khi tham gia thành công, thiết bị mới thay thế thiết bị cũ, kể cả phòng đầy hoặc khóa. Giữ nguyên membership và quyền chủ phòng; phòng của chủ phòng duy nhất vẫn hoạt động.
+- Chỉ đăng nhập hoặc nhập sai PIN chưa đẩy thiết bị đang họp ra. Thiết bị cũ nhận thông báo đã chuyển thiết bị, dừng media và rời màn hình họp; tài khoản vẫn đăng nhập để dùng các màn hình khác. Phiên cũ không tự kết nối lại hoặc giành lại phòng; muốn chuyển về cần đăng nhập mới và vào phòng lại.
+- Trên thiết bị mới, camera/microphone/chia sẻ màn hình không tự phát lại. Quyền chat, điều khiển phòng và truyền tệp của thiết bị cũ bị chặn sau khi chuyển.
+- Không cần thêm bảng/cột hoặc chạy migration mới. Cần build và khởi động lại cả server và client. Tắt cưỡng bức tiến trình, mất điện hoặc mất mạng vẫn áp dụng chính sách mất kết nối ở trên.
+
 ## Media, tệp và lịch sử
 
 Giữ nguyên đối tượng media mà màn hình đang dùng, nhưng đóng capture/publication/subscription cũ. Không tự mở lại camera, mic hoặc chia sẻ màn hình; người dùng bật lại sau khôi phục. Khi kết nối mới sẵn sàng, tự nhận lại media của người khác và đo lại chất lượng trên đường truyền mới, tránh kẹt ở chế độ chỉ thoại do số liệu cũ.
@@ -26,6 +35,10 @@ Không thêm thực thể, cột, migration hoặc truy vấn DB định kỳ đ
 - Native `VideoCallIntegrationTest.transportRecoveryKeepsMembershipAndBorrowedMediaOwnerWithoutReopeningCapture`: nguồn camera/âm thanh/chia sẻ tạo bằng mã, TLS + Go SFU + RTP thật; mất control khi đang ưu tiên thoại, khôi phục cùng host/membership/quyền tệp, nhận video trở lại, không tự bật capture và có thể bật lại video/thoại bằng tay.
 
 Không thao tác Railway, không mở camera/mic/màn hình thật. Chưa thử rút mạng thực tế trên hai máy LAN.
+
+Kiểm tra đóng ứng dụng/chuyển thiết bị ngày 23/10/2026: 546 bài trong 77 lớp, kết quả mới nhất 0 failures/errors, 2 skipped theo điều kiện môi trường. Bộ hồi quy đầy đủ ở `target/device-close-regression.txt`; nhóm UI được chạy lại sau khi cập nhật assertion theo thông báo mới và đạt 15/15 (`target/device-close-ui-final.txt`). Bảng tổng hợp theo XML mới nhất ở `target/device-close-validation.txt`.
+
+Các bài mới kiểm tra đóng cửa sổ chờ xác nhận trước logout, tự chuyển chủ/đóng phòng cuối cùng, hủy chờ duyệt, rời khi đang reconnect, đổi thiết bị trong phòng đầy/khóa, chặn phiên cũ, thu hồi media/file, và đổi thiết bị đồng thời chuyển quyền chủ phòng.
 
 Kết quả ngày 17/10/2026:
 

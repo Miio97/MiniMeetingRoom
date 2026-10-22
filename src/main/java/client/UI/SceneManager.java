@@ -39,6 +39,7 @@ public final class SceneManager {
     private ParallelTransition transition;
     private final AuthClient authClient;
     private final FileTransferClient fileTransferClient;
+    private final Runnable applicationExit;
     private final ExecutorService authWorker = Executors.newSingleThreadExecutor(runnable -> {
         Thread worker = new Thread(runnable, "mini-meeting-auth"); worker.setDaemon(true); return worker;
     });
@@ -82,6 +83,7 @@ public final class SceneManager {
     private RoomInfo roomInfo;
     private boolean roomJoined;
     private volatile RoomResponse meetingState;
+    private volatile RoomResponse pendingMeetingState;
     private String endReason = "";
     private String invitationPin = "";
     public String invitationPin() { return invitationPin; }
@@ -97,7 +99,7 @@ public final class SceneManager {
         meeting();
     }
     public void updateMeeting(RoomResponse response) {
-        meetingState = response; locked = response.room().locked();
+        meetingState = response; pendingMeetingState = null; locked = response.room().locked();
         response.members().stream().filter(person -> person.userId() == authenticatedUser.id()).findFirst().ifPresent(person -> { mic = person.microphone(); camera = person.camera(); });
     }
     public RoomRequest roomCommand(String action, long target) {
@@ -107,12 +109,15 @@ public final class SceneManager {
     }
     public void runMeetingRequest(RoomRequest request, Consumer<RoomResponse> success, Consumer<Throwable> failure) {
         if (closing) return;
+        boolean signalingRequest = usingSfuRoom;
         authWorker.execute(() -> {
             try {
                 RoomResponse response = authClient.meeting(request);
+                if (!signalingRequest && response.success() && response.ticket() != null) pendingMeetingState = response;
+                if (closing) { if (!signalingRequest) releaseMeetingQuietly(response, request.token()); return; }
                 Platform.runLater(() -> {
                     if (!closing) success.accept(response);
-                    else releaseRoom(response, request.token());
+                    else if (!signalingRequest) releaseRoom(response, request.token());
                 });
             }
             catch (Exception error) { Platform.runLater(() -> { if (!closing) failure.accept(error); }); }
@@ -148,10 +153,16 @@ public final class SceneManager {
     }
     public SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient,
             java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory) {
+        this(stage, authClient, fileTransferClient, meetingFactory, Platform::exit);
+    }
+    SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient,
+            java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory,
+            Runnable applicationExit) {
         this.stage = java.util.Objects.requireNonNull(stage);
         this.authClient = java.util.Objects.requireNonNull(authClient);
         this.fileTransferClient = java.util.Objects.requireNonNull(fileTransferClient);
         this.meetingFactory = meetingFactory;
+        this.applicationExit = java.util.Objects.requireNonNull(applicationExit);
     }
     public Stage stage() { return stage; }
     public AuthClient authClient() { return authClient; }
@@ -293,7 +304,10 @@ public final class SceneManager {
     }
     public static String connectionError(Throwable error) {
         error = unwrap(error);
+        if (error instanceof client.auth.RoomException room && "DEVICE_REPLACED".equals(room.code()))
+            return "Tài khoản đã vào phòng trên thiết bị khác. Hãy đăng nhập lại để chuyển phòng về thiết bị này.";
         if (error instanceof common.signaling.SignalException signal) return switch (signal.code()) {
+            case "DEVICE_REPLACED" -> "Tài khoản đã vào phòng trên thiết bị khác. Hãy đăng nhập lại để chuyển phòng về thiết bị này.";
             case "APPROVAL_PENDING" -> "Đang chờ chủ phòng duyệt.";
             case "ADMISSION_EXPIRED" -> "Yêu cầu chờ đã hết hạn sau 5 phút. Bạn có thể gửi lại.";
             case "ADMISSION_FORBIDDEN" -> "Yêu cầu chờ không thuộc kết nối hiện tại. Hãy tham gia lại.";
@@ -396,28 +410,45 @@ public final class SceneManager {
     private void clearSession() {
         recentRooms = null; recentRoomsAt = 0;
         closeSfuSession(); sessionExpiresAt = null;
-        authenticatedUser = null; sessionToken = null; preferences.clear(); meetingState = null;
+        authenticatedUser = null; sessionToken = null; preferences.clear(); meetingState = null; pendingMeetingState = null;
         emailVerified.set(false);
         roomInfo = null; roomJoined = false; pendingRoomId = -1;
         mic = true; camera = true; locked = false; room = MockData.rooms().getFirst();
     }
-    /** Giữ cửa sổ tối đa 6 giây để thử thu hồi phiên trước khi đóng. */
+    /** Rời phòng có xác nhận trước khi đóng transport và thu hồi phiên đăng nhập. */
     public void closeApplication() {
         if (closing) return;
-        closing = true; closeSfuSession(); dispose();
+        closing = true;
+        String token = sessionToken;
+        long joinedId = roomJoined && roomInfo != null ? roomInfo.id() : -1;
+        RoomResponse legacyState = meetingState;
+        boolean signalingRoom = usingSfuRoom || sfuSession != null && sfuSession.snapshot() != null;
+        var departure = sfuSession == null ? java.util.concurrent.CompletableFuture.<Void>completedFuture(null)
+                : sfuSession.leaveForApplicationClose();
+        dispose();
         if (stage.getScene() != null) {
             stage.getScene().getRoot().setDisable(true);
             if (stage.getScene().getRoot() instanceof AuthScreen auth) auth.clearSecrets();
         }
-        closeDeadline = new PauseTransition(Duration.seconds(6)); closeDeadline.setOnFinished(event -> finishClose()); closeDeadline.play();
-        String token = sessionToken;
-        long joinedId = roomJoined && roomInfo != null ? roomInfo.id() : -1;
+        // A dead server must not keep a window alive indefinitely. Normal closure waits for the ROOM_LEFT reply.
+        closeDeadline = new PauseTransition(Duration.seconds(15)); closeDeadline.setOnFinished(event -> finishClose()); closeDeadline.play();
         authWorker.execute(() -> {
-            leaveQuietly(token, pendingRoomId > 0 ? pendingRoomId : joinedId);
+            try { departure.get(10, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException unavailable) { /* Bounded offline fallback. */ }
+            if (!signalingRoom) {
+                releaseMeetingQuietly(pendingMeetingState != null ? pendingMeetingState : legacyState, token);
+                leaveQuietly(token, pendingRoomId > 0 ? pendingRoomId : joinedId);
+            }
             revokeQuietly(token);
             revokeQuietly(pendingToken); pendingToken = null;
             if (!closed) Platform.runLater(() -> { if (!closed) finishClose(); });
         });
+    }
+    private void releaseMeetingQuietly(RoomResponse state, String token) {
+        if (state == null || state.room() == null || state.room().closed() || state.ticket() == null) return;
+        try { authClient.meeting(RoomRequest.command("ROOM_LEAVE", token, state.room().id(), state.ticket(), 0)); }
+        catch (IOException ignored) { }
     }
     private void revokeQuietly(String token) {
         if (token == null || token.isBlank()) return;
@@ -431,7 +462,7 @@ public final class SceneManager {
         if (closed) return;
         closed = true;
         if (closeDeadline != null) closeDeadline.stop();
-        clearSession(); pendingToken = null; authWorker.shutdownNow(); roomReadWorker.shutdownNow(); fileTransferClient.close(); stage.hide(); Platform.exit();
+        clearSession(); pendingToken = null; authWorker.shutdownNow(); roomReadWorker.shutdownNow(); fileTransferClient.close(); stage.hide(); applicationExit.run();
     }
     public void shutdown() {
         closing = true; closed = true; dispose();

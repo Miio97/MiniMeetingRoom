@@ -57,6 +57,7 @@ class VideoCoordinatorTest {
     private FakeEngine fake;
     private VideoCoordinator coordinator;
     private ThreadPoolExecutor controls;
+    private final AtomicReference<SignalingServer.Connection> authenticated = new AtomicReference<>();
     private final List<CountDownLatch> gates = new ArrayList<>();
 
     @BeforeAll @Timeout(60)
@@ -82,7 +83,6 @@ class VideoCoordinatorTest {
                 Thread.ofPlatform().daemon().name("media-reopen-test-control").factory());
         coordinator = new VideoCoordinator(rooms, engine, controls);
         current.set(coordinator);
-        AtomicReference<SignalingServer.Connection> authenticated = new AtomicReference<>();
         signaling = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
                 new SessionValidator(database::connection, Clock.systemUTC()), new SignalingServer.Handler() {
                     public SignalMessage handle(SignalingServer.Connection source, SignalMessage request) {
@@ -145,6 +145,46 @@ class VideoCoordinatorTest {
         assertFalse(fake.has(old));
         assertTrue(fake.has(fresh), "Validation captured before reopening must not revoke the new owner");
         assertOwnerStillRenews(fresh);
+    }
+
+    @Test
+    void deviceReplacementRevokesOldMediaBeforeQueuedControlsRun() throws Exception {
+        MemberAuthorization old = joinAndGrant(create());
+        CountDownLatch release = blockControls();
+        coordinator.roomEvent(new RoomEvent(connection.id(), "ROOM_LEFT", old.roomId(), 99,
+                Map.of("reason", "DEVICE_REPLACED")));
+        assertFalse(fake.has(old), "Replacement must retire the old generation before the new device joins");
+        release.countDown(); drainControls();
+        assertFalse(fake.has(old));
+    }
+
+    @Test
+    void deviceTakeoverGrantsFreshGenerationAndDelayedOldCleanupPreservesIt() throws Exception {
+        var room = create();
+        var oldConnection = connection;
+        MemberAuthorization old = joinAndGrant(room);
+        CountDownLatch release = blockControls();
+        coordinator.validated(oldConnection);
+        var login = database.client().login("MediaHost", RoomTestFixture.PASSWORD);
+        assertTrue(login.success());
+        try (var replacement = new SignalingClient(new SignalingClient.Settings("localhost", signaling.port(), null,
+                SignalWire.DEFAULT_MAX_BYTES), tls.client(), ignored -> { })) {
+            replacement.connect(login.token());
+            replacement.request("CAPTURE", null, new JsonObject()).get(6, TimeUnit.SECONDS);
+            var freshConnection = authenticated.get();
+            assertNotEquals(oldConnection.id(), freshConnection.id());
+            rooms.join(freshConnection.principal(), freshConnection.id(), freshConnection.generation(), UUID.randomUUID().toString(),
+                    room.roomId(), room.joinCode(), "1234", false, false);
+            assertFalse(fake.has(old), "Old media must be gone when the replacement joins");
+            coordinator.handle(freshConnection, freshConnection.message("VIDEO_STATE", UUID.randomUUID().toString(),
+                    room.roomId(), null, new JsonObject()));
+            var fresh = rooms.assertMember(freshConnection.id(), room.roomId());
+            assertEquals(old.participantId(), fresh.participantId());
+            assertNotEquals(old.generation(), fresh.generation());
+            release.countDown(); drainControls();
+            coordinator.revoke(oldConnection.id());
+            assertTrue(fake.has(fresh), "Old connection cleanup must not revoke the new device's media");
+        }
     }
 
     @ParameterizedTest

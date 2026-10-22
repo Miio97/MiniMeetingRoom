@@ -501,7 +501,7 @@ public final class AuthService {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
-    static String tokenHash(String token) {
+    public static String tokenHash(String token) {
         try {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(
                     MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8)));

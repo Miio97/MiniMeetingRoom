@@ -93,10 +93,15 @@ public final class LegacyMeetingScreen extends BorderPane {
         manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> { polling = false; if (!disposed) apply(response); },
                 error -> {
                     polling = false;
-                    if (disposed) return;
-                    if (error instanceof RoomException rejection && rejection.admissionEnded()) manager.ended(elapsed(), peakPeople, SceneManager.connectionError(error));
-                    else participantPanel.status(SceneManager.connectionError(error));
+                    failure(error);
                 });
+    }
+    private void failure(Throwable error) {
+        if (disposed) return;
+        if (error instanceof RoomException rejection && rejection.admissionEnded()) {
+            manager.leaveRoomQuietly();
+            manager.ended(elapsed(), peakPeople, SceneManager.connectionError(error));
+        } else participantPanel.status(SceneManager.connectionError(error));
     }
     private void apply(RoomResponse response) {
         if (response.room().closed()) { manager.ended(elapsed(), peakPeople, "Chủ phòng đã đóng phòng."); return; }
@@ -111,7 +116,7 @@ public final class LegacyMeetingScreen extends BorderPane {
     private void send(RoomRequest request) {
         if (disposed) return;
         manager.runMeetingRequest(request, response -> { if (!disposed) apply(response); },
-                error -> { if (!disposed) participantPanel.status(SceneManager.connectionError(error)); });
+                this::failure);
     }
     private void hostCommand(String action, Long target) { send(manager.roomCommand(action, target)); }
     private void invite() {
