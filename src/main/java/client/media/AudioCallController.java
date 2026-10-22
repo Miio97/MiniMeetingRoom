@@ -34,6 +34,7 @@ public final class AudioCallController implements AutoCloseable {
     private final AtomicBoolean statusScheduled=new AtomicBoolean();
     public ReadOnlyStringProperty statusProperty() {return status.getReadOnlyProperty();}
     private final ReadOnlyBooleanWrapper requested = new ReadOnlyBooleanWrapper();
+    private final ReadOnlyBooleanWrapper pending = new ReadOnlyBooleanWrapper();
     private final CameraSwitch microphone = new CameraSwitch(this::changed);
     private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> samplesBySource = new ConcurrentHashMap<>();
@@ -41,6 +42,8 @@ public final class AudioCallController implements AutoCloseable {
     private final AtomicLong receivedSamples = new AtomicLong();
     private final CompletableFuture<Void> closeComplete = new CompletableFuture<>();
     private volatile boolean entered, active;
+    private long publishedAt;
+    private boolean micRequestConfirmed;
     private NativeAudioSession receive, capture;
     private volatile NativeAudioSession.Peer publisher;
     private volatile AdaptiveVideoPolicy.Evidence voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN;
@@ -73,6 +76,7 @@ public final class AudioCallController implements AutoCloseable {
         }, 1, 1, TimeUnit.SECONDS);
     }
     public ReadOnlyBooleanProperty requestedProperty() { return requested.getReadOnlyProperty(); }
+    public ReadOnlyBooleanProperty pendingProperty() { return pending.getReadOnlyProperty(); }
     public CompletableFuture<Void> closeComplete() { return closeComplete; }
     public long receivedSamples() { return receivedSamples.get(); }
     public CompletableFuture<MicrophoneConsentStore.Choice> choice() { return submit(consent::read); }
@@ -93,7 +97,12 @@ public final class AudioCallController implements AutoCloseable {
             return null;
         });
     }
-    public void enter() { entered=true; }
+    public void enter() {
+        entered = true;
+        if (!closed.get() && active && publisher == null && microphone.wanted()) {
+            submit(() -> { synchronize(); return null; });
+        }
+    }
     private volatile boolean controlConnected = true;
     public void controlConnected(boolean connected) {
         controlConnected = connected; if(!connected) voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN;
@@ -103,7 +112,10 @@ public final class AudioCallController implements AutoCloseable {
         return microphone.toggle(active, () -> submit(() -> { start(); return null; }), () -> submit(() -> { stop(true); return null; }));
     }
     private void changed() {
-        Runnable update = () -> requested.set(!closed.get() && (microphone.pending() ? microphone.wanted() : active));
+        Runnable update = () -> {
+            requested.set(!closed.get() && (microphone.pending() ? microphone.wanted() : active));
+            pending.set(!closed.get() && microphone.pending());
+        };
         if (Platform.isFxApplicationThread()) update.run(); else if(uiScheduled.compareAndSet(false,true)) Platform.runLater(() -> {uiScheduled.set(false);update.run();});
     }
     private void wanted() { if (!microphone.wanted() || closed.get()) throw new CancellationException(); }
@@ -130,6 +142,8 @@ public final class AudioCallController implements AutoCloseable {
     private void publish() throws Exception {
         wanted(); publisher=capture.publisher(); JsonObject body=new JsonObject(); body.addProperty("sdp",publisher.offer()); wanted();
         JsonObject answer=command("AUDIO_PUBLISH",body); publisher.answer(answer.get("sdp").getAsString()); wanted();
+        publishedAt = System.nanoTime();
+        micRequestConfirmed = false;
         if (headless) generated=worker.scheduleAtFixedRate(new Runnable() {
             private long sample;
             public void run() {
@@ -142,6 +156,8 @@ public final class AudioCallController implements AutoCloseable {
     }
     private void stop(boolean notify) throws Exception {
         active=false;
+        publishedAt = 0;
+        micRequestConfirmed = false;
         if (generated != null) { generated.cancel(false); generated=null; }
         if (publisher != null) { publisher.close(); publisher=null; }
         if (capture != null) { capture.close(); capture=null; }
@@ -156,13 +172,22 @@ public final class AudioCallController implements AutoCloseable {
                 try { stop(true); } catch (Exception | Error cleanup) { failure.addSuppressed(cleanup); }
                 microphone.resetOff(); throw failure;
             }
+            snapshot = room.get();
+            if (snapshot == null) { disconnect(); return; }
         }
-        if (publisher!=null && snapshot.participants().stream().filter(p -> p.participantId().equals(self.get())).noneMatch(p -> p.mediaState().micRequested())) {
-            microphone.resetOff(); stop(true);
+        String own = self.get();
+        boolean micRequested = snapshot.participants().stream()
+                .anyMatch(p -> p.participantId().equals(own) && p.mediaState().micRequested());
+        if (publisher != null) {
+            micRequestConfirmed |= micRequested;
+            if (VideoCallController.shouldStopPublication(micRequested, micRequestConfirmed, System.nanoTime() - publishedAt)) {
+                microphone.resetOff(); stop(true);
+            }
         }
         if (publisher != null && (publisher.failed() || publisher.stalled()) && microphone.wanted()) {
             // Repair the transport only while the user still wants the microphone on.
             publisher.close(); publisher = null;
+            publishedAt = 0; micRequestConfirmed = false;
             if (generated != null) { generated.cancel(false); generated = null; }
             command("AUDIO_STOP", new JsonObject());
             publish();
@@ -179,7 +204,8 @@ public final class AudioCallController implements AutoCloseable {
         if (subscriptions.isEmpty() && receive != null) {
             receive.close(); receive = null;
         }
-        samplesBySource.keySet().removeIf(id -> snapshot.participants().stream().noneMatch(p -> p.participantId().equals(id)));
+        var currentParticipants = snapshot.participants();
+        samplesBySource.keySet().removeIf(id -> currentParticipants.stream().noneMatch(p -> p.participantId().equals(id)));
         for(var source:sources.entrySet()) {
             if (closed.get()) return;
             if (subscriptions.containsKey(source.getKey()) || source.getKey().equals(self.get()) || self.get() == null) continue;
@@ -225,7 +251,7 @@ public final class AudioCallController implements AutoCloseable {
     }
     private void show(String message) {
         latestStatus.set(message);if(!statusScheduled.compareAndSet(false,true)) return;
-        Platform.runLater(() -> {String value=latestStatus.getAndSet(null);statusScheduled.set(false);if(!closed.get()) status.set(value);if(latestStatus.get()!=null) show(latestStatus.get());});
+        Platform.runLater(() -> {String value=latestStatus.getAndSet(null);statusScheduled.set(false);if(!closed.get() && value != null && !Objects.equals(status.get(), value)) status.set(value);if(latestStatus.get()!=null) show(latestStatus.get());});
     }
     private void report(Throwable failure) {
         if (closed.get() || failure instanceof CancellationException) return;

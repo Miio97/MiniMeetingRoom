@@ -40,7 +40,7 @@ public final class AuthClient {
             "VALIDATION_ERROR", "USERNAME_TAKEN", "EMAIL_TAKEN", "WRONG_PASSWORD", "DATABASE_UNAVAILABLE", "SERVER_ERROR",
             "SESSION_EXPIRED", "ROOM_NOT_FOUND", "ROOM_CLOSED", "ROOM_LOCKED", "INVALID_ROOM_PIN",
             "ROOM_FULL", "ROOM_ACCESS_DENIED", "ROOM_ALREADY_ACTIVE", "PERMISSION_DENIED", "OTP_REQUIRED", "OTP_INVALID", "OTP_EXPIRED", "OTP_LOCKED", "OTP_COOLDOWN", "OTP_RATE_LIMIT", "OTP_UNAVAILABLE", "MAIL_UNAVAILABLE", "DB_MIGRATION_REQUIRED");
-    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "LOGOUT", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
+    private static final Set<String> ACTIONS = Set.of("REGISTER", "LOGIN", "RESUME_SESSION", "LOGOUT", "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM",
             "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM", "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET", "RESET_PASSWORD", "UPDATE_PROFILE", "CHANGE_PASSWORD", "REQUEST_EMAIL_VERIFICATION", "VERIFY_EMAIL", "REQUEST_ACCOUNT_PASSWORD_RESET", "RESET_ACCOUNT_PASSWORD");
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
@@ -64,7 +64,15 @@ public final class AuthClient {
     }
 
     public AuthResponse login(String username, String password) throws IOException {
-        return send(new AuthRequest("LOGIN", username, password, null, null, null));
+        return login(username, password, null);
+    }
+
+    public AuthResponse login(String username, String password, String clientInfo) throws IOException {
+        return send(AuthRequest.login(username, password, clientInfo));
+    }
+
+    public AuthResponse resumeSession(String token, String clientInfo) throws IOException {
+        return send(AuthRequest.resumeSession(token, clientInfo));
     }
 
     public AuthResponse register(String username, String displayName, String email, String password)
@@ -161,7 +169,7 @@ public final class AuthClient {
         try {
             AuthResponse response = sendMeasured(request, timing, AuthResponse.class);
             if (response.code() == null || response.message() == null
-                    || (request.action().equals("LOGIN") && response.success()
+                    || ((request.action().equals("LOGIN") || request.action().equals("RESUME_SESSION")) && response.success()
                     && (response.user() == null || response.user().id() <= 0
                     || response.user().username() == null || response.user().displayName() == null
                     || response.token() == null || response.token().isBlank() || response.expiresAt() == null))) {

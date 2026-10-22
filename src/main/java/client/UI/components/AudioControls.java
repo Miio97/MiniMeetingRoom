@@ -18,6 +18,7 @@ public final class AudioControls extends VBox {
     private final Label error=Ui.label("", "error-text");
     private final ChangeListener<String> statusChanged=(o,b,a) -> error.setText(a==null ? "" : a);
     private final ChangeListener<Boolean> changed=(observable,before,after) -> update();
+    private final CompletableFuture<MicrophoneConsentStore.Choice> initialChoice;
     private MicrophoneConsentStore.Access access=MicrophoneConsentStore.Access.ASK;
     private boolean disposed, loaded, prompting;
     private Alert permissionDialog;
@@ -28,8 +29,12 @@ public final class AudioControls extends VBox {
         toggle=Ui.button("Bật mic", "primary", this::toggle); toggle.setId("audio-microphone-toggle"); error.setWrapText(true);
         error.visibleProperty().bind(error.textProperty().isNotEmpty()); error.managedProperty().bind(error.visibleProperty());
         getChildren().addAll(toggle,Ui.label("Mức mic: Chưa có dữ liệu", "caption"),error);
-        audio.requestedProperty().addListener(changed); audio.statusProperty().addListener(statusChanged); update();
-        audio.choice().whenComplete((choice,failure) -> Platform.runLater(() -> {
+        audio.requestedProperty().addListener(changed);
+        audio.pendingProperty().addListener(changed);
+        audio.statusProperty().addListener(statusChanged);
+        update();
+        initialChoice = audio.choice();
+        initialChoice.whenComplete((choice,failure) -> Platform.runLater(() -> {
             if(disposed) return; loaded=true; if(failure==null) access=choice.access(); else error.setText(CameraErrors.audioMessage(failure)); update();
         }));
         if(devices) { addDevices(true); addDevices(false); }
@@ -46,7 +51,7 @@ public final class AudioControls extends VBox {
         choices.setOnShowing(event -> (input ? audio.microphones() : audio.speakers()).whenComplete((list,failure) -> Platform.runLater(() -> {
             if(disposed) return; if(failure!=null) error.setText("Không đọc được danh sách thiết bị âm thanh."); else choices.getItems().setAll(list);
         })));
-        if(input) choices.disableProperty().bind(audio.requestedProperty());
+        if(input) choices.disableProperty().bind(audio.requestedProperty().or(audio.pendingProperty()));
         choices.setOnAction(event -> {
             if(choices.getValue()==null) return;
             (input ? audio.selectMicrophone(choices.getValue()) : audio.selectSpeaker(choices.getValue())).whenComplete((value,failure) -> Platform.runLater(() -> {
@@ -65,7 +70,13 @@ public final class AudioControls extends VBox {
         dialog.setOnHidden(event -> { permissionDialog=null; result.complete(dialog.getResult()==allow); }); dialog.show(); return result;
     }
     public void toggle() {
-        if(disposed || !loaded || prompting) return;
+        if(disposed || prompting || (operation != null && !operation.isDone()) || audio.pendingProperty().get()) return;
+        if(!loaded) {
+            initialChoice.whenComplete((choice,failure) -> Platform.runLater(() -> {
+                if(!disposed && loaded && !prompting && (operation == null || operation.isDone()) && !audio.pendingProperty().get()) toggle();
+            }));
+            return;
+        }
         if(audio.requestedProperty().get() || access==MicrophoneConsentStore.Access.ALLOWED) { apply(); return; }
         prompting=true; update();
         prompt.apply(getScene()==null ? null : getScene().getWindow()).whenComplete((allowed,failure) -> Platform.runLater(() -> {
@@ -81,7 +92,7 @@ public final class AudioControls extends VBox {
         }));
     }
     private void apply() {
-        CompletableFuture<Void> next=audio.toggle(); if(operation==next) return; operation=next; update();
+        CompletableFuture<Void> next=audio.toggle(); if(operation==next) return; operation=next; error.setText(""); update();
         next.whenComplete((value,failure) -> Platform.runLater(() -> { if(!disposed && operation==next) { error.setText(failure==null ? "" : CameraErrors.audioMessage(failure)); update(); } }));
     }
     /** Move only the existing button; permission/device ownership stays with this component. */
@@ -94,7 +105,17 @@ public final class AudioControls extends VBox {
         getChildren().add(error);
         return toggle;
     }
-    private void update() { toggle.setText(prompting ? "Đang xin quyền…" : operation != null && !operation.isDone() ? "Đang xử lý…" : audio.requestedProperty().get() ? "Tắt mic" : "Bật mic"); toggle.setDisable(!loaded || prompting || operation != null && !operation.isDone()); }
+    private void update() {
+        boolean busy = (operation != null && !operation.isDone()) || audio.pendingProperty().get();
+        toggle.setText(prompting ? "Đang xin quyền…" : busy ? "Đang xử lý…" : audio.requestedProperty().get() ? "Tắt mic" : "Bật mic");
+        toggle.setDisable(!loaded || prompting || busy);
+    }
     public javafx.beans.property.ReadOnlyStringProperty errorProperty() { return error.textProperty(); }
-    public void dispose() { disposed=true; audio.requestedProperty().removeListener(changed); audio.statusProperty().removeListener(statusChanged); if(permissionDialog!=null) permissionDialog.close(); }
+    public void dispose() {
+        disposed=true;
+        audio.requestedProperty().removeListener(changed);
+        audio.pendingProperty().removeListener(changed);
+        audio.statusProperty().removeListener(statusChanged);
+        if(permissionDialog!=null) permissionDialog.close();
+    }
 }

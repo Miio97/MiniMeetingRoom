@@ -4,6 +4,7 @@ import client.UI.mock.MockData;
 import client.UI.screens.*;
 import client.UI.components.Ui;
 import client.auth.AuthClient;
+import client.auth.DeviceSessionStore;
 import client.filetransfer.FileTransferClient;
 import common.auth.AuthResponse;
 import common.auth.AuthUser;
@@ -38,6 +39,9 @@ public final class SceneManager {
     private Runnable cleanup = () -> { };
     private ParallelTransition transition;
     private final AuthClient authClient;
+    private final DeviceSessionStore sessionStore;
+    private boolean initialSessionChecked;
+    private final java.util.Set<String> restoringTokens = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final FileTransferClient fileTransferClient;
     private final Runnable applicationExit;
     private final ExecutorService authWorker = Executors.newSingleThreadExecutor(runnable -> {
@@ -144,7 +148,9 @@ public final class SceneManager {
     private final java.util.Map<String, String> preferences = new java.util.HashMap<>();
     public String preference(String key, String fallback) { return preferences.getOrDefault(key, fallback); }
     public void preferenceSet(String key, String value) { preferences.put(key, value); }
-    public SceneManager(Stage stage) { this(stage, new AuthClient(), new FileTransferClient(), client.meeting.MeetingSession::new); }
+    public SceneManager(Stage stage) {
+        this(stage, new AuthClient(), new FileTransferClient(), client.meeting.MeetingSession::new, Platform::exit, DeviceSessionStore.local());
+    }
     SceneManager(Stage stage, AuthClient authClient) { this(stage, authClient, new FileTransferClient()); }
     SceneManager(Stage stage, AuthClient authClient, boolean legacy) { this(stage, authClient); legacyMeetingUi = legacy; }
     SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient) {
@@ -158,14 +164,49 @@ public final class SceneManager {
     SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient,
             java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory,
             Runnable applicationExit) {
+        this(stage, authClient, fileTransferClient, meetingFactory, applicationExit, DeviceSessionStore.noop());
+    }
+    public SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient,
+            java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory,
+            DeviceSessionStore sessionStore) {
+        this(stage, authClient, fileTransferClient, meetingFactory, Platform::exit, sessionStore);
+    }
+    SceneManager(Stage stage, AuthClient authClient, FileTransferClient fileTransferClient,
+            java.util.function.BiFunction<String, java.time.Instant, client.meeting.MeetingSession> meetingFactory,
+            Runnable applicationExit, DeviceSessionStore sessionStore) {
         this.stage = java.util.Objects.requireNonNull(stage);
         this.authClient = java.util.Objects.requireNonNull(authClient);
         this.fileTransferClient = java.util.Objects.requireNonNull(fileTransferClient);
         this.meetingFactory = meetingFactory;
         this.applicationExit = java.util.Objects.requireNonNull(applicationExit);
+        this.sessionStore = java.util.Objects.requireNonNull(sessionStore);
     }
     public Stage stage() { return stage; }
     public AuthClient authClient() { return authClient; }
+    public String clientInfo() throws IOException { return sessionStore.clientInfo(); }
+    public java.util.List<DeviceSessionStore.SavedSession> savedSessions() {
+        try { return sessionStore.listSessions(); }
+        catch (IOException failure) { storageFailure(); return java.util.List.of(); }
+    }
+    public void removeSavedToken(String token) { storeChange(() -> sessionStore.removeToken(token)); }
+    @FunctionalInterface private interface StoreChange { void run() throws IOException; }
+    private void storeChange(StoreChange change) {
+        try { change.run(); } catch (IOException failure) { storageFailure(); }
+    }
+    private void storageFailure() {
+        Platform.runLater(() -> {
+            if (closing) return;
+            Alert alert = new Alert(Alert.AlertType.ERROR); alert.initOwner(stage);
+            alert.setTitle("Phiên trên thiết bị"); alert.setHeaderText("Không thể cập nhật phiên đã lưu.");
+            alert.setContentText("Kiểm tra quyền đọc/ghi tệp phiên trên thiết bị rồi thử lại."); Ui.style(alert); alert.show();
+        });
+    }
+    public void resumeSavedSession(DeviceSessionStore.SavedSession saved, Consumer<AuthResponse> success, Consumer<Throwable> failure) {
+        restoringTokens.add(saved.token());
+        runAuthRequest(() -> authClient.resumeSession(saved.token(), sessionStore.clientInfo()), response -> {
+            restoringTokens.remove(saved.token()); success.accept(response);
+        }, error -> { restoringTokens.remove(saved.token()); failure.accept(error); });
+    }
     public FileTransferClient fileTransferClient() { return fileTransferClient; }
     public String sessionToken() { return sessionToken; }
     public RoomInfo roomInfo() { return roomInfo; }
@@ -178,6 +219,7 @@ public final class SceneManager {
             if ((owned instanceof Stage dialog && dialog.getOwner() == stage)
                     || (owned instanceof javafx.stage.PopupWindow popup && popup.getOwnerWindow() == stage)) owned.hide();
         }
+        removeSavedToken(sessionToken);
         clearSession(); auth(); return true;
     }
     /** Cập nhật phần trình bày từ snapshot của server; không giữ PIN trên client. */
@@ -248,6 +290,7 @@ public final class SceneManager {
             throw new IllegalArgumentException("Thông tin tài khoản không khớp phiên đăng nhập.");
         authenticatedUser = user;
         emailVerified.set(user.emailVerified());
+        storeChange(() -> sessionStore.updateUser(user));
     }
     public ReadOnlyBooleanProperty logoutPendingProperty() { return logoutPending.getReadOnlyProperty(); }
     public void acceptSession(AuthResponse response) {
@@ -259,6 +302,7 @@ public final class SceneManager {
         authenticatedUser = response.user(); sessionToken = response.token(); pendingToken = null;
         emailVerified.set(authenticatedUser.emailVerified());
         sessionExpiresAt = response.expiresAt() == null ? java.time.Instant.EPOCH : java.time.Instant.parse(response.expiresAt());
+        storeChange(() -> sessionStore.saveSession(authenticatedUser, sessionToken, sessionExpiresAt, true));
     }
     /** Gửi mạng ngoài luồng JavaFX; chỉ cập nhật màn hình khi ứng dụng còn hoạt động. */
     public void runAuthRequest(Callable<AuthResponse> request, Consumer<AuthResponse> success, Consumer<Throwable> failure) {
@@ -269,14 +313,16 @@ public final class SceneManager {
         authWorker.execute(() -> {
             try {
                 AuthResponse response = request.call();
-                if (response.token() != null && !response.token().isBlank()) pendingToken = response.token();
+                boolean restoringSavedToken = response.token() != null && restoringTokens.contains(response.token());
+                if (response.token() != null && !response.token().isBlank() && !restoringSavedToken) pendingToken = response.token();
                 if (response.success() && response.room() != null && requestUserId > 0
                         && response.room().participants().stream().anyMatch(p -> p.userId() == requestUserId)) {
                     pendingRoomId = response.room().id();
                 }
                 if (closing) {
                     if (response.success() && response.room() != null) leaveQuietly(requestToken, response.room().id());
-                    revokeQuietly(response.token()); pendingToken = null; return;
+                    if (!restoringSavedToken) revokeQuietly(response.token());
+                    pendingToken = null; return;
                 }
                 Platform.runLater(() -> {
                     if (!closing) success.accept(response);
@@ -349,6 +395,23 @@ public final class SceneManager {
     public void logout() {
         performLogout();
     }
+    public void switchAccount() {
+        if (closing || logoutPending.get()) return;
+        logoutPending.set(true);
+        if (roomJoined) {
+            leaveRoom(this::completeAccountSwitch, message -> {
+                logoutPending.set(false);
+                if (message != null && !message.isBlank()) logoutError(message);
+            });
+        } else completeAccountSwitch();
+    }
+    private void completeAccountSwitch() {
+        if (closing) return;
+        storeChange(sessionStore::clearActiveAccount);
+        // Legacy room channels also need a leave; the login itself remains valid.
+        leaveRoomQuietly();
+        clearSession(); logoutPending.set(false); auth();
+    }
     /** Settings recovery proves the saved email by OTP and keeps the current server session. */
     public void forgotPassword() {
         if (closing || logoutPending.get()) return;
@@ -384,7 +447,7 @@ public final class SceneManager {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
             if (leftRoom.get()) { roomJoined = false; pendingRoomId = -1; }
             if (sessionExpired(response)) return;
-            if (response.success()) { clearSession(); auth(); }
+            if (response.success()) { removeSavedToken(token); clearSession(); auth(); }
             else { restoreAfterLogoutFailure(leftRoom.get()); logoutError(response.message()); }
         }, error -> {
             logoutPending.set(false); stage.getScene().getRoot().setDisable(false);
@@ -408,6 +471,7 @@ public final class SceneManager {
         Ui.style(alert); alert.showAndWait();
     }
     private void clearSession() {
+        logoutPending.set(false);
         recentRooms = null; recentRoomsAt = 0;
         closeSfuSession(); sessionExpiresAt = null;
         authenticatedUser = null; sessionToken = null; preferences.clear(); meetingState = null; pendingMeetingState = null;
@@ -440,7 +504,7 @@ public final class SceneManager {
                 releaseMeetingQuietly(pendingMeetingState != null ? pendingMeetingState : legacyState, token);
                 leaveQuietly(token, pendingRoomId > 0 ? pendingRoomId : joinedId);
             }
-            revokeQuietly(token);
+            if (!sessionStore.isPersistent()) revokeQuietly(token);
             revokeQuietly(pendingToken); pendingToken = null;
             if (!closed) Platform.runLater(() -> { if (!closed) finishClose(); });
         });
@@ -497,6 +561,14 @@ public final class SceneManager {
             stage.setHeight(600 + Math.max(0, stage.getHeight() - scene.getHeight()));
             stage.centerOnScreen();
         });
+        if (!initialSessionChecked) {
+            initialSessionChecked = true;
+            try {
+                sessionStore.activeSession().ifPresent(saved -> Platform.runLater(() -> {
+                    if (!closing && stage.getScene().getRoot() == view) view.resumeSavedSession(saved);
+                }));
+            } catch (IOException failure) { storageFailure(); }
+        }
     }
     private boolean hasSession() { if (closing) return false; if (authenticatedUser == null) { auth(); return false; } return true; }
     public void lobby() {
