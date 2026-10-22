@@ -292,7 +292,7 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.mu.Unlock()
 		reply(w, 200, map[string]any{"ok": true})
 	case "unsubscribe":
-		if request.Kind != "VIDEO" || len(request.Transports) > 6 {
+		if (request.Kind != "VIDEO" && request.Kind != "AUDIO") || len(request.Transports) > 50 || (request.Kind == "VIDEO" && len(request.Transports) > 6) {
 			reply(w, 400, map[string]any{"code": "INVALID_REQUEST"})
 			return
 		}
@@ -305,7 +305,7 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		removed := []*mediaPeer{}
 		for _, id := range request.Transports {
 			peer := e.peers[id]
-			if peer != nil && !peer.publisher && peer.kind == "VIDEO" && peer.owner == request.Participant && peer.room == request.Room && peer.generation == request.Generation {
+			if peer != nil && !peer.publisher && peer.kind == request.Kind && peer.owner == request.Participant && peer.room == request.Room && peer.generation == request.Generation {
 				delete(e.peers, id)
 				removed = append(removed, peer)
 			}
