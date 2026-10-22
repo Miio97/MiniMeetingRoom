@@ -11,7 +11,7 @@ import javafx.scene.image.*;
 public final class VideoFrameMailbox implements VideoTrackSink, AutoCloseable {
     private record Pixels(long epoch, int width, int height, byte[] values) { }
     private static final long FRAME_INTERVAL_NS = 1_000_000_000L / 30;
-    private static final long FRAME_JITTER_NS = 2_000_000L;
+    private static final long FRAME_JITTER_NS = 8_000_000L;
     private final AtomicReference<Pixels> latest = new AtomicReference<>();
     private final AtomicBoolean scheduled = new AtomicBoolean(), closed = new AtomicBoolean();
     private final AtomicLong nextFrame = new AtomicLong();
@@ -38,11 +38,11 @@ public final class VideoFrameMailbox implements VideoTrackSink, AutoCloseable {
             if (closed.get() || epoch != generation.get()) return;
             received.incrementAndGet();
             long now = System.nanoTime(), before = nextFrame.get();
-            // Advance the cadence, rather than restarting a delay after every accepted frame.
-            // A 100 ms delay quantized a 30 FPS source to about 8 FPS; strict 33 ms delays
-            // also skip alternate frames when capture scheduling jitters slightly.
-            if (now < before-FRAME_JITTER_NS || !nextFrame.compareAndSet(before,
-                    before==0 || now-before>FRAME_INTERVAL_NS ? now+FRAME_INTERVAL_NS : before+FRAME_INTERVAL_NS)) { dropped.incrementAndGet(); return; }
+            // Advance the cadence with tolerance for Windows UVC/OS scheduling jitter (~15.6 ms ticks).
+            long target = before == 0 || now - before > FRAME_INTERVAL_NS
+                    ? now + FRAME_INTERVAL_NS
+                    : Math.max(now + FRAME_INTERVAL_NS - FRAME_JITTER_NS, before + FRAME_INTERVAL_NS);
+            if (now < before - FRAME_JITTER_NS || !nextFrame.compareAndSet(before, target)) { dropped.incrementAndGet(); return; }
             if (!(frame.buffer instanceof I420Buffer buffer)) { dropped.incrementAndGet(); return; }
             int w = buffer.getWidth(), h = buffer.getHeight();
             if (w < 1 || h < 1 || w > 1280 || h > 720) { dropped.incrementAndGet(); return; }
@@ -74,14 +74,16 @@ public final class VideoFrameMailbox implements VideoTrackSink, AutoCloseable {
     private void schedule() {
         if (!scheduled.compareAndSet(false, true)) return;
         Platform.runLater(() -> {
-            Pixels pixels = latest.getAndSet(null);
             boolean requestedClear = clear.getAndSet(false);
-            if (closed.get() || requestedClear || pixels != null && pixels.epoch() != generation.get()) image.set(null);
-            else if (pixels != null) {
+            Pixels pixels = latest.getAndSet(null);
+            if (closed.get() || (pixels == null && requestedClear) || (pixels != null && pixels.epoch() != generation.get())) {
+                if (image.get() != null) image.set(null);
+            } else if (pixels != null) {
                 WritableImage target = image.get() instanceof WritableImage previous && previous.getWidth() == pixels.width()
                         && previous.getHeight() == pixels.height() ? previous : new WritableImage(pixels.width(), pixels.height());
                 target.getPixelWriter().setPixels(0, 0, pixels.width(), pixels.height(), PixelFormat.getByteBgraPreInstance(), pixels.values(), 0, pixels.width()*4);
-                image.set(target); rendered.incrementAndGet();
+                if (image.get() != target) image.set(target);
+                rendered.incrementAndGet();
             }
             if(pixels!=null && !closed.get()) spare.compareAndSet(null,pixels.values());
             scheduled.set(false); if (latest.get() != null || clear.get()) schedule();

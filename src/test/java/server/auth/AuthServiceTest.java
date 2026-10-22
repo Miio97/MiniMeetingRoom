@@ -383,6 +383,110 @@ class AuthServiceTest {
         }
     }
 
+    @Test void deviceLoginReplacesOnlyThatAccountsSessionOnThatDeviceAfterCommit() throws Exception {
+        execute("ALTER TABLE Phien_Dang_Nhap ADD Thong_Tin_Client VARCHAR(255)");
+        var revoked = new ArrayList<String>();
+        service = new AuthService(() -> DriverManager.getConnection(url), new PasswordHasher(),
+                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofHours(24), hash -> {
+                    // A separate connection must see the committed revocation before notification.
+                    try (var c = DriverManager.getConnection(url);
+                            var s = c.prepareStatement("SELECT Thu_Hoi_Luc FROM Phien_Dang_Nhap WHERE Token_Bam=?")) {
+                        s.setString(1, hash);
+                        try (var rows = s.executeQuery()) { assertTrue(rows.next()); assertNotNull(rows.getTimestamp(1)); }
+                    } catch (SQLException failure) { throw new AssertionError(failure); }
+                    revoked.add(hash);
+                });
+        assertTrue(register("first", "First", null).success());
+        assertTrue(register("second", "Second", null).success());
+        var a = service.handle(AuthRequest.login("first", PASSWORD, " device:A\n "));
+        var b = service.handle(AuthRequest.login("first", PASSWORD, "device:B"));
+        var other = service.handle(AuthRequest.login("second", PASSWORD, "device:A"));
+        assertTrue(resume(a.token(), "device:A").success());
+        assertTrue(resume(b.token(), "device:B").success());
+        var replacement = service.handle(AuthRequest.login("first", PASSWORD, "device:A"));
+        assertTrue(replacement.success());
+        assertEquals(List.of(AuthService.tokenHash(a.token())), revoked);
+        assertEquals("SESSION_EXPIRED", resume(a.token(), "device:A").code());
+        assertTrue(resume(replacement.token(), "device:A").success());
+        assertTrue(resume(b.token(), "device:B").success());
+        assertTrue(resume(other.token(), "device:A").success());
+    }
+
+    @Test void resumeRequiresMatchingDeviceAndRejectsRevokedExpiredInactiveAndInvalidTokens() throws Exception {
+        execute("ALTER TABLE Phien_Dang_Nhap ADD Thong_Tin_Client VARCHAR(255)");
+        register("first", "First", null);
+        var login = service.handle(AuthRequest.login("first", PASSWORD, "device:A"));
+        assertTrue(login.success());
+        assertEquals("SESSION_EXPIRED", resume(login.token(), "device:B").code());
+        assertEquals("SESSION_EXPIRED", resume(login.token(), null).code());
+        var restored = resume(login.token(), "device:A");
+        assertTrue(restored.success()); assertEquals(login.token(), restored.token()); assertEquals(login.expiresAt(), restored.expiresAt());
+        assertEquals("first", restored.user().username());
+        execute("UPDATE Nguoi_Dung SET Trang_Thai='BI_KHOA'");
+        assertEquals("SESSION_EXPIRED", resume(login.token(), "device:A").code());
+        execute("UPDATE Nguoi_Dung SET Trang_Thai='HOAT_DONG'");
+        logout(login.token());
+        assertEquals("SESSION_EXPIRED", resume(login.token(), "device:A").code());
+        var expires = service.handle(AuthRequest.login("first", PASSWORD, "device:A"));
+        service = new AuthService(() -> DriverManager.getConnection(url), new PasswordHasher(),
+                Clock.fixed(NOW.plus(Duration.ofHours(24)), ZoneOffset.UTC), Duration.ofHours(24));
+        assertEquals("SESSION_EXPIRED", resume(expires.token(), "device:A").code());
+        for (String token : java.util.Arrays.asList(null, "", " ", "missing", "x".repeat(257)))
+            assertEquals("SESSION_EXPIRED", resume(token, "device:A").code());
+    }
+
+    @Test void legacySchemaAndNullClientInfoKeepIndependentLoginSemantics() throws Exception {
+        register("first", "First", null);
+        var one = service.handle(AuthRequest.login("first", PASSWORD, "device:A"));
+        var two = service.handle(AuthRequest.login("first", PASSWORD, "device:A"));
+        assertTrue(resume(one.token(), "device:A").success());
+        assertTrue(resume(two.token(), "device:A").success());
+        execute("ALTER TABLE Phien_Dang_Nhap ADD Thong_Tin_Client VARCHAR(255)");
+        var three = login("first", PASSWORD); var four = login("first", PASSWORD);
+        assertTrue(resume(three.token(), null).success());
+        assertTrue(resume(four.token(), "device:B").success());
+        assertTrue(resume(one.token(), null).success());
+        assertEquals(4, count("Phien_Dang_Nhap"));
+    }
+
+    @Test void failedDeviceLoginRollsBackRevocationAndDoesNotNotify() throws Exception {
+        execute("ALTER TABLE Phien_Dang_Nhap ADD Thong_Tin_Client VARCHAR(255)");
+        var revoked = new ArrayList<String>();
+        service = new AuthService(() -> DriverManager.getConnection(url), new PasswordHasher(),
+                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofHours(24), revoked::add);
+        register("first", "First", null);
+        service.handle(AuthRequest.login("first", PASSWORD, "device:A"));
+        execute("ALTER TABLE Nguoi_Dung DROP COLUMN Lan_Dang_Nhap_Cuoi");
+        assertThrows(SQLException.class, () -> service.handle(AuthRequest.login("first", PASSWORD, "device:A")));
+        assertEquals(1, count("Phien_Dang_Nhap"));
+        assertNull(timestamp("SELECT Thu_Hoi_Luc FROM Phien_Dang_Nhap"));
+        assertTrue(revoked.isEmpty());
+    }
+
+    @Test void concurrentDeviceLoginsLeaveExactlyOneResumableSession() throws Exception {
+        execute("ALTER TABLE Phien_Dang_Nhap ADD Thong_Tin_Client VARCHAR(255)");
+        register("first", "First", null);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var one = executor.submit(() -> { start.await(); return service.handle(AuthRequest.login("first", PASSWORD, "device:A")); });
+            var two = executor.submit(() -> { start.await(); return service.handle(AuthRequest.login("first", PASSWORD, "device:A")); });
+            start.countDown();
+            var a = one.get(10, TimeUnit.SECONDS); var b = two.get(10, TimeUnit.SECONDS);
+            assertTrue(a.success()); assertTrue(b.success());
+            assertNotEquals(resume(a.token(), "device:A").success(), resume(b.token(), "device:A").success());
+        }
+    }
+
+    @Test void clientInfoNormalizationRemovesControlsAndBoundsLength() {
+        assertNull(AuthService.normalizeClientInfo(" \r\n\t "));
+        assertEquals("device:A", AuthService.normalizeClientInfo(" \tdevice:\u0000A\n "));
+        assertEquals(255, AuthService.normalizeClientInfo("x".repeat(300)).length());
+    }
+
+    private AuthResponse resume(String token, String clientInfo) throws SQLException {
+        return service.handle(AuthRequest.resumeSession(token, clientInfo));
+    }
+
     private AuthResponse profile(String token, String username, String name, String email) throws SQLException {
         return service.handle(request("UPDATE_PROFILE", username, null, name, email, token));
     }

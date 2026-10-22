@@ -43,8 +43,8 @@ public final class PreJoinScreen extends BorderPane {
             var session = manager.sfuSession(); var video = session.video();
             nativePreview = new ImageView(); nativePreview.setPreserveRatio(true);
             // Source image dimensions must never participate in parent size negotiation.
-            nativePreview.fitWidthProperty().bind(Bindings.max(0, preview.widthProperty().subtract(2)));
-            nativePreview.fitHeightProperty().bind(Bindings.max(0, preview.heightProperty().subtract(2)));
+            nativePreview.fitWidthProperty().bind(Bindings.max(1, preview.widthProperty().subtract(2)));
+            nativePreview.fitHeightProperty().bind(Bindings.max(1, preview.heightProperty().subtract(2)));
             nativePreview.imageProperty().bind(video.frames(session.selfParticipantId()).imageProperty());
             nativePreview.visibleProperty().bind(video.cameraRequestedProperty().and(video.cameraPendingProperty().not()).and(nativePreview.imageProperty().isNotNull()));
             cameraControls = new CameraControls(video, true);
@@ -151,12 +151,14 @@ public final class PreJoinScreen extends BorderPane {
             setValignment(preview, javafx.geometry.VPos.TOP); setValignment(settings, javafx.geometry.VPos.TOP);
             setHalignment(settings, javafx.geometry.HPos.CENTER);
         }
+        @Override public Orientation getContentBias() { return Orientation.HORIZONTAL; }
         @Override protected double computePrefHeight(double width) {
-            if (wide != (width >= 860)) configure(width >= 860);
+            double effectiveWidth = width > 0 ? width : getWidth();
+            if (effectiveWidth > 0 && wide != (effectiveWidth >= 860)) configure(effectiveWidth >= 860);
             return super.computePrefHeight(width);
         }
         @Override protected void layoutChildren() {
-            if (wide != (getWidth() >= 860)) configure(getWidth() >= 860);
+            if (getWidth() > 0 && wide != (getWidth() >= 860)) configure(getWidth() >= 860);
             super.layoutChildren();
         }
     }

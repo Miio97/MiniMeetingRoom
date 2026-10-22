@@ -39,7 +39,9 @@ public final class VideoCallController implements AutoCloseable {
     public void visibleParticipants(java.util.Collection<String> participants) {
         var selected=new java.util.LinkedHashSet<String>();
         for(String id:participants) {if(selected.size()==6) break;if(id!=null) selected.add(id);}
-        viewport=java.util.Set.copyOf(selected);
+        var next=java.util.Set.copyOf(selected);
+        if(next.equals(viewport)) return;
+        viewport=next;
         if(viewportQueued.compareAndSet(false,true)) submit(() -> {synchronize();return null;}).whenComplete((v,e) -> viewportQueued.set(false));
     }
     private final NetworkStatsConfig statsConfig=NetworkStatsConfig.load();
@@ -351,7 +353,9 @@ public final class VideoCallController implements AutoCloseable {
         latestStatus.set(text);
         if (!statusScheduled.compareAndSet(false, true)) return;
         Platform.runLater(() -> {
-            status.set(latestStatus.getAndSet(null)); updateCameraUi(); statusScheduled.set(false);
+            String value = latestStatus.getAndSet(null);
+            if (value != null && !Objects.equals(status.get(), value)) status.set(value);
+            updateCameraUi(); statusScheduled.set(false);
             if (latestStatus.get() != null) show(latestStatus.get());
         });
     }

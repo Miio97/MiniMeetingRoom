@@ -453,6 +453,7 @@ public final class AuthServer implements AutoCloseable {
         return switch (action.toUpperCase(Locale.ROOT)) {
             case "REGISTER" -> "REGISTER";
             case "LOGIN" -> "LOGIN";
+            case "RESUME_SESSION" -> "RESUME_SESSION";
             case "LOGOUT" -> "LOGOUT";
             case "CREATE_ROOM", "REOPEN_ROOM", "JOIN_ROOM", "LIST_ROOMS", "GET_ROOM", "LEAVE_ROOM", "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET", "RESET_PASSWORD", "UPDATE_PROFILE", "CHANGE_PASSWORD", "REQUEST_EMAIL_VERIFICATION", "VERIFY_EMAIL", "REQUEST_ACCOUNT_PASSWORD_RESET", "RESET_ACCOUNT_PASSWORD" -> action.toUpperCase(Locale.ROOT);
             default -> "OTHER";
