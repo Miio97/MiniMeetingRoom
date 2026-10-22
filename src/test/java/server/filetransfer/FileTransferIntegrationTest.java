@@ -24,6 +24,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
+import server.auth.AuthService;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
@@ -176,6 +177,37 @@ class FileTransferIntegrationTest {
             assertEquals("PERMISSION_DENIED", wire.read().header().get("code").getAsString());
         }
         assertEquals(1, count("Tep_Dinh_Kem"));
+    }
+
+    @Test void switchingDeviceRevokesFileRequestsAndPendingUploadWithoutRevokingLogin() throws Exception {
+        var source = file("before-device-switch.txt", 1000);
+        var metadata = client.upload(token(1), prepare(source), new Cancellation(), null);
+        String replacementToken = "replacement-device-token";
+        try (var connection = db(); var sql = connection.createStatement()) {
+            sql.execute("INSERT INTO Phien_Dang_Nhap(Ma_Nguoi_Dung,Token_Bam,Het_Han_Luc) VALUES(1,'"
+                    + AuthService.tokenHash(replacementToken) + "',TIMESTAMP '2099-01-01 00:00:00')");
+            sql.execute("UPDATE MMR_Phong_Van_Hanh SET Server_Epoch='device-test-signaling'");
+        }
+        var currentDevice = new java.util.concurrent.atomic.AtomicReference<>(AuthService.tokenHash(token(1)));
+        server.roomSessionGate((roomId, userId, hash) -> userId == 1 && hash.equals(currentDevice.get()));
+        try (Raw wire = raw()) {
+            var pending = prepare(file("stale-pending.txt", 100));
+            wire.send(Type.UPLOAD_INIT, pending.transferId(), uploadHeader(pending, token(1)), new byte[0]);
+            assertEquals(Type.UPLOAD_ACCEPT, wire.read().type());
+            currentDevice.set(AuthService.tokenHash(replacementToken));
+            assertCode("DEVICE_REPLACED", () -> client.listFiles(token(1), room.id(), 0));
+            assertCode("DEVICE_REPLACED", () -> client.download(token(1), metadata,
+                    temporary.resolve("stale-download.txt"), new Cancellation(), null));
+            assertCode("DEVICE_REPLACED", () -> client.leaveRoom(token(1), room.id()));
+            assertCode("DEVICE_REPLACED", () -> client.joinRoom(token(1), room.code(), "1234"));
+            wire.send(Type.UPLOAD_CHUNK, pending.transferId(), Map.of("offset", 0), Files.readAllBytes(pending.source()));
+            wire.send(Type.UPLOAD_COMPLETE, pending.transferId(), Map.of(), new byte[0]);
+            assertEquals("DEVICE_REPLACED", wire.read().header().get("code").getAsString());
+        }
+        assertEquals(1, repository.authenticate(token(1)), "Device replacement retains the old login token");
+        assertEquals(1, client.listFiles(replacementToken, room.id(), 0).size());
+        client.upload(replacementToken, prepare(source), new Cancellation(), null);
+        assertEquals(2, count("Tep_Dinh_Kem"));
     }
 
     @Test void interruptedUploadResumesAcrossServerRestartAndUsesServerOffset() throws Exception {

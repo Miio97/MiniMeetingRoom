@@ -127,6 +127,9 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                     response.add("join", JSON.toJsonTree(resumed.join())); type = "ROOM_RESUMED";
                 }
                 case "LEAVE_ROOM" -> {
+                    if (rooms.cancelAdmission(connection.principal(), connection.id(), connection.generation(), request.roomId())) {
+                        response.addProperty("ok", true); type = "ROOM_LEFT"; break;
+                    }
                     rooms.assertMember(connection.id(), request.roomId());
                     if (body.has("closeRoom")) rooms.leaveByChoice(connection.id(), request.roomId(),
                             body.has("successorParticipantId") ? text(body, "successorParticipantId", 96) : null, bool(body, "closeRoom", false));

@@ -631,6 +631,26 @@ class DucAuthFlowTest {
         });
     }
 
+    @Test void newerDeviceReplacesLegacyRoomScreenAndKeepsOldAccountLoggedIn() throws Exception {
+        registrationRelease.countDown();
+        AuthResponse original = account("moving_legacy_host", "Chủ phòng đổi thiết bị");
+        RoomResponse room = manager.authClient().meeting(RoomRequest.create(original.token(), "Đổi thiết bị legacy", "1234", 2));
+        fx(() -> { manager.acceptSession(original); manager.enterRoom(room, "1234"); return null; });
+        AuthResponse newer = manager.authClient().login("moving_legacy_host", PASSWORD); assertTrue(newer.success());
+        RoomResponse replacement = manager.authClient().meeting(RoomRequest.join(newer.token(), room.room().code(), "1234"));
+        awaitFx(() -> root() instanceof MeetingEndedScreen && manager.meetingState() == null);
+        fx(() -> {
+            assertEquals(original.token(), manager.sessionToken());
+            assertEquals(original.user().id(), manager.authenticatedUser().id());
+            assertTrue(hasLabel("Tài khoản đã vào phòng trên thiết bị khác."));
+            return null;
+        });
+        assertEquals(1, count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        RoomResponse current = manager.authClient().meeting(RoomRequest.command("ROOM_POLL", newer.token(),
+                replacement.room().id(), replacement.ticket(), 0));
+        assertTrue(current.members().getFirst().host()); assertEquals(1, current.members().size());
+    }
+
     private AuthResponse account(String username, String name) throws Exception {
         assertTrue(manager.authClient().register(username, name, null, PASSWORD).success());
         AuthResponse login = manager.authClient().login(username, PASSWORD); assertTrue(login.success()); return login;

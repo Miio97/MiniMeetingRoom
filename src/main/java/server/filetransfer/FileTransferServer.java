@@ -35,6 +35,7 @@ public final class FileTransferServer implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(FileTransferServer.class.getName());
     private final SSLServerSocket listener;
     private final FileTransferService service;
+    private final FileMetadataRepository repository;
     private final TransferStorage storage;
     private final TransferConfig config;
     private final FileRetentionService retention;
@@ -52,7 +53,7 @@ public final class FileTransferServer implements AutoCloseable {
 
     public FileTransferServer(SSLContext tls, TransferConfig config, FileMetadataRepository repository,
             TransferStorage storage) throws IOException {
-        this.config = config; this.storage = storage;
+        this.config = config; this.storage = storage; this.repository = repository;
         retentionPeriod = retentionPeriod(ServerConfig.get("file.transfer.retention-minutes", null),
                 ServerConfig.get("file.transfer.retention-days", null));
         connectionsPerMinute = ServerConfig.getInt("file.transfer.connections-per-ip-minute", 600);
@@ -72,6 +73,7 @@ public final class FileTransferServer implements AutoCloseable {
         }
     }
     public int port() { return listener.getLocalPort(); }
+    public void roomSessionGate(FileMetadataRepository.RoomSessionGate gate) { repository.roomSessionGate(gate); }
     public void cleanupRoom(long roomId) throws SQLException,IOException {retention.sweepRoom(roomId);}
     public boolean hasPendingRoom(long roomId) throws IOException {return retention.pending(roomId);}
     public synchronized void start() {
