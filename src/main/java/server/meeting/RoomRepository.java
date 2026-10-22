@@ -34,10 +34,35 @@ public final class RoomRepository {
             + "r.Ten_Phong, r.Ma_PIN_Bam, r.Ma_Chu_Phong, r.Trang_Thai, r.Da_Khoa, r.So_Nguoi_Toi_Da, "
             + "x.Instance_ID, x.Server_Epoch, r.Ngay_Tao FROM Phong_Hop r JOIN MMR_Phong_Van_Hanh x ON x.Ma_Phong=r.Ma_Phong ";
     private final ConnectionProvider connections;
+    private final boolean routines;
+    private final RoomRoutineClient routineClient;
+    private int participantPolicy=50;
+    void participantPolicy(int maximum) {participantPolicy=maximum;}
     private volatile RoomReopenGuard reopenGuard=RoomReopenGuard::requireEmpty;
     public void setReopenGuard(RoomReopenGuard guard) {reopenGuard=java.util.Objects.requireNonNull(guard);}
-    public RoomRepository() { this(DatabaseConnection::getConnection); }
-    public RoomRepository(ConnectionProvider connections) { this.connections = java.util.Objects.requireNonNull(connections); }
+    public RoomRepository() { this(DatabaseConnection::getConnection,true); }
+    /** SQL reference implementation for isolated H2 tests and legacy adapters. */
+    public RoomRepository(ConnectionProvider connections) { this(connections,false); }
+    public RoomRepository(ConnectionProvider connections,boolean routines) {
+        this.connections=java.util.Objects.requireNonNull(connections);this.routines=routines;
+        this.routineClient=new RoomRoutineClient(connections);
+    }
+    boolean usesRoutines() {return routines;}
+    /** Recovery read only: proof of a previously committed, already-authorized exit. */
+    StoredRoom resolvedExit(SessionPrincipal actor,String request,byte[] body,String instance,String epoch,String opaque) throws SQLException {
+        try(var c=connections.getConnection();var q=c.prepareStatement(ROOM_SELECT+
+            "JOIN MMR_Yeu_Cau_Phong q ON q.Ma_Phong=r.Ma_Phong WHERE q.Ma_Phien=? AND q.Request_ID=? AND q.Operation='EXIT_ROOM' AND q.Body_HMAC=? AND q.Participant_Opaque_ID=x.Room_Opaque_ID AND x.Instance_ID=? AND x.Server_Epoch=? AND x.Room_Opaque_ID=?")) {
+            q.setLong(1,actor.sessionId());q.setString(2,request);q.setBytes(3,body);q.setString(4,instance);q.setString(5,epoch);q.setString(6,opaque);
+            try(var rows=q.executeQuery()) {return rows.next()?room(rows):null;}
+        }
+    }
+    StoredRoom exit(SessionPrincipal actor,String requestId,byte[] body,String instance,String epoch,
+            StoredRoom room,long membership,String mode,SessionPrincipal successor) throws SQLException {
+        var reply=routineClient.invoke("mmr_exit_room_v1",actor.sessionId(),actor.userId(),actor.tokenHash(),requestId,body,
+            instance,epoch,room.id(),room.roomId(),membership,mode,successor==null?null:successor.sessionId(),
+            successor==null?null:successor.userId(),successor==null?null:successor.tokenHash());
+        return RoomRoutineClient.room(reply.result());
+    }
 
     server.auth.ConnectionProvider connections() { return connections; }
 
@@ -75,6 +100,9 @@ public final class RoomRepository {
         try (Connection connection = connections.getConnection(); Statement statement = connection.createStatement()) {
             statement.executeQuery("SELECT Ma_Phong, Room_Opaque_ID, Instance_ID, Server_Epoch, Ngay_Tao FROM MMR_Phong_Van_Hanh WHERE 1=0").close();
             statement.executeQuery("SELECT Ma_Phien, Request_ID, Operation, Body_HMAC, Result_Code, Ma_Phong, Ma_Thanh_Vien_Phong, Participant_Opaque_ID, Ngay_Tao, Het_Han_Luc FROM MMR_Yeu_Cau_Phong WHERE 1=0").close();
+            if(routines) try(ResultSet rows=statement.executeQuery("SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE() AND ROUTINE_TYPE='PROCEDURE' AND ROUTINE_NAME IN ('mmr_create_room_v1','mmr_join_room_v1','mmr_exit_room_v1','mmr_internal_session_v1','mmr_internal_receipt_v1','mmr_internal_result_v1')")) {
+                if(!rows.next() || rows.getInt(1)!=6) throw new SQLException("ROOM_ROUTINES_NOT_READY");
+            }
         }
     }
 
@@ -104,6 +132,11 @@ public final class RoomRepository {
     CreateResult create(SessionPrincipal principal, String requestId, byte[] bodyHash, String instance,
             String epoch, String roomId, String code, String name, String pinHash, int capacity,
             boolean locked, boolean admissionAllowed, Instant now) throws SQLException {
+        if(routines) {
+            var reply=routineClient.invoke("mmr_create_room_v1",principal.sessionId(),principal.userId(),principal.tokenHash(),
+                requestId,bodyHash,instance,epoch,roomId,code,name,pinHash,capacity,locked,participantPolicy,admissionAllowed);
+            return new CreateResult(RoomRoutineClient.room(reply.result()),reply.replay());
+        }
         return transaction(connection -> {
             lockSession(connection, principal, now);
             Receipt receipt = receipt(connection, principal, requestId, "CREATE_ROOM", bodyHash, now);
@@ -190,6 +223,13 @@ public final class RoomRepository {
     }
     JoinResult join(SessionPrincipal principal, String requestId, byte[] bodyHash, long roomId,String expectedOpaqueId,
             String participantId, String instanceId, String epoch, Instant now) throws SQLException {
+        if(routines) {
+            var reply=routineClient.invoke("mmr_join_room_v1",principal.sessionId(),principal.userId(),principal.tokenHash(),
+                requestId,bodyHash,instanceId,epoch,roomId,expectedOpaqueId,participantId,true,participantPolicy);
+            var value=reply.result();
+            return new JoinResult(RoomRoutineClient.room(value),value.get("membershipId").getAsLong(),value.get("participantId").getAsString(),
+                reply.replay(),value.get("membershipActive").getAsInt()!=0);
+        }
         return transaction(connection -> {
             lockSession(connection, principal, now);
             Receipt receipt = receipt(connection, principal, requestId, "JOIN_ROOM", bodyHash, now);

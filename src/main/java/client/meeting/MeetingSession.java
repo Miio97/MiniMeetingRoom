@@ -73,7 +73,7 @@ public final class MeetingSession implements AutoCloseable {
     private volatile String pin = "";
     private volatile long joinedAt;
     private State currentState = State.READY;
-    private Intent createIntent, reopenIntent, joinIntent;
+    private Intent createIntent, reopenIntent, joinIntent, exitIntent;
 
     public MeetingSession(String token, Instant expiresAt) {
         this(token, expiresAt, SignalingClient::new);
@@ -334,21 +334,22 @@ public final class MeetingSession implements AutoCloseable {
             }return List.copyOf(result);
         });
     }
-    public CompletableFuture<Void> leave() {
-        closeVideo();
-        return submit(() -> {
-            try { if (snapshot != null) command("LEAVE_ROOM", snapshot.roomId(), new JsonObject(), UUID.randomUUID().toString()); }
-            finally { recovery = null; snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0; closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); }
-            return null;
-        });
-    }
+    public CompletableFuture<Void> leave() { return leaveBody(new JsonObject()); }
     public CompletableFuture<Void> leave(String successorParticipantId, boolean closeRoom) {
+        JsonObject body=new JsonObject();body.addProperty("closeRoom",closeRoom);
+        if(successorParticipantId!=null) body.addProperty("successorParticipantId",successorParticipantId);
+        return leaveBody(body);
+    }
+    private CompletableFuture<Void> leaveBody(JsonObject body) {
         return submit(() -> {
-            JsonObject body = new JsonObject(); body.addProperty("closeRoom", closeRoom);
-            if (successorParticipantId != null) body.addProperty("successorParticipantId", successorParticipantId);
-            command("LEAVE_ROOM", requireRoom().roomId(), body, UUID.randomUUID().toString());
-            closeVideo(); recovery = null; snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null; joinedAt = 0;
-            closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat(); return null;
+            if(snapshot==null) return null;
+            String roomId=requireRoom().roomId();
+            JsonObject intent=body.deepCopy();intent.addProperty("roomId",roomId);
+            if(exitIntent==null || !exitIntent.body().equals(intent)) exitIntent=new Intent(UUID.randomUUID().toString(),intent);
+            command("LEAVE_ROOM",roomId,body,exitIntent.id());
+            exitIntent=null;
+            closeVideo();recovery=null;snapshot=null;self=null;pin="";joinIntent=null;reopenIntent=null;joinedAt=0;
+            closeTransport();publish(State.READY,"Đã rời phòng.");clearChat();return null;
         });
     }
     private RoomSnapshot requireRoom() throws SignalException { if (snapshot == null) throw new SignalException("ROOM_REQUIRED"); return snapshot; }
