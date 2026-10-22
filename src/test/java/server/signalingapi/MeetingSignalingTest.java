@@ -67,20 +67,20 @@ class MeetingSignalingTest {
                     Ngay_Xoa TIMESTAMP NULL
                 )
                 """);
+        server.auth.ConnectionProvider countingProvider = () -> {
+            sessionDbQueries.incrementAndGet();
+            if(databaseUnavailable.get()) throw new java.sql.SQLException("TEST_DATABASE_UNAVAILABLE");
+            return fixture.connection();
+        };
         AtomicReference<SignalingServer> current = new AtomicReference<>();
-        rooms = new RoomService(new RoomRepository(fixture::connection), Clock.systemUTC(), "test-instance",
+        rooms = new RoomService(new RoomRepository(countingProvider), Clock.systemUTC(), "test-instance",
                 new byte[32], 20, event -> {
                     SignalingServer target = current.get();
                     if (target != null) target.event(event.recipientConnectionId(), event.type(), event.roomId(),
                             event.revision(), JSON.toJsonTree(event.body()).getAsJsonObject());
                 });
         rooms.start();
-        server.auth.ConnectionProvider countingProvider = () -> {
-            sessionDbQueries.incrementAndGet();
-            if(databaseUnavailable.get()) throw new java.sql.SQLException("TEST_DATABASE_UNAVAILABLE");
-            return fixture.connection();
-        };
-        meetingHandler=new MeetingHandler(rooms);
+        meetingHandler=new MeetingHandler(rooms,null,countingProvider,null);
         server = new SignalingServer(tls.server(), new InetSocketAddress("127.0.0.1", 0),
                 new SessionValidator(countingProvider, Clock.systemUTC()), new SignalingServer.Handler() {
                     private final MeetingHandler delegate = meetingHandler;
@@ -148,8 +148,12 @@ class MeetingSignalingTest {
         RoomSnapshot original = create(host, 3, UUID.randomUUID().toString());
         join(host, original, "", UUID.randomUUID().toString());
         join(guest, original, "1234", UUID.randomUUID().toString());
+        var chatBody=new JsonObject();chatBody.addProperty("content","only in the original run");
+        request(host,"CHAT_SEND",original.roomId(),chatBody);
+        assertEquals(1,meetingHandler.chatRoomCount());assertEquals(1,meetingHandler.chatReceiptCount());
         JsonObject body = new JsonObject(); body.addProperty("joinCode", original.joinCode());
         rooms.leave(host.connectionId(), "PHONG_DONG");
+        assertEquals(0,meetingHandler.chatRoomCount());assertEquals(0,meetingHandler.chatReceiptCount());
         code("HOST_REQUIRED", () -> request(guest, "REOPEN_ROOM", null, body));
         String requestId = UUID.randomUUID().toString();
         SignalMessage response = host.request("REOPEN_ROOM", null, body, requestId).get(6, TimeUnit.SECONDS);
@@ -168,6 +172,8 @@ class MeetingSignalingTest {
         assertEquals(2, get(host, reopened.roomId()).participants().size());
         assertEquals(1, fixture.count("SELECT COUNT(*) FROM Phong_Hop"));
         assertEquals(4, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        assertEquals(0,request(host,"CHAT_HISTORY",reopened.roomId(),new JsonObject()).body().getAsJsonArray("messages").size());
+        code("CROSS_ROOM_FORBIDDEN",() -> request(host,"CHAT_HISTORY",original.roomId(),new JsonObject()));
         request(host, "LEAVE_ROOM", reopened.roomId(), new JsonObject());
     }
 
@@ -463,6 +469,7 @@ class MeetingSignalingTest {
 
         // Verify that chat events produced NO extra GET_ROOM requests
         assertEquals(0, snapshotRequests.get(), "Chat messaging must not trigger extra GET_ROOM requests");
+        assertEquals(0,fixture.count("SELECT COUNT(*) FROM Tin_Nhan"));
     }
 
     @Test void chatRejectedWhenNotMemberRateLimitOrContentTooLong() throws Exception {
@@ -655,7 +662,7 @@ class MeetingSignalingTest {
     @Test void catalogCanWatchAnOlderVisibleRoomWithoutLeakingAnotherUsersRoom() throws Exception {
         var account=fixture.account("olderCatalogHost","Host");var events=new CopyOnWriteArrayList<SignalMessage>();var host=connect(account.token(),events);
         var room=create(host,3,UUID.randomUUID().toString());join(host,room,"1234",UUID.randomUUID().toString());
-        for(int index=0;index<205;index++) fixture.execute("INSERT INTO Phong_Hop(Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da,Ngay_Tao) VALUES('OLDER-"+index+"','History',"+account.user().id()+",'DA_DONG',FALSE,3,TIMESTAMP '2026-10-22 00:00:00')");
+        for(int index=0;index<205;index++) fixture.execute("INSERT INTO Phong_Hop(Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da,Ngay_Tao) VALUES('OLDER-"+index+"','History',"+account.user().id()+",'DA_DONG',FALSE,3,TIMESTAMP '"+java.time.LocalDateTime.ofInstant(java.time.Instant.parse(room.collaborationRoom().createdAt()),java.time.ZoneOffset.UTC).plusDays(1)+"')");
         var outsider=fixture.account("privateCatalogHost","Private");fixture.execute("INSERT INTO Phong_Hop(Ma_Phong,Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da) VALUES(9999,'PRIVATE-ROOM','Private',"+outsider.user().id()+",'DA_DONG',FALSE,3)");
         var body=new JsonObject();body.addProperty("limit",20);body.addProperty("watchId","older-window");
         var ordinary=request(host,"ROOM_CATALOG_WATCH",null,body).body();assertTrue(ordinary.getAsJsonArray("rooms").asList().stream().noneMatch(value -> value.getAsJsonObject().get("id").getAsLong()==room.collaborationRoom().id()));
@@ -681,11 +688,46 @@ class MeetingSignalingTest {
         var events=new CopyOnWriteArrayList<SignalMessage>();var host=login("databaseGrace",events);var room=create(host,3,UUID.randomUUID().toString());join(host,room,"1234",UUID.randomUUID().toString());
         databaseUnavailable.set(true);
         assertEquals(room.roomId(),get(host,room.roomId()).roomId());
-        var body=new JsonObject();body.addProperty("content","must not claim saved");
-        code("DATABASE_UNAVAILABLE",() -> request(host,"CHAT_SEND",room.roomId(),body));
+        var body=new JsonObject();body.addProperty("content","RAM chat continues during database grace");body.addProperty("clientMessageId","offline_nonce");
+        assertEquals("CHAT_SENT",request(host,"CHAT_SEND",room.roomId(),body).type());
+        assertEquals(1,request(host,"CHAT_HISTORY",room.roomId(),new JsonObject()).body().getAsJsonArray("messages").size());
+        var status=new JsonObject();var ids=new com.google.gson.JsonArray();ids.add("offline_nonce");status.add("clientMessageIds",ids);
+        assertEquals(1,request(host,"CHAT_STATUS",room.roomId(),status).body().getAsJsonArray("messages").size());
+        code("DATABASE_UNAVAILABLE",() -> create(host,3,UUID.randomUUID().toString()));
+        assertEquals(0,fixture.count("SELECT COUNT(*) FROM Tin_Nhan"));
         assertEquals(1,rooms.participantCount());
         assertTrue(events.stream().noneMatch(event -> event.type().equals("CONNECTION_CLOSED")));
         databaseUnavailable.set(false);assertEquals(1,get(host,room.roomId()).participants().size());
+    }
+    @Test void lastLeaveAndAuthorityShutdownRemoveChatWithoutWaitingForDatabaseCleanup() throws Exception {
+        var host=login("ramLifecycle",new CopyOnWriteArrayList<>());var room=create(host,3,UUID.randomUUID().toString());
+        join(host,room,"1234",UUID.randomUUID().toString());
+        var body=new JsonObject();body.addProperty("content","ephemeral");request(host,"CHAT_SEND",room.roomId(),body);
+        assertEquals(1,meetingHandler.chatRoomCount());
+        request(host,"LEAVE_ROOM",room.roomId(),new JsonObject());
+        assertEquals(0,meetingHandler.chatRoomCount());assertEquals(0,meetingHandler.chatReceiptCount());
+        var other=create(host,3,UUID.randomUUID().toString());join(host,other,"1234",UUID.randomUUID().toString());
+        request(host,"CHAT_SEND",other.roomId(),body);rooms.close();
+        assertEquals(0,meetingHandler.chatRoomCount());assertEquals(0,meetingHandler.chatReceiptCount());
+        assertEquals(0,fixture.count("SELECT COUNT(*) FROM Tin_Nhan"));
+    }
+    @Test void chatCannotCrossRooms() throws Exception {
+        var host=login("ramIsolated",new CopyOnWriteArrayList<>());var other=login("ramPrivate",new CopyOnWriteArrayList<>());
+        var first=create(host,3,UUID.randomUUID().toString());join(host,first,"1234",UUID.randomUUID().toString());
+        var second=create(other,3,UUID.randomUUID().toString());join(other,second,"1234",UUID.randomUUID().toString());
+        var body=new JsonObject();body.addProperty("content","private");request(host,"CHAT_SEND",first.roomId(),body);
+        code("CROSS_ROOM_FORBIDDEN",() -> request(other,"CHAT_HISTORY",first.roomId(),new JsonObject()));
+        assertEquals(0,request(other,"CHAT_HISTORY",second.roomId(),new JsonObject()).body().getAsJsonArray("messages").size());
+        assertEquals(0,fixture.count("SELECT COUNT(*) FROM Tin_Nhan"));
+    }
+    @Test void chatStillWorksWhileDatabaseHostTransferIsPending() throws Exception {
+        var host=login("ramGraceHost",new CopyOnWriteArrayList<>());var guest=login("ramGraceGuest",new CopyOnWriteArrayList<>());
+        var room=create(host,3,UUID.randomUUID().toString());join(host,room,"1234",UUID.randomUUID().toString());join(guest,room,"1234",UUID.randomUUID().toString());
+        databaseUnavailable.set(true);rooms.leave(host.connectionId(),"TU_ROI");
+        var body=new JsonObject();body.addProperty("content","Host transfer persistence does not block RAM chat");
+        assertEquals("CHAT_SENT",request(guest,"CHAT_SEND",room.roomId(),body).type());
+        assertEquals(1,request(guest,"CHAT_HISTORY",room.roomId(),new JsonObject()).body().getAsJsonArray("messages").size());
+        databaseUnavailable.set(false);rooms.maintenanceTick();
     }
     private SignalingClient login(String user, List<SignalMessage> events) throws Exception {
         return connect(fixture.account(user, user).token(), events);

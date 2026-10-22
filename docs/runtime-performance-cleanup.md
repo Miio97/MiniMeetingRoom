@@ -28,17 +28,19 @@ Tệp liên quan:
 
 ## 2. Chat, dữ liệu tạm và reconnect
 
-Chat vẫn dùng **server push đã có sẵn**. Client thêm tin tạm ngay, trạng thái “Đang gửi…”, xóa ô nhập để tiếp tục soạn. Tối đa 8 tin chưa giải quyết; rate limit server vẫn 5 tin/giây, burst 10. ACK thành công chỉ tạo sau commit. ACK và push đối chiếu bằng `clientMessageId` và ID tin nhắn.
+Chat vẫn dùng **server push đã có sẵn**. Client thêm tin tạm ngay, trạng thái “Đang gửi…”, xóa ô nhập để tiếp tục soạn. Tối đa 8 tin chưa giải quyết; rate limit server vẫn 5 tin/giây, burst 10. ACK thành công được tạo sau khi thêm tin vào buffer RAM của phiên phòng. ACK và push đối chiếu bằng `clientMessageId` và ID tin nhắn.
 
-Lỗi chắc chắn chưa lưu cho phép thử lại cùng nonce. Trường hợp commit/timeout chưa rõ kết quả được hiển thị chưa xác nhận; không tự phát lại. Receipt server giữ có giới hạn trong RAM tối đa 10 phút/1024 mục, gắn session + opaque room + nonce. Client chặn thử lại sau 9 phút hoặc khi đổi server epoch/opaque room. Đây **không phải exactly-once bền vững qua restart**; đầy bộ nhớ receipt sẽ trả lỗi quá tải rõ ràng.
+Lỗi chắc chắn chưa lưu cho phép thử lại cùng nonce. Trường hợp timeout chưa rõ kết quả được hiển thị chưa xác nhận; không tự phát lại. Receipt server giữ có giới hạn trong RAM tối đa 10 phút/1024 mục, gắn session + opaque room + nonce. Client chặn thử lại sau 9 phút hoặc khi đổi server epoch/opaque room. Đây **không phải exactly-once bền vững qua restart**; đầy bộ nhớ receipt sẽ trả lỗi quá tải rõ ràng.
 
-Sau reconnect, client đồng bộ lịch sử và hỏi `CHAT_STATUS` cho các nonce chưa rõ. Server chỉ trả receipt đã commit mà mình còn biết; không ghi lại tin. Kết quả xác nhận được ghép với lịch sử/push, tránh giữ đồng thời tin tạm và bản đã lưu khi còn receipt. Khi không còn receipt, vẫn giữ trạng thái chưa xác nhận, không suy đoán từ nội dung giống nhau.
+Sau reconnect, client đồng bộ lịch sử và hỏi `CHAT_STATUS` cho các nonce chưa rõ. Server chỉ trả receipt đã xác nhận trong RAM mà mình còn biết; không ghi lại tin. Kết quả xác nhận được ghép với lịch sử/push, tránh giữ đồng thời tin tạm và bản đã lưu khi còn receipt. Khi không còn receipt, vẫn giữ trạng thái chưa xác nhận, không suy đoán từ nội dung giống nhau.
 
-Backend dùng CompletionStage để worker signaling không đứng chờ worker chat. Hai stripe có hàng đợi hữu hạn giữ thứ tự ghi trong một phòng; các stripe độc lập có thể chạy song song. History có executor riêng hữu hạn. Tác vụ ghi kiểm tra lại session, trạng thái phòng/opaque và membership trong transaction lúc thực thi. Mọi job còn lại được kết thúc khi handler đóng.
+Backend signaling dùng `RoomChatStore` RAM-only cho `CHAT_SEND`, `CHAT_HISTORY`, `CHAT_STATUS`: không JDBC, không transaction, không executor/stripe ghi chat. Mỗi opaque room ID có deque tối đa 500 tin. ID tăng đơn điệu; lịch sử trả tăng dần và phân trang `beforeId`. Membership/expiry được kiểm tra trong RAM nguyên tử với vòng đời phòng. Background validation vẫn kiểm tra DB mỗi khoảng 3 giây; logout/revocation và giới hạn DB grace vẫn áp dụng.
+
+Callback vòng đời xóa buffer/receipt ngay khi phòng bị xóa khỏi authority, độc lập việc DB cleanup có thành công chưa. Restart mất chat; mở lại có opaque ID mới và chat trống. Giữ nguyên bảng `Tin_Nhan`, các bản ghi `TEP`, FK và cleanup/reopen guard; không migration. Kênh `ChatService` legacy vẫn sử dụng DB và giữ các test tương thích cũ.
 
 UI video room chuyển sang `ListView` tái sử dụng cell, cập nhật từng tin, chống trùng theo ID, cửa sổ tối đa 500 tin. Có tải tin trước và giữ mốc cuộn; tin đến không ép xuống cuối khi đang đọc tin cũ. Nháp tối đa 2000 ký tự, tin chờ và cache nằm trong RAM của tài khoản/cuộc họp; không phải outbox trên đĩa khôi phục sau khi tắt app.
 
-Tệp liên quan: `MeetingHandler`, `SignalingServer`, `RoomWorkQueue`, `MeetingSession`, `ChatPanel`, `ChatService` và `SignalingClient`.
+Tệp liên quan: `RoomChatStore`, `MeetingHandler`, `SignalingServer`, `RoomService`, `MeetingSession`, `ChatPanel`, `ChatService` và `SignalingClient`.
 
 ## 3. Sảnh và concurrency
 
@@ -68,9 +70,9 @@ Nếu triển khai hai lớp sau này: cần sửa/nâng binding để round-tri
 
 Lỗi JDBC được phân biệt với kết quả xác thực âm tính. Kết nối đã xác thực có grace tối đa 2 phút tính từ lần xác minh thành công cuối; không gia hạn mốc này khi đọc cache. Có thể tiếp tục renew grant media của thành viên đã có, trong hạn token; không cấp quyền ghi/publish mới dựa trên lỗi database. Logout/revocation xác nhận được vẫn có hiệu lực ngay.
 
-Đây là grace database, tách với reconnect mạng 2 phút. Các thao tác cần DB báo tạm gián đoạn; không báo tin chat/upload chưa commit là đã lưu. Upload kiểm tra token trong cùng transaction finalize và kiểm tra membership generation; manifest cũ không được tiếp tục trong lần tham gia mới. Cache phòng được giữ có giới hạn, xóa khi đổi/thoát tài khoản; không tải toàn database, password hash hoặc OTP xuống client.
+Đây là grace database, tách với reconnect mạng 2 phút. Các thao tác cần DB báo tạm gián đoạn; chat signaling được xác nhận sau khi lưu RAM, upload vẫn chỉ xác nhận sau commit. Upload kiểm tra token trong cùng transaction finalize và kiểm tra membership generation; manifest cũ không được tiếp tục trong lần tham gia mới. Cache phòng được giữ có giới hạn, xóa khi đổi/thoát tài khoản; không tải toàn database, password hash hoặc OTP xuống client.
 
-## 6. Kiểm thử và số đo
+## 6. Kiểm thử và số đo lịch sử 21/10 (trước chuyển chat sang RAM)
 
 Các test chỉ dùng H2/MySQL mode, chứng chỉ TLS tạo trong thư mục tạm, SFU thật và nguồn video/audio/screen tạo bằng mã. Không dùng Railway hoặc thiết bị thật để kiểm thử xóa dữ liệu.
 
@@ -143,3 +145,44 @@ Các nhóm đã kiểm chứng:
 - Cặp benchmark trước/sau: `target/runtime-benchmark-before-final.txt`, `target/runtime-benchmark-after-final.txt`.
 
 Các nhóm có test lặp lại để kiểm tra hồi quy; không cộng chúng thành số test độc lập. Suite đầy đủ 508 bài chạy trước các bổ sung ownership/phân trang cuối; các phần đó được chạy lại trong các nhóm 63/77 bài nêu trên. Hai skip là kiểm tra symlink Windows cần điều kiện hệ thống và benchmark truyền tệp opt-in.
+
+
+## 8. Chat signaling RAM-only — nghiệm thu 22/10/2026
+
+`CHAT_SEND`, `CHAT_HISTORY`, `CHAT_STATUS` không mượn JDBC và không đọc/ghi MySQL. RoomChatStore giữ tối đa 500 tin/opaque room; số buffer được chặn theo các phòng còn sống của RoomService (trần 128), chỉ tạo sau khi kiểm tra membership. Khóa buffer theo phòng giữ thứ tự ID/push; quyền và mutation được bao trong khóa authority RAM ngắn, không I/O, để không đua với kick/leave/close. Các ghi host/history đang chờ DB không chặn chat của thành viên đã được nhận.
+
+Server kiểm tra principal/expiry/connection ngay trên RAM và vẫn giữ background validation, revokeSession và giới hạn DB grace 2 phút. Callback đóng phòng xóa buffer và receipt ngay trước khi persistence/cleanup MySQL hoàn tất; reconnect cùng phiên giữ chat, opaque ID mới sau reopen không có nội dung cũ. Restart mất toàn bộ tin nhắn RAM. Receipt và lịch sử có giới hạn độc lập: loại tin cũ khỏi 500 tin không cho phép retry cùng nonce tạo tin trùng khi receipt còn hiệu lực.
+
+Kênh legacy `server.messaging.ChatService` giữ nguyên DB và test cũ, theo lựa chọn tương thích. Chat signaling không nhập lịch sử từ kênh legacy. Bảng `Tin_Nhan` tiếp tục phục vụ bản ghi `TEP` của `Tep_Dinh_Kem`; schema, FK, FileMetadataRepository, ImmediateRoomCleanup và RoomReopenGuard được giữ nguyên. Không thêm dependency hoặc migration; không kết nối hay chạy lệnh trên Railway.
+
+### Benchmark độc lập trước/sau
+
+Cùng lệnh `mvn -B -Dtest=RuntimeLatencyBenchmarkTest test`, JVM riêng cho mỗi lượt, H2/MySQL mode và TCP/TLS loopback; 33 tin gồm 3 warm-up và 30 mẫu đo, cách gửi 220 ms. Đây không phải số đo Railway/WAN hoặc cam kết độ trễ Internet.
+
+| Chỉ số | Trước RAM | Sau RAM |
+|---|---:|---:|
+| ACK trung vị | 6.153 ms | 2.389 ms |
+| ACK P95 | 7.146 ms | 3.301 ms |
+| Push trung vị | 5.862 ms | 2.082 ms |
+| Push P95 | 6.822 ms | 2.868 ms |
+| JDBC execute của chat, 33 tin | 165 | 0 |
+| Signaling queue P95 | 0.403 ms | 0.380 ms |
+
+Bộ đo tách truy vấn background `validateSessions` khỏi workload chat; lượt sau vẫn ghi nhận 2 truy vấn nền. `queryCount=0` và assertion không có JDBC acquisition áp dụng cho đường chat, không có nghĩa toàn server ngừng xác thực DB. Acquire/query P95 sau đổi là N/A vì không còn mẫu JDBC của chat. Các lượt chạy chung suite có JIT/tải khác nên số đo nhanh hơn (~0.84–0.90 ms ACK trung vị); không dùng các số đó thay cho lượt độc lập trong bảng.
+
+Chứng cứ: `target/chat-ram-baseline.txt`, `target/chat-ram-after.txt`, `target/chat-ram-focused.txt`, `target/chat-ram-full-suite.txt`.
+
+### Kiểm thử và phạm vi thay đổi
+
+- Nhóm trọng tâm (kèm RoomChatStoreTest): 68 test, 0 failure/error, 1 skip theo điều kiện benchmark streaming opt-in.
+- Toàn bộ `mvn -B test`: 522 test, 0 failure/error, 2 skip (benchmark streaming cần `-Dmmr.performance=true`, symlink cần quyền Windows). Không gọi đây là 522 test đều được thực thi.
+- Benchmark độc lập cuối: 1 test, 0 failure/error, 0 skip; queryCount của chat bằng 0.
+- Test mới: giới hạn/eviction 500 tin; phân trang tăng dần và room isolation; nonce/session/status sau eviction; cap/expiry receipt và rate rejection; đồng thời giữ thứ tự ID/push; close/reopen/shutdown dọn RAM; chat tiếp tục khi DB outage và ghi chuyển host đang chờ.
+- OptimisticChatUiTest vẫn giữ gate để xác nhận pending trước ACK/push, một dòng sau xác nhận và draft không mất; Tin_Nhan bằng 0, lịch sử RAM có tin.
+- Test sảnh cũ có dữ liệu ngày cố định 22/10 khiến phòng “mới hơn” trở thành cũ hơn theo ngày chạy; đổi seed sang ngày tương đối từ createdAt để giữ đúng ý nghĩa kiểm thử, không đổi runtime catalog.
+
+Mã thay đổi: `server/signalingapi/RoomChatStore.java` (mới), `MeetingHandler.java`, `SignalingServer.java`, `server/meeting/RoomService.java`.
+
+Test thay đổi: `client/UI/OptimisticChatUiTest.java`, `server/signalingapi/MeetingSignalingTest.java`, `RuntimeLatencyBenchmarkTest.java`, `RoomChatStoreTest.java` (mới). FileTransferIntegrationTest, ImmediateRoomCleanupTest và ChatServiceTest được chạy lại, không sửa hợp đồng legacy/file.
+
+Tài liệu cập nhật: tài liệu này và `docs/chat-and-stats.md`. Các thay đổi config/audio có sẵn trước nhiệm vụ được giữ nguyên. Cần cập nhật và khởi động lại server đang triển khai bằng bản build mới để áp dụng.

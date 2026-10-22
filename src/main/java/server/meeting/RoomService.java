@@ -52,6 +52,12 @@ public final class RoomService implements AutoCloseable {
     private final Map<Long, PendingTransfer> pendingTransfers = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile java.util.function.LongConsumer closedRoom=id -> { };
     public void onRoomClosed(java.util.function.LongConsumer listener) {closedRoom=Objects.requireNonNull(listener);}
+    private final java.util.concurrent.CopyOnWriteArrayList<Consumer<String>> liveRoomClosed=new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** RAM lifecycle, independent of eventual database cleanup. Listener must never do I/O. */
+    public Runnable onLiveRoomClosed(Consumer<String> listener) {
+        liveRoomClosed.add(Objects.requireNonNull(listener));return () -> liveRoomClosed.remove(listener);
+    }
+    private void chatRoomClosed(String roomId) {liveRoomClosed.forEach(listener -> listener.accept(roomId));}
     public void legacyOwner(String instance) {if(legacy==null) throw new IllegalStateException("NOT_LEGACY_AUTHORITY");legacy.legacyOwner(instance);}
     public static final int DEFAULT_MAX_PARTICIPANTS = 20;
     public static final int HARD_CAP_PARTICIPANTS = 50;
@@ -276,9 +282,18 @@ public final class RoomService implements AutoCloseable {
             return new MemberAuthorization(member.roomId, member.participantId, member.generation, member.role, member.media);
         }
     }
+    /** Short in-memory chat operation serialized with membership changes and room removal. No I/O. */
+    public <T> T withChatMember(String connectionId,String roomId,java.util.concurrent.Callable<T> operation) throws Exception {
+        synchronized(lock) {
+            // Pending persistence/host transfers fence DB operations, not already admitted RAM chat.
+            if(!started || closed) throw new RoomException("SERVICE_UNAVAILABLE");
+            Member participant=member(connectionId);sameRoom(participant,roomId);return operation.call();
+        }
+    }
     public List<String> roomConnections(String roomId) {
         synchronized (lock) {
-            available();
+            // Reading live recipients must not depend on pending database history/host writes.
+            if(!started || closed) throw new RoomException("SERVICE_UNAVAILABLE");
             LiveRoom room = requireRoom(roomId);
             return room.members.values().stream().map(m -> m.connectionId).toList();
         }
@@ -512,6 +527,7 @@ public final class RoomService implements AutoCloseable {
             broadcast(room, "ROOM_CLOSED", Map.of("reason", reason));
             for (Member other : room.members.values()) connections.remove(other.connectionId);
             room.members.clear(); room.waiting.clear(); rooms.remove(member.roomId);
+            chatRoomClosed(member.roomId);
             pendingTransfers.remove(room.stored.id());
             persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
         } else {
@@ -564,6 +580,7 @@ public final class RoomService implements AutoCloseable {
             for (LiveRoom room : new ArrayList<>(rooms.values())) {
                 if (room.stored.status() == RoomStatus.READY && !room.readyDeadline.isAfter(now)) {
                     rooms.remove(room.stored.roomId()); persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
+                    chatRoomClosed(room.stored.roomId());
                 }
             }
         }
@@ -576,6 +593,7 @@ public final class RoomService implements AutoCloseable {
             if (legacy != null) { try { legacy.close(); } catch (SQLException failure) { throw new IllegalStateException("Legacy room cleanup failed", failure); } }
             for (LiveRoom room : new ArrayList<>(rooms.values())) {
                 room.revision++; broadcast(room, "ROOM_CLOSED", Map.of("reason", "SERVER_SHUTDOWN"));
+                chatRoomClosed(room.stored.roomId());
                 persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), clock.instant(), "PHONG_DONG"));
             }
             connections.clear(); rooms.clear();
