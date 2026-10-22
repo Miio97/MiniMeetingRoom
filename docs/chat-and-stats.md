@@ -13,18 +13,23 @@ Tài liệu này ghi lại kiến trúc, các quyết định kỹ thuật và c
 - **Giao thức**: Sử dụng kênh signaling TCP/TLS hiện có, không đi qua SFU media server.
 - **Message Types**:
   - `CHAT_SEND`: Gửi tin nhắn mới. Kiểm tra thành viên phòng (`rooms.assertMember()`). Nội dung giới hạn 1–2000 ký tự sau khi strip, chỉ chứa văn bản thuần (plain text), loại bỏ ký tự điều khiển.
-  - `CHAT_HISTORY`: Tải lịch sử tin nhắn gần nhất (`limit <= 100`). Chỉ thành viên đang có mặt trong phòng mới được phép gọi. Bỏ qua các tin nhắn có `Ngay_Xoa` hoặc loại `TEP`.
+  - `CHAT_HISTORY`: Tải lịch sử tin nhắn gần nhất (`limit <= 100`). Chỉ thành viên đang có mặt trong phòng mới được phép gọi. Đọc RAM theo opaque room ID, hỗ trợ `beforeId`, trả ID tăng dần. Không đọc MySQL hoặc tin nhắn loại `TEP`.
   - `CHAT_MESSAGE`: Sự kiện phát tán (broadcast) từ server tới toàn bộ thành viên trong phòng (bao gồm cả người gửi).
 - **Tránh đói sự kiện phòng (Room Starvation)**:
   - `RoomService.event()` mặc định gắn kèm snapshot đầy đủ và đi qua hàng đợi outbound có `eventBudget` (383).
   - Để chat realtime không làm đói các sự kiện vòng đời quan trọng (như `ROOM_CLOSED`, `PARTICIPANT_JOINED`), chat sử dụng đường phát tán riêng: lấy danh sách `connectionId` của phòng từ `RoomService` và phát trực tiếp qua `SignalingServer.event()` với `revision = null`.
   - Phía client (`MeetingSession.event()`), sự kiện `CHAT_MESSAGE` được chặn và xử lý trước khi kiểm tra snapshot revision, không làm tăng `room.revision` và không kích hoạt `GET_ROOM` thừa.
 - **Executor & Rate Limiting**:
-  - Ghi database cho tin nhắn chat chạy trên executor riêng có giới hạn (2 thread, hàng đợi tối đa 256).
-  - Handler trả CompletionStage, giải phóng worker signaling trong lúc chờ chat; hàng đợi đầy trả `CHAT_BUSY`. Hai stripe giữ thứ tự ghi trong cùng phòng.
+  - `CHAT_SEND` / `CHAT_HISTORY` / `CHAT_STATUS` chỉ thao tác RAM; không mượn JDBC. Kiểm tra phiên tại kết nối và membership RAM; xác thực DB định kỳ/revoke và giới hạn database grace vẫn hoạt động.
+  - `RoomChatStore` giữ tối đa 500 tin gần nhất/phòng, ID tăng đơn điệu, khóa buffer theo phòng và kiểm tra quyền nguyên tử với vòng đời phòng. Không còn executor/stripe ghi DB cho chat signaling.
+  - Nonce gắn session + opaque room; tối đa 1024 receipt, TTL 10 phút; ACK/push và optimistic UI giữ nguyên JSON.
   - Rate-limit: tối đa 5 tin/giây, burst 10 tin/kết nối.
 
 ### 1.2. Dọn nội dung khi đóng phòng
+
+Buffer chat và receipt của phiên phòng bị xóa ngay khi phòng rời authority RAM (đóng, hết người hoặc dừng server), kể cả khi DB đang gián đoạn. Mở lại sinh opaque ID mới và lịch sử trống. Restart làm mất chat RAM; reconnect cùng phiên còn hoạt động giữ lịch sử trong giới hạn 500 tin.
+
+Bảng `Tin_Nhan` và schema được giữ nguyên để bản ghi `TEP` phục vụ khóa ngoại của `Tep_Dinh_Kem`. Kênh chat legacy `ChatService` vẫn dùng MySQL và giữ hợp đồng kiểm thử cũ; thay đổi RAM-only áp dụng cho chat signaling của phòng video.
 `ImmediateRoomCleanup` thay thế lịch chờ 20 phút. Khi phòng đã đóng thực sự, server dọn upload/tệp vật lý/metadata trước, sau đó xóa tin nhắn theo lô 500 dòng. Cả hai đường mở lại phòng dùng `RoomReopenGuard`; chỉ mở lại khi không còn dữ liệu hoặc upload chờ dọn. Dọn lỗi giữ khóa nghiệp vụ mở lại và thử lại với backoff. Lịch sử phòng/tham gia được giữ.
 
 `ChatRetentionService` cũ còn lại để tương thích kiểm thử cũ, không được khởi chạy bởi entry point ứng dụng. Các khóa retention cũ không điều khiển chính sách dọn phòng mới. Chi tiết: [runtime-performance-cleanup.md](runtime-performance-cleanup.md).

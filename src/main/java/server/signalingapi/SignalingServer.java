@@ -66,7 +66,8 @@ public final class SignalingServer implements AutoCloseable {
     private final Object lifecycle = new Object();
     private final Object cleanupLifecycle = new Object();
     private static final long DATABASE_GRACE_NS=TimeUnit.MINUTES.toNanos(2);
-    private static final java.util.Set<String> DATABASE_GRACE_ACTIONS=java.util.Set.of("VIDEO_STATE","AUDIO_STATE","SCREEN_STATE","VIDEO_UNSUBSCRIBE","VIDEO_STOP","AUDIO_STOP","SCREEN_STOP","GET_ROOM","ROOM_CATALOG_UNWATCH","LEAVE_ROOM");
+    private static final java.util.Set<String> RAM_CHAT_ACTIONS=java.util.Set.of("CHAT_SEND","CHAT_HISTORY","CHAT_STATUS");
+    private static final java.util.Set<String> DATABASE_GRACE_ACTIONS=java.util.Set.of("VIDEO_STATE","AUDIO_STATE","SCREEN_STATE","VIDEO_UNSUBSCRIBE","VIDEO_STOP","AUDIO_STOP","SCREEN_STOP","GET_ROOM","ROOM_CATALOG_UNWATCH","LEAVE_ROOM","CHAT_SEND","CHAT_HISTORY","CHAT_STATUS");
     private final ConcurrentHashMap<Runnable, Runnable> cancellations = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PinWindow> pinWindows = new ConcurrentHashMap<>();
     private final ThreadPoolExecutor work = new ThreadPoolExecutor(8, 8, 0, TimeUnit.SECONDS,
@@ -291,6 +292,19 @@ public final class SignalingServer implements AutoCloseable {
                                         terminate("SESSION_INVALID"); throw new SignalException("SESSION_INVALID");
                                     }
                                     response = handler.handle(Connection.this, request);
+                                } else if(RAM_CHAT_ACTIONS.contains(request.type())) {
+                                    // The background validator/revocation owns DB checks, not individual chat packets.
+                                    if(principal==null || closed.get() || !principal.expiresAt().isAfter(java.time.Instant.now())) {
+                                        terminate("SESSION_INVALID");throw new SignalException("SESSION_INVALID");
+                                    }
+                                    if(System.nanoTime()-validatedAt>DATABASE_GRACE_NS) {
+                                        terminate("DATABASE_GRACE_EXPIRED");throw new SignalException("SESSION_INVALID");
+                                    }
+                                    var stage=handler.handleAsync(Connection.this,request);deferred=true;
+                                    stage.whenComplete((reply,failure) -> {
+                                        if(failure==null) completion.complete(reply);else completion.completeExceptionally(failure);
+                                        Diagnostics.current().event("signaling.request.completed",Map.of("action",safeAction(request.type()),"queue_ms",(handlerAt-queuedAt)/1_000_000.0,"handler_ms",(System.nanoTime()-handlerAt)/1_000_000.0));finish.run();
+                                    });return;
                                 } else {
                                     Optional<SessionPrincipal> live;
                                     try {live=validator.validateHash(principal.tokenHash());databaseStatus(true);validatedAt=System.nanoTime();}
@@ -305,13 +319,6 @@ public final class SignalingServer implements AutoCloseable {
                                     principal = live.get();
                                     if (java.util.Set.of("CREATE_ROOM", "LOOKUP_ROOM", "JOIN_ROOM").contains(request.type())
                                             && !allowPin(principal.tokenHash())) throw new SignalException("PIN_RATE_LIMIT");
-                                    if(request.type().equals("CHAT_SEND") || request.type().equals("CHAT_HISTORY")) {
-                                        var stage=handler.handleAsync(Connection.this,request);deferred=true;
-                                        stage.whenComplete((reply,failure) -> {
-                                            if(failure==null) completion.complete(reply);else completion.completeExceptionally(failure);
-                                            Diagnostics.current().event("signaling.request.completed",Map.of("action",safeAction(request.type()),"queue_ms",(handlerAt-queuedAt)/1_000_000.0,"handler_ms",(System.nanoTime()-handlerAt)/1_000_000.0));finish.run();
-                                        });return;
-                                    }
                                     response = handler.handle(Connection.this, request);
                                 }
                                 completion.complete(response);
@@ -331,7 +338,7 @@ public final class SignalingServer implements AutoCloseable {
                         catch (RejectedExecutionException rejected) {
                             cancellations.remove(operation); throw rejected;
                         }
-                        if(request.type().equals("CHAT_SEND") || request.type().equals("CHAT_HISTORY")) {
+                        if(RAM_CHAT_ACTIONS.contains(request.type())) {
                             completion.whenComplete((reply,failure) -> {
                                 if(failure==null) send(reply);
                                 else {Throwable cause=failure;while(cause instanceof java.util.concurrent.CompletionException && cause.getCause()!=null) cause=cause.getCause();error(request.requestId(),cause instanceof SignalException e?e.code():cause instanceof server.meeting.RoomException e?e.code():"CHAT_OUTCOME_UNKNOWN");}
@@ -444,7 +451,7 @@ public final class SignalingServer implements AutoCloseable {
                     "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
                     "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH",
                     "SUBSCRIBE", "UNSUBSCRIBE", "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE",
-                    "CHAT_SEND", "CHAT_HISTORY", "NETWORK_STATS" -> type;
+                    "CHAT_SEND", "CHAT_HISTORY", "CHAT_STATUS", "NETWORK_STATS" -> type;
             default -> "OTHER";
         };
     }

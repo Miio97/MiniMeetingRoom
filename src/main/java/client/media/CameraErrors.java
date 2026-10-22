@@ -6,6 +6,9 @@ import java.util.concurrent.*;
 
 /** Classify locally; never expose or log raw native error text or device descriptors. */
 public final class CameraErrors {
+    /** An untyped native failure must be attributed to the operation that opened the device. */
+    public enum AudioOperation { UNKNOWN, CAPTURE, PLAYBACK, CLEANUP }
+
     private CameraErrors() { }
     public static Throwable unwrap(Throwable error) {
         while (error.getCause() != null && (error instanceof CompletionException || error instanceof ExecutionException || error instanceof java.io.UncheckedIOException)) error = error.getCause();
@@ -16,20 +19,40 @@ public final class CameraErrors {
         if (error instanceof TimeoutException) return "CAMERA_CATALOG_TIMEOUT";
         String code = error instanceof SignalException signal ? signal.code() : error.getMessage();
         if (code != null && Set.of("CAMERA_PERMISSION_REQUIRED", "CAMERA_FORMAT_UNAVAILABLE", "CAMERA_NOT_FOUND", "CAMERA_NO_FRAMES",
-                "MICROPHONE_PERMISSION_REQUIRED", "MICROPHONE_OPEN_FAILED", "AUDIO_OUTPUT_FAILED", "AUDIO_CONNECTION_FAILED", "SCREEN_CONNECTION_FAILED", "ALREADY_PUBLISHING", "VIDEO_BUSY", "MEDIA_BUSY", "VIDEO_VIEWPORT_LIMIT", "MEDIA_CLOSED", "ENGINE_CHANGED", "LEASE_EXPIRED", "AUDIO_CLEANUP_FAILED", "SHARE_IN_USE", "SCREEN_NO_FRAMES", "SCREEN_CAPTURE_FAILED", "CAMERA_CATALOG_TIMEOUT", "VIDEO_OFFER_FAILED", "VIDEO_DESCRIPTION_FAILED", "ICE_TIMEOUT", "SOURCE_UNAVAILABLE", "CONNECTION_CLOSED", "MEDIA_NOT_READY").contains(code)) return code;
+                "MICROPHONE_PERMISSION_REQUIRED", "MICROPHONE_OPEN_FAILED", "AUDIO_OUTPUT_FAILED", "AUDIO_DEVICE_FAILED", "AUDIO_CONNECTION_FAILED", "SCREEN_CONNECTION_FAILED", "ALREADY_PUBLISHING", "VIDEO_BUSY", "MEDIA_BUSY", "VIDEO_VIEWPORT_LIMIT", "MEDIA_CLOSED", "ENGINE_CHANGED", "LEASE_EXPIRED", "AUDIO_CLEANUP_FAILED", "SHARE_IN_USE", "SCREEN_NO_FRAMES", "SCREEN_CAPTURE_FAILED", "CAMERA_CATALOG_TIMEOUT", "VIDEO_OFFER_FAILED", "VIDEO_DESCRIPTION_FAILED", "ICE_TIMEOUT", "SOURCE_UNAVAILABLE", "CONNECTION_CLOSED", "MEDIA_NOT_READY").contains(code)) return code;
         String detail = code == null ? "" : code.toLowerCase(java.util.Locale.ROOT);
         if (detail.contains("access denied") || detail.contains("permission") || detail.contains("0x80070005")) return "CAMERA_ACCESS_DENIED";
         if (detail.contains("busy") || detail.contains("in use") || detail.contains("being used")) return "CAMERA_DEVICE_BUSY";
         return "CAMERA_OPEN_FAILED";
     }
     public static String audioCode(Throwable error) {
-        while (error.getCause() != null && (error instanceof CompletionException || error instanceof ExecutionException)) error=error.getCause();
+        return audioCode(error, AudioOperation.UNKNOWN);
+    }
+    public static String audioCode(Throwable error, AudioOperation operation) {
+        error = unwrap(error);
         if (error instanceof InterruptedException || error instanceof CancellationException) return "CONNECTION_CLOSED";
         if (error instanceof TimeoutException) return "AUDIO_CONNECTION_FAILED";
-        String code=code(error);
-        return code.equals("VIDEO_OFFER_FAILED") || code.equals("VIDEO_DESCRIPTION_FAILED") || code.equals("ICE_TIMEOUT") ? "AUDIO_CONNECTION_FAILED" : code.startsWith("CAMERA_") ? "MICROPHONE_OPEN_FAILED" : code;
+        String code = code(error);
+        if (code.equals("VIDEO_OFFER_FAILED") || code.equals("VIDEO_DESCRIPTION_FAILED") || code.equals("ICE_TIMEOUT")) return "AUDIO_CONNECTION_FAILED";
+        if (!code.startsWith("CAMERA_")) return code;
+        // A server rejection is not evidence of a local microphone/speaker failure.
+        // Unknown protocol codes remain connection failures instead of passing through device classification.
+        if (error instanceof SignalException) return "AUDIO_CONNECTION_FAILED";
+        if (operation == AudioOperation.CLEANUP) return "AUDIO_CLEANUP_FAILED";
+
+        // These strings are examined locally only. The original device/native message is never displayed or logged.
+        String detail = error.getMessage() == null ? "" : error.getMessage().toLowerCase(java.util.Locale.ROOT);
+        if (detail.contains("playout") || detail.contains("render") || detail.contains("speaker")) return "AUDIO_OUTPUT_FAILED";
+        if (detail.contains("recording") || detail.contains("microphone") || detail.contains("capture")) return "MICROPHONE_OPEN_FAILED";
+        return switch (operation) {
+            case CAPTURE -> "MICROPHONE_OPEN_FAILED";
+            case PLAYBACK -> "AUDIO_OUTPUT_FAILED";
+            case CLEANUP -> "AUDIO_CLEANUP_FAILED";
+            case UNKNOWN -> "AUDIO_DEVICE_FAILED";
+        };
     }
     public static String audioMessage(Throwable error) { return message(new SignalException(audioCode(error))); }
+    public static String audioMessage(Throwable error, AudioOperation operation) { return message(new SignalException(audioCode(error, operation))); }
     public static String screenCode(Throwable error) { String code=code(error); return code.equals("VIDEO_OFFER_FAILED") || code.equals("VIDEO_DESCRIPTION_FAILED") || code.equals("ICE_TIMEOUT") ? "SCREEN_CONNECTION_FAILED" : code.startsWith("CAMERA_") ? "SCREEN_CAPTURE_FAILED" : code; }
     public static String screenMessage(Throwable error) { return message(new SignalException(screenCode(error))); }
     public static String message(Throwable error) {
@@ -42,7 +65,9 @@ public final class CameraErrors {
             case "MEDIA_CLOSED", "ENGINE_CHANGED", "LEASE_EXPIRED" -> "Kết nối media đã dừng. Hãy chủ động bật lại sau khi kết nối phòng ổn định.";
             case "MICROPHONE_PERMISSION_REQUIRED" -> "Nhấn Bật mic và cho phép sử dụng microphone.";
             case "AUDIO_OUTPUT_FAILED" -> "Không mở được loa. Kiểm tra thiết bị phát âm thanh trong Windows và chọn lại Loa trong Cài đặt.";
-            case "MICROPHONE_OPEN_FAILED", "AUDIO_CLEANUP_FAILED" -> "Không mở được âm thanh. Kiểm tra Microphone trong Windows Settings → Privacy & security và thiết bị trong Cài đặt.";
+            case "MICROPHONE_OPEN_FAILED" -> "Không mở được microphone. Kiểm tra thiết bị đã chọn và quyền Microphone trong Windows Settings → Privacy & security.";
+            case "AUDIO_DEVICE_FAILED" -> "Không khởi tạo được thiết bị âm thanh. Chọn lại microphone hoặc loa trong Cài đặt rồi thử lại.";
+            case "AUDIO_CLEANUP_FAILED" -> "Chưa dừng được thiết bị âm thanh. Đóng ứng dụng rồi mở lại trước khi thử tiếp.";
             case "SHARE_IN_USE" -> "Đã có người đang chia sẻ màn hình trong phòng.";
             case "SCREEN_NO_FRAMES", "SCREEN_CAPTURE_FAILED" -> "Không nhận được hình màn hình. Kiểm tra quyền Windows, khôi phục cửa sổ đang thu nhỏ hoặc chọn lại nguồn chia sẻ.";
             case "CAMERA_PERMISSION_REQUIRED" -> "Nhấn Bật camera và cho phép để tiếp tục.";

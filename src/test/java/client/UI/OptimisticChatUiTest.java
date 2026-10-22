@@ -66,7 +66,9 @@ class OptimisticChatUiTest {
                         gate.complete(null);
                         FxTestRuntime.await(() -> !((ListView<?>)view.lookup("#chat-messages")).getItems().toString().contains("Đang gửi"));
                         FxTestRuntime.call(() -> {assertEquals(1,((ListView<?>)view.lookup("#chat-messages")).getItems().size());assertEquals("Draft kept while sending",((TextField)view.lookup("#chat-input")).getText());return null;});
-                        assertEquals(1,fixture.count("SELECT COUNT(*) FROM Tin_Nhan"));
+                        assertEquals(0,fixture.count("SELECT COUNT(*) FROM Tin_Nhan"));
+                        var history=manager.sfuSession().chatHistory(null,50).get(5,TimeUnit.SECONDS);
+                        assertEquals(1,history.size());assertEquals("Visible before save",history.getFirst().text());
                     } finally {
                         gate.complete(null);final ChatPanel view=panel;
                         FxTestRuntime.call(() -> {if(view!=null) view.dispose();manager.shutdown();stage.close();return null;});

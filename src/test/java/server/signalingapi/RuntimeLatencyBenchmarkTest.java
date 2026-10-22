@@ -25,14 +25,16 @@ class RuntimeLatencyBenchmarkTest {
         String previousDir=System.getProperty("mmr.diagnostics.dir");System.setProperty("mmr.diagnostics.dir",temporary.resolve("diagnostics").toString());
         try(var diagnostics=common.diagnostics.Diagnostics.start("server");var fixture=new RoomTestFixture(tls)) {
             var acquisitions=new ConcurrentLinkedQueue<Double>();var queries=new ConcurrentLinkedQueue<Double>();
+            var backgroundQueries=new AtomicInteger();
             server.auth.ConnectionProvider measured=() -> {
-                long before=System.nanoTime();var raw=fixture.connection();acquisitions.add((System.nanoTime()-before)/1e6);
+                boolean background=Arrays.stream(Thread.currentThread().getStackTrace()).anyMatch(frame -> frame.getClassName().equals(SignalingServer.class.getName()) && frame.getMethodName().startsWith("lambda$validateSessions$"));
+                long before=System.nanoTime();var raw=fixture.connection();if(!background) acquisitions.add((System.nanoTime()-before)/1e6);
                 return (java.sql.Connection)java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{java.sql.Connection.class},(proxy,method,args) -> {
                     try {
                         Object value=method.invoke(raw,args);
                         if(value instanceof java.sql.PreparedStatement statement) return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{java.sql.PreparedStatement.class},(p,m,a) -> {
                             long started=System.nanoTime();try {return m.invoke(statement,a);} catch(java.lang.reflect.InvocationTargetException failure) {throw failure.getCause();}
-                            finally {if(m.getName().startsWith("execute")) queries.add((System.nanoTime()-started)/1e6);}
+                            finally {if(m.getName().startsWith("execute")) {if(background) backgroundQueries.incrementAndGet();else queries.add((System.nanoTime()-started)/1e6);}}
                         });
                         return value;
                     } catch(java.lang.reflect.InvocationTargetException failure) {throw failure.getCause();}
@@ -72,6 +74,9 @@ class RuntimeLatencyBenchmarkTest {
                         diagnostics.close();var queue=new ArrayList<Double>();
                         for(String line:Files.readAllLines(diagnostics.logPath())) {var value=JsonParser.parseString(line).getAsJsonObject();var fields=value.getAsJsonObject("fields");if(value.get("event").getAsString().equals("signaling.request.completed") && fields.has("action") && fields.get("action").getAsString().equals("CHAT_SEND")) queue.add(fields.get("queue_ms").getAsDouble());}
                         System.out.printf(Locale.ROOT,"RUNTIME_DB_QUEUE acquireP95Ms=%.3f queryP95Ms=%.3f signalingQueueP95Ms=%.3f gcMs=%d queryCount=%d%n",p95(acquisitions),p95(queries),p95(queue),gcAfter-gcBefore,queries.size());
+                        System.out.println("RUNTIME_BACKGROUND_VALIDATION queryCount="+backgroundQueries.get());
+                        assertEquals(0,queries.size(),"Chat workload must execute zero JDBC statements; periodic session checks are counted separately");
+                        assertTrue(acquisitions.isEmpty(),"Chat workload must not borrow JDBC connections");
                     }
                 }
             }

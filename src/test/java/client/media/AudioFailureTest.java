@@ -79,4 +79,44 @@ class AudioFailureTest {
         assertEquals("AUDIO_CONNECTION_FAILED", CameraErrors.audioCode(new ExecutionException(new TimeoutException())));
         assertEquals("MICROPHONE_OPEN_FAILED", CameraErrors.audioCode(new Error("Init recording failed")));
     }
+
+    @Test void nativePlaybackErrorsAreNotReportedAsMicrophonePermissionFailures() {
+        Throwable playout = new CompletionException(new ExecutionException(new Error("Init playout failed")));
+        assertEquals("AUDIO_OUTPUT_FAILED", CameraErrors.audioCode(playout));
+        assertTrue(CameraErrors.audioMessage(playout).contains("loa"));
+        assertFalse(CameraErrors.audioMessage(playout).contains("Microphone"));
+        assertEquals("AUDIO_OUTPUT_FAILED", CameraErrors.audioCode(new Error("StartPlayout failed")));
+        assertEquals("AUDIO_OUTPUT_FAILED", CameraErrors.audioCode(new IllegalStateException("AUDIO_OUTPUT_FAILED")));
+    }
+
+    @Test void genericNativeFailuresUseOperationContextWithoutExposingRawDeviceDetails() {
+        Throwable nativeFailure = new java.io.UncheckedIOException(new java.io.IOException("0x80070005 endpoint-private-name"));
+        assertEquals("AUDIO_DEVICE_FAILED", CameraErrors.audioCode(nativeFailure));
+        assertEquals("AUDIO_OUTPUT_FAILED", CameraErrors.audioCode(nativeFailure, CameraErrors.AudioOperation.PLAYBACK));
+        assertEquals("MICROPHONE_OPEN_FAILED", CameraErrors.audioCode(nativeFailure, CameraErrors.AudioOperation.CAPTURE));
+        assertEquals("AUDIO_CLEANUP_FAILED", CameraErrors.audioCode(nativeFailure, CameraErrors.AudioOperation.CLEANUP));
+        String message = CameraErrors.audioMessage(nativeFailure, CameraErrors.AudioOperation.PLAYBACK);
+        assertFalse(message.contains("endpoint-private-name"));
+        assertFalse(message.contains("0x80070005"));
+        assertFalse(message.contains("Microphone"));
+    }
+
+    @Test void playbackContextPreservesSessionNetworkAndExplicitCaptureErrors() {
+        for (String code : List.of("CONNECTION_CLOSED", "MEDIA_CLOSED", "MEDIA_BUSY", "MICROPHONE_PERMISSION_REQUIRED", "MICROPHONE_OPEN_FAILED")) {
+            assertEquals(code, CameraErrors.audioCode(new common.signaling.SignalException(code), CameraErrors.AudioOperation.PLAYBACK));
+        }
+        assertEquals("CONNECTION_CLOSED", CameraErrors.audioCode(new ExecutionException(new InterruptedException()), CameraErrors.AudioOperation.PLAYBACK));
+        assertEquals("AUDIO_CONNECTION_FAILED", CameraErrors.audioCode(new CompletionException(new TimeoutException()), CameraErrors.AudioOperation.PLAYBACK));
+        assertEquals("AUDIO_CONNECTION_FAILED", CameraErrors.audioCode(new IllegalStateException("VIDEO_DESCRIPTION_FAILED"), CameraErrors.AudioOperation.PLAYBACK));
+    }
+
+    @Test void serverRejectionsNeverBecomeLocalDeviceFailures() {
+        for (String code : List.of("INVALID_REQUEST", "NOT_A_MEMBER", "CONNECTION_RESTORING", "CONTROL_UNAVAILABLE", "UNRECOGNIZED_PROTOCOL_CODE")) {
+            var failure = new CompletionException(new common.signaling.SignalException(code));
+            assertEquals("AUDIO_CONNECTION_FAILED", CameraErrors.audioCode(failure));
+            assertEquals("AUDIO_CONNECTION_FAILED", CameraErrors.audioCode(failure, CameraErrors.AudioOperation.PLAYBACK));
+            assertEquals("AUDIO_CONNECTION_FAILED", CameraErrors.audioCode(failure, CameraErrors.AudioOperation.CAPTURE));
+            assertFalse(CameraErrors.audioMessage(failure).contains("Microphone"));
+        }
+    }
 }
