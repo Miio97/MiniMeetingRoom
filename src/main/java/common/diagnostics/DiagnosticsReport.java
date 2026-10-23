@@ -43,7 +43,7 @@ public final class DiagnosticsReport {
             "queue_packets", "queue_bytes", "expired_drops", "write_errors", "read_errors", "pli_requests",
             "ingress_codec_bytes", "forwarded_codec_bytes", "room_count", "participant_count",
             "render_frames_cumulative", "render_dropped_frames_cumulative", "go_heap_bytes", "goroutine_count");
-    private static final Set<String> EVENTS = Set.of("run.start", "run.end", "log.truncated",
+    private static final Set<String> EVENTS = Set.of("room.routine.completed", "run.start", "run.end", "log.truncated",
             "runtime.sample", "runtime.sample_error", "media.sample", "client_ready",
             "auth_client_request", "server.started", "server.stopped", "server.connection.accepted",
             "server.connection.completed", "server.connection.rejected", "server.connection.failed",

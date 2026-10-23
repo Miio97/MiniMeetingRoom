@@ -43,7 +43,7 @@ exit /b %MMR_EXIT%
             $taskReadme = @'
 MINIMEETINGROOM - CLIENT WINDOWS x64
 Giai nen toan bo ZIP truoc khi chay Start-Client.cmd. Khong can cai Java/Maven.
-Server hien tai: 10.231.125.102. Cac may can ket noi duoc mang LAN/ZeroTier cua server.
+Server hien tai: 10.231.125.153. Cac may can ket noi duoc mang LAN/ZeroTier cua server.
 Neu doi server: sua auth.host, signaling.host, file.transfer.host trong config/auth-client.properties.
 Chung chi config/auth-server.cer phai dung voi server va dia chi truy cap; khong tat kiem tra TLS.
 Chi may server can chay Start-Server.cmd. May client chi chay Start-Client.cmd.

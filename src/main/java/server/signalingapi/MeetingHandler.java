@@ -13,6 +13,9 @@ import server.meeting.RoomService;
 
 /** Typed room control dispatch. Client identity and host role always come from server state. */
 public final class MeetingHandler implements SignalingServer.Handler, AutoCloseable {
+    @Override public boolean validatesTransactionally(String action) {
+        return rooms.usesRoomRoutines() && java.util.Set.of("CREATE_ROOM","JOIN_ROOM","LEAVE_ROOM").contains(action);
+    }
     private static final Gson JSON = new Gson();
     private final RoomService rooms;
     private final server.media.VideoCoordinator video;
@@ -131,9 +134,9 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                         response.addProperty("ok", true); type = "ROOM_LEFT"; break;
                     }
                     rooms.assertMember(connection.id(), request.roomId());
-                    if (body.has("closeRoom")) rooms.leaveByChoice(connection.id(), request.roomId(),
-                            body.has("successorParticipantId") ? text(body, "successorParticipantId", 96) : null, bool(body, "closeRoom", false));
-                    else rooms.leave(connection.id(), "TU_ROI");
+                    rooms.leaveRequested(connection.id(),request.roomId(),request.requestId(),
+                        body.has("successorParticipantId")?text(body,"successorParticipantId",96):null,
+                        body.has("closeRoom")?bool(body,"closeRoom",false):null);
                     if (video != null) video.revoke(connection.id());
                     response.addProperty("ok", true); type = "ROOM_LEFT";
                 }

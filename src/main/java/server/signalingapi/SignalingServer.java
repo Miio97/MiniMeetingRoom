@@ -36,6 +36,7 @@ public final class SignalingServer implements AutoCloseable {
         void disconnected(Connection connection, String reason) throws Exception;
         default void validated(Connection connection) { }
         default void bindServer(SignalingServer server) { }
+        default boolean validatesTransactionally(String action) {return false;}
         default java.util.concurrent.CompletionStage<SignalMessage> handleAsync(Connection connection,SignalMessage request) throws Exception {
             return java.util.concurrent.CompletableFuture.completedFuture(handle(connection,request));
         }
@@ -307,7 +308,12 @@ public final class SignalingServer implements AutoCloseable {
                                     });return;
                                 } else {
                                     Optional<SessionPrincipal> live;
-                                    try {live=validator.validateHash(principal.tokenHash());databaseStatus(true);validatedAt=System.nanoTime();}
+                                    try {
+                                        if(handler.validatesTransactionally(request.type())) {
+                                            if(principal==null || !principal.expiresAt().isAfter(java.time.Instant.now())) throw new SignalException("SESSION_INVALID");
+                                            live=Optional.of(principal);
+                                        } else {live=validator.validateHash(principal.tokenHash());databaseStatus(true);validatedAt=System.nanoTime();}
+                                    }
                                     catch(java.sql.SQLException unavailable) {
                                         databaseGrace(System.nanoTime());
                                         if(closed.get() || !DATABASE_GRACE_ACTIONS.contains(request.type())) throw new SignalException("DATABASE_UNAVAILABLE");
@@ -320,6 +326,7 @@ public final class SignalingServer implements AutoCloseable {
                                     if (java.util.Set.of("CREATE_ROOM", "LOOKUP_ROOM", "JOIN_ROOM").contains(request.type())
                                             && !allowPin(principal.tokenHash())) throw new SignalException("PIN_RATE_LIMIT");
                                     response = handler.handle(Connection.this, request);
+                                    if(handler.validatesTransactionally(request.type())) {databaseStatus(true);validatedAt=System.nanoTime();}
                                 }
                                 completion.complete(response);
                             } catch (Exception failure) { completion.completeExceptionally(failure); }

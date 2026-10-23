@@ -34,6 +34,7 @@ public final class RoomService implements AutoCloseable {
     private final java.util.concurrent.locks.ReentrantReadWriteLock openingLock=new java.util.concurrent.locks.ReentrantReadWriteLock(true);
     private int openingRooms;
     private final java.util.concurrent.locks.ReentrantLock historyFlush=new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.atomic.AtomicBoolean historyQueued=new java.util.concurrent.atomic.AtomicBoolean();
     private final RoomRepository repository;
     private final Clock clock;
     private final String instanceId, epoch;
@@ -80,6 +81,7 @@ public final class RoomService implements AutoCloseable {
         if (receiptKey == null || receiptKey.length < 32) throw new IllegalArgumentException("Receipt key must contain at least 32 bytes");
         if (maxParticipants < 2 || maxParticipants > HARD_CAP_PARTICIPANTS) throw new IllegalArgumentException("Invalid participant policy");
         this.instanceId = instanceId; this.receiptKey = receiptKey.clone(); this.maxParticipants = maxParticipants;
+        repository.participantPolicy(maxParticipants);
         this.listener = Objects.requireNonNull(listener); this.epoch = opaque("e_");
     }
 
@@ -93,6 +95,7 @@ public final class RoomService implements AutoCloseable {
         }
     }
     public String serverEpoch() { return epoch; }
+    public boolean usesRoomRoutines() {return repository.usesRoutines();}
     public int maxParticipants() { return maxParticipants; }
     public int roomCount() { synchronized (lock) { return rooms.size(); } }
     public int participantCount() { synchronized (lock) { return connections.size(); } }
@@ -235,6 +238,7 @@ public final class RoomService implements AutoCloseable {
         final LiveRoom room;final RoomRepository.StoredRoom stored;final Member replaced;
         synchronized(lock) {
             available();room=requireRoom(roomId);stored=room.stored;
+            if(room.exit!=null) throw new RoomException("SERVER_BUSY");
             if(joiningUsers.contains(principal.userId())) throw new RoomException("SERVER_BUSY");
             if(pendingHistory.size()>=MAX_ROOMS+MAX_LIVE_CONNECTIONS && connections.get(connectionId)==null) throw new RoomException("HISTORY_UNAVAILABLE");
             replaced=replaceableMember(principal,connectionId,roomId);
@@ -248,7 +252,7 @@ public final class RoomService implements AutoCloseable {
                     : repository.replaceDevice(principal, requestId, hash, stored.id(), stored.roomId(), replaced.membershipId,
                             replaced.participantId, instanceId, epoch, clock.instant());
             synchronized(lock) {
-            if(closed || rooms.get(roomId)!=room) throw new RoomException("REQUEST_ALREADY_ENDED");
+            if(closed || rooms.get(roomId)!=room || room.exit!=null) throw new RoomException("REQUEST_ALREADY_ENDED");
             Member current=connections.get(connectionId);
             if (!result.active() || result.room().status() == RoomStatus.CLOSED) throw new RoomException("REQUEST_ALREADY_ENDED");
             if (replaced != null) {
@@ -534,8 +538,106 @@ public final class RoomService implements AutoCloseable {
         return reply;
         } finally { drainEvents(); }
     }
+    private static final class ExitWork {
+        final LiveRoom room;final Member actor,target;final String request,mode;final byte[] hash;final Instant deadline;
+        final java.util.concurrent.atomic.AtomicBoolean running=new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean retryQueued=new java.util.concurrent.atomic.AtomicBoolean();
+        boolean uncertain;int attempts;
+        ExitWork(LiveRoom room,Member actor,Member target,String request,String mode,byte[] hash,Instant now) {
+            this.room=room;this.actor=actor;this.target=target;this.request=request;this.mode=mode;this.hash=hash;deadline=now.plus(RECONNECT_GRACE);
+        }
+    }
+    /** Intentional departures only; disconnect/revoke still use bounded history reconciliation. */
+    public void leaveRequested(String connectionId,String roomId,String requestId,String successorId,Boolean closeChoice) throws SQLException {
+        if(!repository.usesRoutines()) {
+            if(closeChoice==null) leave(connectionId,"TU_ROI");else leaveByChoice(connectionId,roomId,successorId,closeChoice);
+            return;
+        }
+        requestId(requestId);final ExitWork work;
+        synchronized(lock) {
+            available();eventBudget();Member actor=member(connectionId);sameRoom(actor,roomId);LiveRoom room=requireRoom(roomId);
+            if(room.exit!=null) {
+                if(room.exit.actor!=actor || !room.exit.request.equals(requestId)) throw new RoomException("SERVER_BUSY");
+                work=room.exit;
+                byte[] intended=fingerprint("EXIT_ROOM",roomId,actor.membershipId,closeChoice,successorId);
+                if(!java.security.MessageDigest.isEqual(work.hash,intended)) throw new RoomException("REQUEST_ID_REUSED");
+            } else {
+                boolean host=actor.role==RoomRole.HOST;
+                String mode=host ? (Boolean.TRUE.equals(closeChoice) || closeChoice==null && room.members.size()==1 ? "CLOSE":"TRANSFER") : "LEAVE";
+                if(!host && (Boolean.TRUE.equals(closeChoice)||successorId!=null)) throw new RoomException("HOST_REQUIRED");
+                Member target=null;
+                if(mode.equals("TRANSFER")) {
+                    if(successorId==null) throw new RoomException("HOST_DECISION_REQUIRED");
+                    target=room.members.get(successorId);
+                    if(target==null || target==actor || target.reconnectUntil!=null) throw new RoomException("PARTICIPANT_NOT_FOUND");
+                    checkPrincipal(target.principal);
+                }
+                work=new ExitWork(room,actor,target,requestId,mode,fingerprint("EXIT_ROOM",roomId,actor.membershipId,closeChoice,successorId),clock.instant());
+                room.exit=work;
+            }
+        }
+        finishExit(work);
+    }
+    private void finishExit(ExitWork work) throws SQLException {
+        if(!work.running.compareAndSet(false,true)) throw new RoomException("SERVER_BUSY");
+        try {
+            synchronized(lock) {if(work.room.exit!=work || rooms.get(work.actor.roomId)!=work.room) return;}
+            var persisted=work.uncertain?repository.resolvedExit(work.actor.principal,work.request,work.hash,instanceId,epoch,work.actor.roomId):null;
+            if(persisted==null) persisted=repository.exit(work.actor.principal,work.request,work.hash,instanceId,epoch,
+                work.room.stored,work.actor.membershipId,work.mode,work.target==null?null:work.target.principal);
+            boolean roomClosed=false;
+            synchronized(lock) {
+                LiveRoom room=work.room;
+                if(rooms.get(work.actor.roomId)!=room) return;
+                room.exit=null;
+                if(work.mode.equals("TRANSFER")) {
+                    room.stored=room.stored.withHost(persisted.hostId());
+                    work.actor.role=RoomRole.MEMBER;work.target.role=RoomRole.HOST;
+                    room.revision++;broadcast(room,"ROOM_STATE",Map.of());
+                }
+                remove(work.actor,work.mode.equals("CLOSE")?"PHONG_DONG":"TU_ROI",true);
+                roomClosed=work.mode.equals("CLOSE");
+                releaseDeferred(room);
+            }
+            if(roomClosed) closedRoom.accept(persisted.id());
+            drainEvents();
+        } catch(SQLException failure) {
+            String state=failure.getSQLState();
+            if(!work.uncertain && state!=null && !(state.startsWith("08") || state.startsWith("40") || state.startsWith("HYT") || state.equals("S1T00"))) {
+                synchronized(lock) {if(work.room.exit==work) {work.room.exit=null;releaseDeferred(work.room);}}
+                throw failure;
+            }
+            work.uncertain=true;
+            if(!clock.instant().isBefore(work.deadline)) abandonExit(work);
+            else if(work.retryQueued.compareAndSet(false,true)) try {
+                cleanup.schedule(() -> {
+                    work.retryQueued.set(false);
+                    try {finishExit(work);} catch(SQLException | RoomException ignored) { }
+                },Math.min(16,1L<<Math.min(4,work.attempts++)),TimeUnit.SECONDS);
+            } catch(java.util.concurrent.RejectedExecutionException stopped) {work.retryQueued.set(false);}
+            throw failure;
+        } catch(RoomException failure) {
+            synchronized(lock) {if(work.room.exit==work) {work.room.exit=null;releaseDeferred(work.room);}}
+            throw failure;
+        } finally {work.running.set(false);}
+    }
+    /** An uncertain commit never produces a success ACK; after bounded recovery close/fence the generation. */
+    private void abandonExit(ExitWork work) {
+        synchronized(lock) {
+            if(work.room.exit!=work) return;
+            work.room.exit=null;
+            if(rooms.get(work.actor.roomId)==work.room) remove(work.actor,work.mode.equals("CLOSE")?"PHONG_DONG":"MAT_KET_NOI");
+            releaseDeferred(work.room);
+        }
+        drainEvents();
+    }
+    private void releaseDeferred(LiveRoom room) {
+        var removals=new LinkedHashMap<>(room.deferredRemovals);room.deferredRemovals.clear();
+        for(var entry:removals.entrySet()) {Member pending=connections.get(entry.getKey());if(pending!=null) remove(pending,entry.getValue());}
+    }
     /** Intentional host departure: commit the chosen successor before removing the old host. */
     public void leaveByChoice(String connectionId, String roomId, String successorId, boolean closeRoom) throws SQLException {
+        if(repository.usesRoutines()) {leaveRequested(connectionId,roomId,java.util.UUID.randomUUID().toString(),successorId,closeRoom);return;}
         boolean transfer;
         synchronized(lock) {available();Member self=member(connectionId);sameRoom(self,roomId);transfer=self.role==RoomRole.HOST && !closeRoom;if(transfer && successorId==null) throw new RoomException("HOST_DECISION_REQUIRED");}
         if(transfer) {
@@ -585,7 +687,11 @@ public final class RoomService implements AutoCloseable {
     }
 
     private void remove(Member member, String reason) {
+        remove(member,reason,false);
+    }
+    private void remove(Member member,String reason,boolean alreadyPersisted) {
         LiveRoom room = rooms.get(member.roomId); if (room == null) { connections.remove(member.connectionId); return; }
+        if(room.exit!=null) {room.deferredRemovals.put(member.connectionId,reason);return;}
         Instant now = clock.instant(); room.revision++;
         boolean closeRoom = room.members.size() == 1 || "PHONG_DONG".equals(reason);
         if (closeRoom) {
@@ -594,10 +700,10 @@ public final class RoomService implements AutoCloseable {
             room.members.clear(); room.waiting.clear(); rooms.remove(member.roomId);
             chatRoomClosed(member.roomId);
             pendingTransfers.remove(room.stored.id());
-            persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
+            if(!alreadyPersisted) persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
         } else {
             room.members.remove(member.participantId); connections.remove(member.connectionId);
-            persist(new PendingHistory(false, member.membershipId, null, now, reason));
+            if(!alreadyPersisted) persist(new PendingHistory(false, member.membershipId, null, now, reason));
             if (member.role == RoomRole.HOST) {
                 Member next = room.members.values().iterator().next();
                 pendingTransfers.put(room.stored.id(),new PendingTransfer(room.stored.roomId(),member.principal.userId(),next.principal.userId()));
@@ -706,6 +812,8 @@ public final class RoomService implements AutoCloseable {
         checkPrincipal(member.principal); return member;
     }
     private Member host(String connectionId) {
+        Member candidate=connections.get(connectionId);
+        if(candidate!=null && requireRoom(candidate.roomId).exit!=null) throw new RoomException("SERVER_BUSY");
         Member member = member(connectionId); if (member.role != RoomRole.HOST) throw new RoomException("HOST_REQUIRED"); return member;
     }
     private static void sameRoom(Member member, String roomId) { if (!member.roomId.equals(roomId)) throw new RoomException("CROSS_ROOM_FORBIDDEN"); }
@@ -742,7 +850,11 @@ public final class RoomService implements AutoCloseable {
         }
     }
     private void drainEvents() {
-        flushHistory();
+        if(!repository.usesRoutines() || closed) flushHistory();
+        else if((!pendingHistory.isEmpty() || !pendingTransfers.isEmpty()) && historyQueued.compareAndSet(false,true)) {
+            try {cleanup.execute(() -> {try {flushHistory();} finally {historyQueued.set(false);}});}
+            catch(java.util.concurrent.RejectedExecutionException stopped) {historyQueued.set(false);}
+        }
         synchronized (dispatchLock) {
             while (true) {
                 List<RoomEvent> events;
@@ -784,6 +896,8 @@ public final class RoomService implements AutoCloseable {
         };
     }
     private static final class LiveRoom {
+        ExitWork exit;
+        final Map<String,String> deferredRemovals=new LinkedHashMap<>();
         RoomRepository.StoredRoom stored; final Map<String, Member> members = new LinkedHashMap<>();
         final Map<Long, Waiting> waiting = new LinkedHashMap<>(); boolean approval;
         final Instant readyDeadline; long revision,controlVersion;
