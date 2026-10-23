@@ -159,6 +159,12 @@ public final class NativeVideoSession implements AutoCloseable {
                 public void onFailure(String ignored) { result.completeExceptionally(new IllegalStateException("VIDEO_DESCRIPTION_FAILED")); }
             };
             try { if (remoteDescription) connection.setRemoteDescription(value, observer); else connection.setLocalDescription(value, observer); result.get(10, TimeUnit.SECONDS); }
+            catch (Error failure) {
+                // The JNI SDP parser can throw a plain java.lang.Error before invoking
+                // its observer. Normalize that operation failure without swallowing VM errors.
+                if (failure.getClass() != Error.class) throw failure;
+                throw new IllegalStateException("VIDEO_DESCRIPTION_FAILED", failure);
+            }
             finally { pending.remove(result); }
         }
         @Override public void close() {

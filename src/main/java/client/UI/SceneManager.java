@@ -39,6 +39,8 @@ public final class SceneManager {
     public boolean sidebarCollapsed() { return sidebarCollapsed; }
     public void sidebarCollapsed(boolean collapsed) { sidebarCollapsed = collapsed; }
     private final Stage stage;
+    private boolean roomWindowExpanded;
+    private Runnable placeWindow=() -> { };
     private Runnable cleanup = () -> { };
     private ParallelTransition transition;
     private final AuthClient authClient;
@@ -181,6 +183,7 @@ public final class SceneManager {
         this.meetingFactory = meetingFactory;
         this.applicationExit = java.util.Objects.requireNonNull(applicationExit);
         this.sessionStore = java.util.Objects.requireNonNull(sessionStore);
+        stage.addEventHandler(javafx.stage.WindowEvent.WINDOW_SHOWN,event -> Platform.runLater(() -> placeWindow.run()));
     }
     public Stage stage() { return stage; }
     public AuthClient authClient() { return authClient; }
@@ -553,15 +556,6 @@ public final class SceneManager {
         AuthScreen view = new AuthScreen(this); view.setPrefSize(960, 600);
         show(view, 960, 600, false, view::dispose);
         if (restoreWindow) stage.show();
-        // Window manager khôi phục cửa sổ sau khi thoát fullscreen/maximized.
-        // Đặt lại kích thước theo form khi sự kiện đó đã được xử lý.
-        javafx.application.Platform.runLater(() -> {
-            if (closing || stage.getScene().getRoot() != view) return;
-            Scene scene = stage.getScene();
-            stage.setWidth(960 + Math.max(0, stage.getWidth() - scene.getWidth()));
-            stage.setHeight(600 + Math.max(0, stage.getHeight() - scene.getHeight()));
-            stage.centerOnScreen();
-        });
         if (!initialSessionChecked) {
             initialSessionChecked = true;
             try {
@@ -687,8 +681,6 @@ public final class SceneManager {
         updateRoom(next); roomJoined = true;
         PreJoinScreen view = new PreJoinScreen(this);
         show(view, 1100, 700, true, view::dispose);
-        // Pre-join can stack its panels and scroll independently of its pinned footer.
-        stage.setMinWidth(560); stage.setMinHeight(480);
     }
     public void meeting() {
         if (legacyMeetingUi && meetingState != null) { LegacyMeetingScreen view = new LegacyMeetingScreen(this); show(view, 1280, 800, true, view::dispose); return; }
@@ -732,9 +724,18 @@ public final class SceneManager {
     }
     private void show(Parent root, int width, int height, boolean resize, Runnable onDispose) {
         dispose(); cleanup = onDispose;
-        boolean expanded = stage.isMaximized() || stage.isFullScreen();
+        var area=WindowPlacement.visualArea(stage);
+        var bounds=WindowPlacement.centered(area,width,height);
+        boolean roomView=root instanceof PreJoinScreen || root instanceof MeetingScreen || root instanceof LegacyMeetingScreen;
+        boolean restoreWindow=roomWindowExpanded && !roomView;
+        roomWindowExpanded=roomView;
+        // Apply a change in window mode while hidden so pending Windows bounds
+        // updates cannot undo the native maximize/restore request.
+        boolean showAgain=stage.isShowing() && (restoreWindow || (roomView && !stage.isMaximized() && !stage.isFullScreen()));
+        if(showAgain) stage.hide();
+        if(restoreWindow) {stage.setFullScreen(false);stage.setMaximized(false);}
         stage.setMinWidth(0); stage.setMinHeight(0);
-        if (!expanded) stage.setResizable(resize);
+        stage.setResizable(resize || roomView);
         Scene scene = stage.getScene();
         // Screen roots follow the preference even before they belong to a Scene.
         root.getStyleClass().remove("theme-dark");
@@ -748,12 +749,22 @@ public final class SceneManager {
             ThemeManager.attachScene(scene);
             scene.setRoot(root);
         }
-        if (!stage.isShowing()) stage.sizeToScene();
-        else if (!expanded) {
-            stage.setWidth(width + Math.max(0, stage.getWidth() - scene.getWidth()));
-            stage.setHeight(height + Math.max(0, stage.getHeight() - scene.getHeight()));
-        }
-        if (resize) { stage.setMinWidth(1000); stage.setMinHeight(650); }
+        double minWidth=roomView && root instanceof PreJoinScreen?560:resize?1000:0;
+        double minHeight=roomView && root instanceof PreJoinScreen?480:resize?650:0;
+        stage.setMinWidth(Math.min(minWidth,bounds.getWidth()));
+        stage.setMinHeight(Math.min(minHeight,bounds.getHeight()));
+        placeWindow=() -> {
+            if(closing || stage.getScene().getRoot()!=root) return;
+            if(roomView) {stage.setMaximized(true);return;}
+            if(stage.isMaximized() || stage.isFullScreen()) return;
+            // Set outer bounds directly: never accumulate decoration/scene-size differences.
+            stage.setWidth(bounds.getWidth());stage.setHeight(bounds.getHeight());
+            stage.setX(bounds.getMinX());stage.setY(bounds.getMinY());
+        };
+        placeWindow.run();
+        if(showAgain) stage.show();
+        Runnable placement=placeWindow;
+        Platform.runLater(placement);
         // Không translate root Scene: có thể làm vùng nội dung hụt chiều cao khi resize.
         root.setOpacity(0); root.setTranslateY(0);
         FadeTransition fade = new FadeTransition(Duration.millis(200), root); fade.setToValue(1);

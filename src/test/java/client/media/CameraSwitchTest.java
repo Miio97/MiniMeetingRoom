@@ -7,6 +7,21 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class CameraSwitchTest {
+    @Test void explicitStopCoalescesDuringStartAndRemainsOffAfterHostStop() throws Exception {
+        var starting=new CompletableFuture<Void>();var stopping=new CompletableFuture<Void>();
+        var starts=new AtomicInteger();var stops=new AtomicInteger();
+        try(var sharing=new CameraSwitch(() -> {})) {
+            var result=sharing.toggle(false,() -> {starts.incrementAndGet();return starting;},() -> stopping);
+            for(int i=0;i<100;i++) assertSame(result,sharing.stop(false,() -> {stops.incrementAndGet();return stopping;}));
+            starting.complete(null);assertEquals(1,stops.get());
+            sharing.resetOff(); // Host stopped while explicit off is still in flight.
+            for(int i=0;i<100;i++) sharing.stop(false,() -> {fail("Already stopped");return null;});
+            stopping.complete(null);result.get(1,TimeUnit.SECONDS);
+            sharing.stop(false,() -> {fail("Already stopped");return null;}).get(1,TimeUnit.SECONDS);
+            assertEquals(1,starts.get());assertFalse(sharing.wanted());
+        }
+    }
+
     @Test void preparedPreviewPublicationIsPendingAndRapidPressesKeepTheLastChoice() throws Exception {
         var publication = new CompletableFuture<Void>();
         AtomicBoolean prepared = new AtomicBoolean(true);

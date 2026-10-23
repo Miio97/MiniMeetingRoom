@@ -12,12 +12,13 @@ import javafx.beans.property.*;
 
 /** SCREEN has its own publication, capture and receive queues; camera is never stopped by screen work. */
 public final class ScreenCallController implements AutoCloseable {
-    private record Subscription(String publication,NativeVideoSession.Peer peer) { }
+    private record Subscription(String publication,String transport,NativeVideoSession.Peer peer) { }
     private final VideoCallController.Signaling signaling;
     private final Supplier<RoomSnapshot> room;
     private final Supplier<String> self;
     private final Supplier<List<ScreenVideoInput.Choice>> catalog;
     private final Function<ScreenVideoInput.Choice,VideoInput> inputFactory;
+    private final SystemAudioController systemAudio;
     private final ScheduledThreadPoolExecutor worker=new ScheduledThreadPoolExecutor(1,Thread.ofPlatform().daemon().name("screen-client-owner").factory());
     private final AtomicBoolean closed=new AtomicBoolean(),uiScheduled=new AtomicBoolean(),statusScheduled=new AtomicBoolean();
     private final AtomicReference<String> latestStatus=new AtomicReference<>();
@@ -31,7 +32,9 @@ public final class ScreenCallController implements AutoCloseable {
     private final CompletableFuture<Void> closeComplete=new CompletableFuture<>();
     private volatile boolean active,entered;
     private long publishedAt;
-    private boolean shareRequestConfirmed;
+    private boolean shareRequestConfirmed, publicationConfirmed;
+    private String ownPublication;
+    private final Set<String> retiringTransports=new LinkedHashSet<>();
     private final AtomicLong previewEpoch=new AtomicLong();
     private NativeVideoSession nativeSession;
     private volatile NativeVideoSession.Peer publisher;
@@ -39,12 +42,32 @@ public final class ScreenCallController implements AutoCloseable {
     private boolean appliedNetworkPause;
     CompletableFuture<Void> prioritizeVoice(boolean value) {
         networkPaused = value;
-        return submit(() -> { applyNetworkPause(); return null; });
+        var audioPause=systemAudio.prioritizeVoice(value);
+        return submit(() -> { applyNetworkPause(); return null; }).thenCombine(audioPause,(a,b) -> null);
     }
-    private void applyNetworkPause() {
-        if (publisher != null && appliedNetworkPause != networkPaused) publisher.pauseTransmission(networkPaused);
-        appliedNetworkPause = networkPaused;
-        if (networkPaused) { subscriptions.values().forEach(subscription -> subscription.peer().close()); subscriptions.clear(); }
+    private void applyNetworkPause() throws Exception {
+        // A new publisher must deliver RTP before entering voice priority.
+        boolean pause=networkPaused && publicationConfirmed;
+        if (publisher != null && appliedNetworkPause != pause) publisher.pauseTransmission(pause);
+        appliedNetworkPause = pause;
+        if (networkPaused) {
+            subscriptions.values().forEach(this::retire);
+            subscriptions.clear();
+        }
+        flushUnsubscribes();
+    }
+    private void retire(Subscription subscription) {
+        retiringTransports.add(subscription.transport());
+        subscription.peer().close();
+    }
+    private void flushUnsubscribes() throws Exception {
+        while(!retiringTransports.isEmpty()) {
+            var batch=retiringTransports.stream().limit(6).toList();
+            var ids=new com.google.gson.JsonArray();batch.forEach(ids::add);
+            var body=new JsonObject();body.add("transports",ids);
+            command("SCREEN_UNSUBSCRIBE",body);
+            retiringTransports.removeAll(batch);
+        }
     }
     void statsSources(List<MediaStatsSource> target) {
         if(!entered || !controlConnected || closed.get()) return;
@@ -54,29 +77,45 @@ public final class ScreenCallController implements AutoCloseable {
     }
     private NativeVideoSession.Preview preview;
     private VideoInput input;
-    private long lastFrameCount,lastProgress,lastSourceCheck;
+    private long lastSourceCheck;
+    private volatile boolean prepared;
     public ScreenCallController(VideoCallController.Signaling signaling,Supplier<RoomSnapshot> room,Supplier<String> self,boolean headless) {
-        this(signaling,room,self,headless ? List::of : ScreenVideoInput::choices);
+        this(signaling,room,self,headless ? List::of : ScreenVideoInput::choices,ScreenVideoInput::new,headless,WindowsSystemAudioInput::new);
     }
     public ScreenCallController(VideoCallController.Signaling signaling,Supplier<RoomSnapshot> room,Supplier<String> self,Supplier<List<ScreenVideoInput.Choice>> catalog) {
         this(signaling,room,self,catalog,ScreenVideoInput::new);
     }
     public ScreenCallController(VideoCallController.Signaling signaling,Supplier<RoomSnapshot> room,Supplier<String> self,
             Supplier<List<ScreenVideoInput.Choice>> catalog,Function<ScreenVideoInput.Choice,VideoInput> inputFactory) {
+        this(signaling,room,self,catalog,inputFactory,false,WindowsSystemAudioInput::new);
+    }
+    ScreenCallController(VideoCallController.Signaling signaling,Supplier<RoomSnapshot> room,Supplier<String> self,
+            Supplier<List<ScreenVideoInput.Choice>> catalog,Function<ScreenVideoInput.Choice,VideoInput> inputFactory,
+            boolean headless,Supplier<SystemAudioInput> audioInputs) {
+        systemAudio=new SystemAudioController(signaling,room,self,headless,audioInputs);
         this.signaling=signaling;this.room=room;this.self=self;this.catalog=catalog;this.inputFactory=inputFactory;worker.setRemoveOnCancelPolicy(true);
         worker.scheduleWithFixedDelay(() -> {
             if(!entered || closed.get()) return;
-            try {synchronize();} catch(Exception | LinkageError failure) {disconnect();failed(failure);}
+            try {synchronize();} catch(Exception | LinkageError failure) {failedReceive(failure);}
         },1,1,TimeUnit.SECONDS);
     }
-    public void enter() {entered=true;}
+    public void enter() {entered=true;systemAudio.enter();}
     private volatile boolean controlConnected = true;
     public void controlConnected(boolean connected) {
         controlConnected = connected;
+        systemAudio.controlConnected(connected);
         if (!connected) submit(() -> { disconnect(); networkPaused = false; appliedNetworkPause = false; return null; });
     }
     public ReadOnlyBooleanProperty requestedProperty() {return requested.getReadOnlyProperty();}
     public ReadOnlyStringProperty statusProperty() {return status.getReadOnlyProperty();}
+    public ReadOnlyBooleanProperty systemAudioEnabledProperty() {return systemAudio.enabledProperty();}
+    public ReadOnlyBooleanProperty systemAudioPendingProperty() {return systemAudio.pendingProperty();}
+    public ReadOnlyStringProperty systemAudioStatusProperty() {return systemAudio.statusProperty();}
+    public CompletableFuture<Void> setSystemAudioEnabled(boolean value) {return systemAudio.setEnabled(value);}
+    public boolean systemAudioSupported() {return WindowsSystemAudioInput.supported();}
+    public long receivedSystemAudioSamples(String participant) {return systemAudio.receivedSamples(participant);}
+    void systemAudioSpeaker(Supplier<dev.onvoid.webrtc.media.audio.AudioDevice> speaker) {systemAudio.speaker(speaker);}
+    void systemAudioSpeakerChanged() {systemAudio.speakerChanged();}
     public CompletableFuture<Void> closeComplete() {return closeComplete;}
     public VideoFrameMailbox frames(String participant) {return frames.computeIfAbsent(participant,ignored -> new VideoFrameMailbox());}
     public CompletableFuture<List<ScreenVideoInput.Choice>> choices() {return submit(catalog::get);}
@@ -91,7 +130,8 @@ public final class ScreenCallController implements AutoCloseable {
                 while(frames(self.get()).receivedFrames()<=before) {
                     if(epoch!=previewEpoch.get() || closed.get()) throw new CancellationException();
                     if(System.nanoTime()>deadline) throw new SignalException("SCREEN_NO_FRAMES");Thread.sleep(30);
-                }}
+                }
+                prepared=true;}
             catch(Exception | LinkageError failure) {stopLocal();throw failure;}
             return null;
         });
@@ -103,6 +143,14 @@ public final class ScreenCallController implements AutoCloseable {
     public CompletableFuture<Void> toggleInput(Supplier<VideoInput> factory) {
         return sharing.toggle(active,() -> submit(() -> {start(factory);return null;}),() -> submit(() -> {stop(true);return null;}));
     }
+    public CompletableFuture<Void> stopShare() {
+        return sharing.stop(active,() -> submit(() -> {stop(true);return null;}));
+    }
+    public CompletableFuture<Void> publishPreparedScreen() {
+        return sharing.publishPrepared(() -> prepared && !active,
+                () -> submit(() -> {start(null);return null;}),
+                () -> submit(() -> {stop(true);return null;}));
+    }
     private void changed() {
         Runnable update=() -> requested.set(!closed.get() && (sharing.pending() ? sharing.wanted() : active));
         if(Platform.isFxApplicationThread()) update.run();else if(uiScheduled.compareAndSet(false,true)) Platform.runLater(() -> {uiScheduled.set(false);update.run();});
@@ -111,76 +159,121 @@ public final class ScreenCallController implements AutoCloseable {
     private void wanted() {if(!sharing.wanted() || closed.get()) throw new CancellationException();}
     private void start(Supplier<VideoInput> factory) throws Exception {
         wanted();if(!entered || room.get()==null) throw new SignalException("NOT_A_MEMBER");
-        boolean attempted=false;stopLocal();
+        boolean attempted=false;
+        boolean reuse=factory==null && prepared && input!=null;
+        if(!reuse) stopLocal();
         try {
-            ensureNative();wanted();input=factory.get();wanted();
+            ensureNative();wanted();
+            if(reuse) {preview.close();preview=null;prepared=false;}
+            else {input=Objects.requireNonNull(factory).get();}
+            wanted();
             var settings=ScreenVideoInput.Settings.configured();
             publisher=nativeSession.publisher(input,frames(self.get()),settings.bitrate(),settings.fps());
-            long before=frames(self.get()).receivedFrames();wanted();input.start();
+            long before=frames(self.get()).receivedFrames();wanted();if(!reuse) input.start();
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
-            while(frames(self.get()).receivedFrames()<=before) {wanted();if(System.nanoTime()>deadline) throw new SignalException("SCREEN_NO_FRAMES");Thread.sleep(30);}
+            while(!reuse && frames(self.get()).receivedFrames()<=before) {wanted();if(System.nanoTime()>deadline) throw new SignalException("SCREEN_NO_FRAMES");Thread.sleep(30);}
             JsonObject body=new JsonObject();body.addProperty("sdp",publisher.offer());wanted();attempted=true;
-            publisher.answer(command("SCREEN_PUBLISH",body).get("sdp").getAsString());wanted();
+            var reply=command("SCREEN_PUBLISH",body);
+            ownPublication=reply.get("transport").getAsString();
+            publisher.answer(reply.get("sdp").getAsString());wanted();
             publishedAt = System.nanoTime(); shareRequestConfirmed = false;
-            publisher.pauseTransmission(networkPaused); appliedNetworkPause = networkPaused; active=true;
-            lastFrameCount=frames(self.get()).receivedFrames();lastProgress=System.nanoTime();changed();show("");
-        } catch(Exception | LinkageError failure) {stop(attempted);if(!(failure instanceof CancellationException)) failed(failure);throw failure;}
+            appliedNetworkPause=false;publicationConfirmed=false;active=true;
+            systemAudio.publication(ownPublication);
+            lastSourceCheck=0;changed();show("");
+        } catch(Exception | LinkageError failure) {try {stop(attempted);} catch(Exception cleanup) {failure.addSuppressed(cleanup);}if(!(failure instanceof CancellationException)) failed(failure);throw failure;}
     }
-    private void stop(boolean notify) throws Exception {stopLocal();if(notify && room.get()!=null) command("SCREEN_STOP",new JsonObject());}
+    private void stop(boolean notify) throws Exception {stopLocal();systemAudio.setEnabled(false);if(notify && room.get()!=null) command("SCREEN_STOP",new JsonObject());}
     private void stopLocal() {
-        active=false;publishedAt=0;shareRequestConfirmed=false;VideoInput current=input;input=null;
+        systemAudio.publication(null);
+        active=false;prepared=false;publishedAt=0;shareRequestConfirmed=false;publicationConfirmed=false;ownPublication=null;appliedNetworkPause=false;VideoInput current=input;input=null;
         try {if(current!=null) current.close();}
         finally {if(preview!=null) {preview.close();preview=null;}if(publisher!=null) {publisher.close();publisher=null;}changed();}
     }
     private void synchronize() throws Exception {
         if (!controlConnected) return;
         RoomSnapshot snapshot=room.get();if(snapshot==null) {disconnect();return;}
-        boolean shareRequested = snapshot.participants().stream().anyMatch(p -> p.participantId().equals(self.get()) && p.mediaState().shareRequested());
-        if(publisher!=null) {
-            shareRequestConfirmed |= shareRequested;
-            if(publisher.failed() || VideoCallController.shouldStopPublication(shareRequested, shareRequestConfirmed, System.nanoTime() - publishedAt)) {
-                sharing.resetOff();stop(true);
+        // Local capture failures retire only the publisher. Room receiving keeps running.
+        try {
+            var own=snapshot.participants().stream().filter(p -> p.participantId().equals(self.get())).findFirst();
+            boolean shareRequested=own.map(p -> p.mediaState().shareRequested()).orElse(false);
+            if(publisher!=null) {
+                shareRequestConfirmed |= shareRequested;
+                if(publisher.failed() || VideoCallController.shouldStopPublication(shareRequested, shareRequestConfirmed, System.nanoTime()-publishedAt)) {
+                    sharing.resetOff();stop(true);
+                }
             }
-        }
-        if(active) {
-            if(input instanceof ScreenVideoInput desktop && System.nanoTime()-lastSourceCheck>TimeUnit.SECONDS.toNanos(3)) {
-                lastSourceCheck=System.nanoTime();if(!desktop.available()) {sharing.resetOff();stop(true);throw new SignalException("SCREEN_CAPTURE_FAILED");}
+            if(active && input!=null && System.nanoTime()-lastSourceCheck>TimeUnit.SECONDS.toNanos(3)) {
+                lastSourceCheck=System.nanoTime();
+                if(!input.available()) throw new SignalException("SCREEN_CAPTURE_FAILED");
             }
-            long count=frames(self.get()).receivedFrames();if(count!=lastFrameCount) {lastFrameCount=count;lastProgress=System.nanoTime();}
-            if(System.nanoTime()-lastProgress>TimeUnit.SECONDS.toNanos(8)) {sharing.resetOff();stop(true);throw new SignalException("SCREEN_NO_FRAMES");}
+        } catch(Exception | LinkageError failure) {
+            sharing.resetOff();
+            try {stop(true);} catch(Exception cleanup) {failure.addSuppressed(cleanup);}
+            failed(failure);
         }
-        JsonObject sources=command("SCREEN_STATE",new JsonObject()).getAsJsonObject("sources");
         applyNetworkPause();
+        JsonObject state=command("SCREEN_STATE",new JsonObject());
+        publicationConfirmed |= ownPublication!=null && state.has("publication") && ownPublication.equals(state.get("publication").getAsString());
+        applyNetworkPause();
+        JsonObject sources=state.getAsJsonObject("sources");
         if (networkPaused) return;
         for(String target:new ArrayList<>(subscriptions.keySet())) {
             var subscription=subscriptions.get(target);
             if(!sources.has(target) || !subscription.publication().equals(sources.get(target).getAsString()) || subscription.peer().failed()) {
-                subscription.peer().close();subscriptions.remove(target);
+                retire(subscription);subscriptions.remove(target);
             }
         }
+        flushUnsubscribes();
         for(var source:sources.entrySet()) {
             if(closed.get()) return;
             String target=source.getKey();if(target.equals(self.get()) || subscriptions.containsKey(target)) continue;
             ensureNative();NativeVideoSession.Peer peer=nativeSession.subscriber(frames(target));
+            String transport=UUID.randomUUID().toString();
             try {
                 JsonObject body=new JsonObject();body.addProperty("source",target);body.addProperty("publication",source.getValue().getAsString());body.addProperty("sdp",peer.offer());
-                peer.answer(command("SCREEN_SUBSCRIBE",body).get("sdp").getAsString());subscriptions.put(target,new Subscription(source.getValue().getAsString(),peer));
-            } catch(Exception failure) {peer.close();failed(failure);}
+                var reply=command("SCREEN_SUBSCRIBE",body,transport);
+                transport=reply.get("transport").getAsString();
+                peer.answer(reply.get("sdp").getAsString());subscriptions.put(target,new Subscription(source.getValue().getAsString(),transport,peer));show("");
+            } catch(Exception | LinkageError failure) {retiringTransports.add(transport);peer.close();try {flushUnsubscribes();} catch(Exception cleanup) {failure.addSuppressed(cleanup);}failedReceive(failure);}
         }
         for(String participant:new ArrayList<>(frames.keySet())) if(snapshot.participants().stream().noneMatch(p -> p.participantId().equals(participant))) {
             VideoFrameMailbox old=frames.remove(participant);if(old!=null) old.close();
         }
     }
     private JsonObject command(String type,JsonObject body) throws Exception {
+        return command(type,body,UUID.randomUUID().toString());
+    }
+    private JsonObject command(String type,JsonObject body,String requestId) throws Exception {
         if (!controlConnected) throw new SignalException("CONNECTION_RESTORING");
         if(closed.get()) throw new SignalException("CONNECTION_CLOSED");
-        try {return signaling.request(type,body,UUID.randomUUID().toString()).get(16,TimeUnit.SECONDS);}
+        try {return signaling.request(type,body,requestId).get(16,TimeUnit.SECONDS);}
         catch(ExecutionException failure) {if(failure.getCause() instanceof Exception cause) throw cause;throw failure;}
     }
-    private void disconnect() {sharing.resetOff();stopLocal();subscriptions.values().forEach(s -> s.peer().close());subscriptions.clear();}
+    private void disconnect() {
+        systemAudio.setEnabled(false);
+        sharing.resetOff();boolean published=publisher!=null;stopLocal();
+        subscriptions.values().forEach(this::retire);subscriptions.clear();
+        if(controlConnected && room.get()!=null) {
+            try {
+                if(published) signaling.request("SCREEN_STOP",new JsonObject(),UUID.randomUUID().toString()).get(3,TimeUnit.SECONDS);
+                while(!retiringTransports.isEmpty()) {
+                    var batch=retiringTransports.stream().limit(6).toList();
+                    var ids=new com.google.gson.JsonArray();batch.forEach(ids::add);
+                    var body=new JsonObject();body.add("transports",ids);
+                    signaling.request("SCREEN_UNSUBSCRIBE",body,UUID.randomUUID().toString()).get(3,TimeUnit.SECONDS);
+                    retiringTransports.removeAll(batch);
+                }
+            } catch(Exception failure) {failedReceive(failure);}
+        }
+    }
     private void show(String message) {
         latestStatus.set(message);if(!statusScheduled.compareAndSet(false,true)) return;
         Platform.runLater(() -> {String value=latestStatus.getAndSet(null);statusScheduled.set(false);if(!closed.get() && value != null && !Objects.equals(status.get(), value)) status.set(value);if(latestStatus.get()!=null) show(latestStatus.get());});
+    }
+    private void failedReceive(Throwable failure) {
+        String code=CameraErrors.screenReceiveCode(failure);
+        common.diagnostics.Diagnostics.current().failure("video.client.operation.failed",failure,Map.of("kind","SCREEN","phase","subscribe","code",code));
+        show(CameraErrors.message(new SignalException(code)));
     }
     private void failed(Throwable failure) {
         common.diagnostics.Diagnostics.current().failure("video.client.operation.failed",failure,Map.of("kind","SCREEN","phase","screen","code",CameraErrors.screenCode(failure)));
@@ -197,8 +290,9 @@ public final class ScreenCallController implements AutoCloseable {
     @Override public void close() {
         if(!closed.compareAndSet(false,true)) return;
         sharing.close();worker.shutdownNow();jobs.forEach(job -> job.completeExceptionally(new SignalException("CONNECTION_CLOSED")));jobs.clear();
+        systemAudio.close();
         Thread.ofVirtual().name("screen-client-close").start(() -> {
-            try {while(!worker.awaitTermination(2,TimeUnit.SECONDS)) {} disconnect();if(nativeSession!=null) nativeSession.close();frames.values().forEach(VideoFrameMailbox::close);closeComplete.complete(null);}
+            try {while(!worker.awaitTermination(2,TimeUnit.SECONDS)) {} disconnect();if(nativeSession!=null) nativeSession.close();frames.values().forEach(VideoFrameMailbox::close);systemAudio.closeComplete().get(24,TimeUnit.SECONDS);closeComplete.complete(null);}
             catch(Exception | LinkageError failure) {closeComplete.completeExceptionally(new IllegalStateException("SCREEN_CLEANUP_FAILED"));}
         });
     }

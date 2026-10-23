@@ -8,6 +8,7 @@ public interface VideoInput extends AutoCloseable {
     default int width() { return 0; }
     default int height() { return 0; }
     default int fps() { return 30; }
+    default boolean available() { return true; }
     void start();
     @Override void close();
 }

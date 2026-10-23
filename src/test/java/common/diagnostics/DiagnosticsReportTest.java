@@ -16,6 +16,25 @@ import static org.junit.jupiter.api.Assertions.*;
 class DiagnosticsReportTest {
     private static final Gson JSON = new Gson();
     @TempDir Path directory;
+    @Test void systemAudioCountersAndActionsStaySeparateFromMicrophone() throws Exception {
+        Path input=write("system-audio.txt",List.of(
+                record("sound",22,"sfu","video.engine.sample",1,0,Map.of("kind","AUDIO","ingress_packets",3)),
+                record("sound",22,"sfu","video.engine.sample",2,0,Map.of("kind","SCREEN_AUDIO","ingress_packets",9)),
+                record("sound",22,"client","video.client.operation.failed",3,0,Map.of("kind","SCREEN_AUDIO","action","SCREEN_AUDIO_PUBLISH","phase","audio","total_ms",4,"device","PRIVATE_DEVICE"))));
+        String report=DiagnosticsReport.createReport(input,null);
+        assertTrue(report.contains("kind=AUDIO name=ingress_packets n=1 min=3.000"));
+        assertTrue(report.contains("kind=SCREEN_AUDIO name=ingress_packets n=1 min=9.000"));
+        assertTrue(report.contains("action=SCREEN_AUDIO_PUBLISH"));assertFalse(report.contains("PRIVATE_DEVICE"));
+    }
+
+    @Test void screenUnsubscribeActionSurvivesReportWithoutCaptureMetadata() throws Exception {
+        Path input=write("screen-cleanup.txt",List.of(record("screen",22,"client","video.client.operation.failed",1,0,
+                Map.of("action","SCREEN_UNSUBSCRIBE","kind","SCREEN","phase","subscribe","total_ms",2,
+                        "window_title","PRIVATE_WINDOW_TITLE","sdp","PRIVATE_SDP"))));
+        String report=DiagnosticsReport.createReport(input,null);
+        assertTrue(report.contains("action=SCREEN_UNSUBSCRIBE"));
+        assertFalse(report.contains("PRIVATE_WINDOW_TITLE"));assertFalse(report.contains("PRIVATE_SDP"));
+    }
 
     @Test void audioAndScreenCountersAreSeparatedAndUnknownValuesStayAbsent() throws Exception {
         Path input=write("kinds.txt",List.of(

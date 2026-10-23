@@ -36,7 +36,6 @@ public final class VideoFrameMailbox implements VideoTrackSink, AutoCloseable {
     private void receive(VideoFrame frame, long epoch) {
         try {
             if (closed.get() || epoch != generation.get()) return;
-            received.incrementAndGet();
             long now = System.nanoTime(), before = nextFrame.get();
             // Advance the cadence with tolerance for Windows UVC/OS scheduling jitter (~15.6 ms ticks).
             long target = before == 0 || now - before > FRAME_INTERVAL_NS
@@ -45,7 +44,7 @@ public final class VideoFrameMailbox implements VideoTrackSink, AutoCloseable {
             if (now < before - FRAME_JITTER_NS || !nextFrame.compareAndSet(before, target)) { dropped.incrementAndGet(); return; }
             if (!(frame.buffer instanceof I420Buffer buffer)) { dropped.incrementAndGet(); return; }
             int w = buffer.getWidth(), h = buffer.getHeight();
-            if (w < 1 || h < 1 || w > 1280 || h > 720) { dropped.incrementAndGet(); return; }
+            if (w < 1 || h < 1 || Math.max(w, h) > 1920 || (long) w * h > 1920L * 1080) { dropped.incrementAndGet(); return; }
             int rotation = frame.rotation;
             int width = rotation == 90 || rotation == 270 ? h : w, height = rotation == 90 || rotation == 270 ? w : h;
             byte[] pixels = spare.getAndSet(null);
@@ -66,6 +65,7 @@ public final class VideoFrameMailbox implements VideoTrackSink, AutoCloseable {
                 spare.compareAndSet(null,pixels);pixels=rotated;
             }
             if (closed.get() || epoch != generation.get()) return;
+            received.incrementAndGet();
             Pixels replaced=latest.getAndSet(new Pixels(epoch,width,height,pixels));
             if(replaced!=null) {spare.compareAndSet(null,replaced.values());dropped.incrementAndGet();}
             schedule();

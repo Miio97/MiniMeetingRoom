@@ -55,7 +55,17 @@ public final class AudioCallController implements AutoCloseable {
         if(current!=null) target.add(new MediaStatsSource(current,MediaStatsSource.Kind.AUDIO,true,false,current::statsAsync));
         for(var sub:subscriptions.values()) target.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.AUDIO,false,false,sub.peer()::statsAsync));
     }
-    private AudioDevice selectedMicrophone, selectedSpeaker;
+    private AudioDevice selectedMicrophone;
+    private volatile AudioDevice selectedSpeaker;
+    private Runnable speakerChanged=() -> { };
+    void onSpeakerChanged(Runnable listener) {speakerChanged=listener;}
+    AudioDevice preferredSpeaker() {
+        if(selectedSpeaker!=null) return selectedSpeaker;
+        String preferred;
+        try {preferred=consent.read().preferredSpeaker();} catch(java.io.IOException failure) {return MediaDevices.getDefaultAudioRenderDevice();}
+        return MediaDevices.getAudioRenderDevices().stream().filter(d -> d.getDescriptor().equals(preferred)).findFirst()
+                .orElseGet(MediaDevices::getDefaultAudioRenderDevice);
+    }
     private ScheduledFuture<?> generated;
     public AudioCallController(VideoCallController.Signaling signaling, Supplier<RoomSnapshot> room,
             Supplier<String> self, boolean headless, MicrophoneConsentStore consent) {
@@ -91,6 +101,7 @@ public final class AudioCallController implements AutoCloseable {
     public CompletableFuture<Void> selectSpeaker(AudioDevice device) {
         return submit(() -> {
             selectedSpeaker=device;
+            speakerChanged.run();
             if (device != null) consent.speaker(device.getDescriptor());
             if (entered && controlConnected) for (var subscription : subscriptions.values()) release(subscription);
             closeSubscriptions(); if (receive != null) { receive.close(); receive=null; }

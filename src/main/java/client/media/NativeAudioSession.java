@@ -65,6 +65,10 @@ public final class NativeAudioSession implements AutoCloseable {
         return new Peer(track, false, (data, bits, rate, channels, frames) -> received.accept(frames));
     }
     public void push(byte[] pcm) { if (source instanceof CustomAudioSource custom && !closed.get()) custom.pushAudio(pcm,16,48000,1,480); }
+    public void pushSystemAudio(byte[] pcm) {
+        if(pcm.length!=1920) throw new IllegalArgumentException("SYSTEM_AUDIO_FAILED");
+        if(source instanceof CustomAudioSource custom && !closed.get()) custom.pushAudio(pcm,16,48000,2,480);
+    }
     public final class Peer implements PeerConnectionObserver, AutoCloseable {
         private final RTCPeerConnection connection;
         private final AudioTrackSink binding;

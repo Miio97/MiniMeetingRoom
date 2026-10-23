@@ -43,6 +43,39 @@ func TestKindsAreIndependentAndScreenIsExclusive(t *testing.T) {
 	for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN"} {
 		publish("a", kind, "a-"+kind)
 	}
+	// Same-owner replacement must retire its old peer without touching camera/voice.
+	e.mu.Lock()
+	oldScreen := e.publisherLocked("a", "SCREEN")
+	cameraBefore := e.publisherLocked("a", "VIDEO")
+	e.mu.Unlock()
+	// A failed replacement and an unauthorized generation must preserve the live peer.
+	status, _ := control(t, e, controlRequest{Operation: "publish", Kind: "SCREEN", Room: "room", Participant: "a", Generation: 2, Transport: "stale-screen", SDP: "v=0"})
+	if status != 403 || oldScreen.closed.Load() {
+		t.Fatal("stale generation affected the live screen")
+	}
+	status, _ = control(t, e, controlRequest{Operation: "publish", Kind: "SCREEN", Room: "room", Participant: "a", Generation: 1, Transport: "invalid-screen", SDP: "v=0"})
+	if status == 200 || oldScreen.closed.Load() {
+		t.Fatal("failed negotiation retired the live screen")
+	}
+	pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	downstream := &mediaPeer{id: "old-screen-viewer", owner: "b", room: "room", kind: "SCREEN", generation: 1, upstream: oldScreen, pc: pc, ctx: ctx, cancel: cancel}
+	e.mu.Lock()
+	e.peers[downstream.id] = downstream
+	e.mu.Unlock()
+	publish("a", "SCREEN", "a-screen-replaced")
+	e.mu.Lock()
+	replacement := e.publisherLocked("a", "SCREEN")
+	cameraAfter := e.publisherLocked("a", "VIDEO")
+	e.mu.Unlock()
+	if !oldScreen.closed.Load() || !downstream.closed.Load() || replacement == nil || replacement == oldScreen || cameraBefore != cameraAfter || cameraAfter.closed.Load() {
+		t.Fatal("screen replacement affected unrelated media or leaked the old peer")
+	}
+	control(t, e, controlRequest{Operation: "stop", Kind: "SCREEN", Room: "room", Participant: "a", Generation: 1})
+	publish("a", "SCREEN", "a-screen-restarted")
 	publish("b", "AUDIO", "b-audio")
 	status, result := control(t, e, controlRequest{Operation: "publish", Kind: "AUDIO", Room: "room", Participant: "a", Generation: 1, Transport: "duplicate", SDP: "v=0"})
 	if status != 409 || result["code"] != "ALREADY_PUBLISHING" {

@@ -201,6 +201,48 @@ class VideoCoordinatorTest {
         assertOwnerStillRenews(fresh);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings={"VIDEO","AUDIO","SCREEN","SCREEN_AUDIO"})
+    void unsubscribeForwardsBoundedTransportsWithMembership(String kind) throws Exception {
+        var member=joinAndGrant(create());
+        var body=new JsonObject();var ids=new com.google.gson.JsonArray();ids.add("receiver-1");body.add("transports",ids);
+        coordinator.handle(connection,connection.message(kind+"_UNSUBSCRIBE",UUID.randomUUID().toString(),member.roomId(),null,body));
+        var forwarded=fake.unsubscribe.get();
+        assertEquals("unsubscribe",forwarded.get("operation").getAsString());
+        assertEquals(kind,forwarded.get("kind").getAsString());
+        assertEquals(member.participantId(),forwarded.get("participant").getAsString());
+        assertEquals(ids,forwarded.getAsJsonArray("transports"));
+        if(!kind.equals("AUDIO")) {
+            for(int i=0;i<6;i++) ids.add("extra-"+i);
+            assertEquals("INVALID_REQUEST",assertThrows(common.signaling.SignalException.class,() -> coordinator.handle(connection,
+                    connection.message(kind+"_UNSUBSCRIBE",UUID.randomUUID().toString(),member.roomId(),null,body))).code());
+        }
+        for(int i=0;i<51;i++) ids.add("receiver-"+i);
+        assertEquals("INVALID_REQUEST",assertThrows(common.signaling.SignalException.class,() -> coordinator.handle(connection,
+                connection.message(kind+"_UNSUBSCRIBE",UUID.randomUUID().toString(),member.roomId(),null,body))).code());
+    }
+    @Test void screenStateConfirmsExactOwnPublicationWithoutSubscribingToSelf() throws Exception {
+        var member=joinAndGrant(create());rooms.setMediaRequested(connection.id(),"SCREEN",true);
+        var sources=new JsonObject();sources.addProperty(member.participantId(),"new-screen-transport");
+        fake.activeSources.set(sources);
+        var reply=coordinator.handle(connection,connection.message("SCREEN_STATE",UUID.randomUUID().toString(),member.roomId(),null,new JsonObject()));
+        assertEquals("new-screen-transport",reply.get("publication").getAsString());
+        assertFalse(reply.getAsJsonObject("sources").has(member.participantId()));
+        assertTrue(rooms.assertMember(connection.id(),member.roomId()).mediaState().sharePublishing());
+    }
+    @Test void systemAudioRequiresShareAndDoesNotChangeMicOrShareFlags() throws Exception {
+        var member=joinAndGrant(create());var body=new JsonObject();body.addProperty("sdp","v=0");body.addProperty("publication","screen-parent");
+        var publish=connection.message("SCREEN_AUDIO_PUBLISH",UUID.randomUUID().toString(),member.roomId(),null,body);
+        assertEquals("MEDIA_CLOSED",assertThrows(common.signaling.SignalException.class,() -> coordinator.handle(connection,publish)).code());
+        rooms.setMediaRequested(connection.id(),"AUDIO",true);rooms.setMediaRequested(connection.id(),"SCREEN",true);
+        coordinator.handle(connection,publish);
+        assertEquals("SCREEN_AUDIO",fake.publication.get().get("kind").getAsString());
+        assertEquals("screen-parent",fake.publication.get().get("publication").getAsString());
+        coordinator.handle(connection,connection.message("SCREEN_AUDIO_STATE",UUID.randomUUID().toString(),member.roomId(),null,new JsonObject()));
+        coordinator.handle(connection,connection.message("SCREEN_AUDIO_STOP",UUID.randomUUID().toString(),member.roomId(),null,new JsonObject()));
+        var state=rooms.assertMember(connection.id(),member.roomId()).mediaState();
+        assertTrue(state.micRequested());assertTrue(state.shareRequested());assertEquals(0,fake.stops(member,"AUDIO"));
+    }
     private RoomSnapshot create() throws Exception {
         return rooms.create(connection.principal(), UUID.randomUUID().toString(),
                 new CreateRoomParams("Cuộc họp tiếp tục", "1234", 3, false));
@@ -283,6 +325,9 @@ class VideoCoordinatorTest {
     }
 
     private static final class FakeEngine implements AutoCloseable {
+        private final AtomicReference<JsonObject> unsubscribe=new AtomicReference<>();
+        private final AtomicReference<JsonObject> publication=new AtomicReference<>();
+        private final AtomicReference<JsonObject> activeSources=new AtomicReference<>(new JsonObject());
         private final HttpServer server;
         private final java.util.concurrent.ExecutorService requests = Executors.newVirtualThreadPerTaskExecutor();
         private final Set<String> leases = ConcurrentHashMap.newKeySet();
@@ -307,9 +352,11 @@ class VideoCoordinatorTest {
                         + "/" + body.get("generation").getAsLong();
                 JsonObject response = new JsonObject();
                 switch (operation) {
+                    case "unsubscribe" -> unsubscribe.set(body);
+                    case "publish" -> {publication.set(body);response.addProperty("sdp","v=0");response.addProperty("transport",body.get("transport").getAsString());}
                     case "renew" -> { leases.add(key); renewals.computeIfAbsent(key, ignored -> new AtomicInteger()).incrementAndGet(); }
                     case "revoke" -> leases.remove(key);
-                    case "state" -> response.add("sources", new JsonObject());
+                    case "state" -> response.add("sources", activeSources.get().deepCopy());
                     case "stop" -> stops.computeIfAbsent(key + "/" + body.get("kind").getAsString(), ignored -> new AtomicInteger()).incrementAndGet();
                     default -> throw new IllegalStateException("Unexpected test control operation: " + operation);
                 }

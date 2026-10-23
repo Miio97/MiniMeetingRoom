@@ -68,6 +68,7 @@ type mediaPeer struct {
 	lastPLI                 atomic.Int64
 	keyframes               chan struct{}
 	upstream                *mediaPeer
+	screen                  *mediaPeer
 	queue                   *packetQueue
 	local                   *webrtc.TrackLocalStaticRTP
 	ctx                     context.Context
@@ -180,7 +181,7 @@ func newEngine(secret string) (*engine, error) {
 		return nil, err
 	}
 	return &engine{
-		byKind:       map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}},
+		byKind:       map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}, "SCREEN_AUDIO": {}},
 		api:          webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
 		secret:       sha256.Sum256([]byte(secret)),
 		instance:     hex.EncodeToString(instanceBytes),
@@ -246,7 +247,7 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if request.Kind == "" {
 		request.Kind = "VIDEO"
 	}
-	if request.Kind != "VIDEO" && request.Kind != "AUDIO" && request.Kind != "SCREEN" {
+	if request.Kind != "VIDEO" && request.Kind != "AUDIO" && request.Kind != "SCREEN" && request.Kind != "SCREEN_AUDIO" {
 		reply(w, 400, map[string]any{"code": "INVALID_MEDIA_KIND"})
 		return
 	}
@@ -292,7 +293,7 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.mu.Unlock()
 		reply(w, 200, map[string]any{"ok": true})
 	case "unsubscribe":
-		if (request.Kind != "VIDEO" && request.Kind != "AUDIO") || len(request.Transports) > 50 || (request.Kind == "VIDEO" && len(request.Transports) > 6) {
+		if len(request.Transports) > 50 || (request.Kind != "AUDIO" && len(request.Transports) > 6) {
 			reply(w, 400, map[string]any{"code": "INVALID_REQUEST"})
 			return
 		}
@@ -369,6 +370,7 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 	}
 	if existing := e.peers[request.Transport]; existing != nil {
 		valid := existing.owner == request.Participant && existing.generation == request.Generation && existing.room == request.Room && existing.source == request.Source && existing.publisher == publisher && existing.kind == request.Kind && existing.fingerprint == fingerprint
+		valid = valid && (request.Kind != "SCREEN_AUDIO" || !publisher || (existing.screen != nil && existing.screen.id == request.Publication))
 		answer := existing.answer
 		e.mu.Unlock()
 		if !valid {
@@ -379,6 +381,15 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		return
 	}
 	source := e.publisherLocked(request.Source, request.Kind)
+	var screen *mediaPeer
+	if publisher && request.Kind == "SCREEN_AUDIO" {
+		screen = e.publisherLocked(request.Participant, "SCREEN")
+		if screen == nil || screen.id != request.Publication || screen.room != request.Room || screen.generation != request.Generation {
+			e.mu.Unlock()
+			reply(w, 403, map[string]any{"code": "SOURCE_UNAVAILABLE"})
+			return
+		}
+	}
 	limit := e.maxPeers
 	// Keep a global reserve for voice; existing transports are never evicted to admit new ones.
 	if request.Kind != "AUDIO" && limit > 8 {
@@ -393,12 +404,12 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		reply(w, 429, map[string]any{"code": "MEDIA_BUSY"})
 		return
 	}
-	if publisher && e.publisherLocked(request.Participant, request.Kind) != nil {
+	if publisher && request.Kind != "SCREEN" && e.publisherLocked(request.Participant, request.Kind) != nil {
 		e.mu.Unlock()
 		reply(w, 409, map[string]any{"code": "ALREADY_PUBLISHING"})
 		return
 	}
-	if publisher && request.Kind == "SCREEN" && e.screenLocked(request.Room) != nil {
+	if current := e.screenLocked(request.Room); publisher && request.Kind == "SCREEN" && current != nil && (current.owner != request.Participant || current.generation != request.Generation) {
 		e.mu.Unlock()
 		reply(w, 409, map[string]any{"code": "SHARE_IN_USE"})
 		return
@@ -439,7 +450,8 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 	ctx, cancel := context.WithCancel(context.Background())
 	peer := &mediaPeer{kind: request.Kind, id: request.Transport, room: request.Room, owner: request.Participant, source: request.Source, generation: request.Generation, pc: pc, publisher: publisher, fingerprint: fingerprint, ctx: ctx, cancel: cancel}
 	peer.upstream = source
-	if publisher && request.Kind != "AUDIO" {
+	peer.screen = screen
+	if publisher && !audioKind(request.Kind) {
 		peer.keyframes = make(chan struct{}, 1)
 		go e.sendKeyframes(peer)
 	}
@@ -526,11 +538,15 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 	peer.answer = pc.LocalDescription().SDP
 	e.mu.Lock()
 	valid := !e.stopped.Load() && e.liveLocked(peer.owner, peer.room, peer.generation) && e.leases[peer.owner].version == leaseVersion && e.stopVersions[peer.owner+":"+peer.kind] == stopVersion
-	if publisher && e.publisherLocked(peer.owner, peer.kind) != nil {
+	if publisher && peer.kind != "SCREEN" && e.publisherLocked(peer.owner, peer.kind) != nil {
 		valid = false
 	}
-	screenConflict := publisher && peer.kind == "SCREEN" && e.screenLocked(peer.room) != nil
+	currentScreen := e.screenLocked(peer.room)
+	screenConflict := publisher && peer.kind == "SCREEN" && currentScreen != nil && (currentScreen.owner != peer.owner || currentScreen.generation != peer.generation)
 	if screenConflict {
+		valid = false
+	}
+	if publisher && peer.kind == "SCREEN_AUDIO" && (screen.closed.Load() || e.publisherLocked(peer.owner, "SCREEN") != screen) {
 		valid = false
 	}
 	if !publisher && (source.closed.Load() || e.publisherLocked(source.owner, source.kind) != source) {
@@ -543,11 +559,25 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 			}
 		}
 	}
+	// Keep the old publication until negotiation succeeds, then replace it atomically.
+	// Retire only its downstream peers; camera and audio remain independent.
+	removed := []*mediaPeer{}
+	if valid && publisher && peer.kind == "SCREEN" && currentScreen != nil {
+		for id, old := range e.peers {
+			if old == currentScreen || old.upstream == currentScreen || old.screen == currentScreen || (old.upstream != nil && old.upstream.screen == currentScreen) {
+				delete(e.peers, id)
+				removed = append(removed, old)
+			}
+		}
+	}
 	if valid {
 		e.peers[peer.id] = peer
 		installed = true
 	}
 	e.mu.Unlock()
+	for _, old := range removed {
+		old.close()
+	}
 	if !valid {
 		if screenConflict {
 			reply(w, 409, map[string]any{"code": "SHARE_IN_USE"})
@@ -634,7 +664,7 @@ func (e *engine) forward(peer *mediaPeer) {
 	}
 }
 func (e *engine) keyframe(source *mediaPeer) {
-	if source == nil || source.kind == "AUDIO" || source.closed.Load() || source.ssrc.Load() == 0 {
+	if source == nil || audioKind(source.kind) || source.closed.Load() || source.ssrc.Load() == 0 {
 		return
 	}
 	now := time.Now().UnixNano()
@@ -685,7 +715,7 @@ func (e *engine) removePeer(peer *mediaPeer) {
 	removed := []*mediaPeer{peer}
 	if peer.publisher {
 		for id, other := range e.peers {
-			if other.upstream == peer {
+			if other.upstream == peer || other.screen == peer || (other.upstream != nil && other.upstream.screen == peer) {
 				delete(e.peers, id)
 				removed = append(removed, other)
 			}
@@ -710,7 +740,7 @@ func (e *engine) remove(owner string, generation int64, revoke bool, expiredAt .
 	}
 	if revoke {
 		delete(e.leases, owner)
-		for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN"} {
+		for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN", "SCREEN_AUDIO"} {
 			delete(e.stopVersions, owner+":"+kind)
 		}
 	} else if ok {
@@ -756,7 +786,7 @@ func (e *engine) close() {
 }
 
 func kindCodec(kind string) webrtc.RTPCodecCapability {
-	if kind == "AUDIO" {
+	if audioKind(kind) {
 		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1"}
 	}
 	return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}
@@ -783,7 +813,7 @@ func (e *engine) stopKind(owner string, generation int64, kind string) {
 	e.stopVersions[owner+":"+kind]++
 	removed := []*mediaPeer{}
 	for id, p := range e.peers {
-		if p.kind == kind && ((p.publisher && p.owner == owner) || p.source == owner) {
+		if (p.kind == kind || (kind == "SCREEN" && p.kind == "SCREEN_AUDIO")) && ((p.publisher && p.owner == owner) || p.source == owner) {
 			delete(e.peers, id)
 			removed = append(removed, p)
 		}
@@ -793,3 +823,5 @@ func (e *engine) stopKind(owner string, generation int64, kind string) {
 		p.close()
 	}
 }
+
+func audioKind(kind string) bool { return kind == "AUDIO" || kind == "SCREEN_AUDIO" }

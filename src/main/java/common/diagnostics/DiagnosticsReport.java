@@ -273,7 +273,7 @@ public final class DiagnosticsReport {
             eventCounts.merge(eventId, 1L, Long::sum);
             Long trackId = integer(fields, "track_id");
             long track = trackId == null ? -1 : trackId;
-            String kind = tagged(fields, "kind", Set.of("AUDIO", "VIDEO", "SCREEN"))
+            String kind = tagged(fields, "kind", Set.of("AUDIO", "VIDEO", "SCREEN", "SCREEN_AUDIO"))
                     ? tag(fields, "kind") : "unavailable";
             String action = tagged(fields, "action", Set.of("LOGIN", "REGISTER", "LOGOUT", "AUTHENTICATE",
                     "VERIFY_REGISTRATION", "RESEND_REGISTRATION_OTP", "REQUEST_PASSWORD_RESET", "RESET_PASSWORD", "UPDATE_PROFILE", "CHANGE_PASSWORD",
@@ -281,7 +281,7 @@ public final class DiagnosticsReport {
                     "REQUEST_ACCOUNT_PASSWORD_RESET", "RESET_ACCOUNT_PASSWORD",
                     "CREATE_ROOM", "REOPEN_ROOM", "LOOKUP_ROOM", "JOIN_ROOM", "ADMISSION_STATUS", "GET_ROOM", "LEAVE_ROOM", "SET_MEDIA_STATE",
                     "SET_LOCKED", "STOP_PUBLISH", "KICK", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
-                    "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE",
+                    "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_UNSUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE", "SCREEN_AUDIO_UNSUBSCRIBE", "SCREEN_AUDIO_STATE", "SCREEN_AUDIO_STOP",
                     "SCREEN_STATE", "SCREEN_STOP", "PUBLISH", "UNPUBLISH", "SUBSCRIBE", "UNSUBSCRIBE",
                     "SDP_OFFER", "SDP_ANSWER", "ICE_CANDIDATE", "CHAT_SEND", "CHAT_HISTORY", "NETWORK_STATS", "OTHER"))
                     ? tag(fields, "action") : "unavailable";
