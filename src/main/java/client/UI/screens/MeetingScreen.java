@@ -150,7 +150,7 @@ public final class MeetingScreen extends BorderPane {
         }
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
-        participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand,
+        participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::hostCommand,
                 person -> sharingScreen(person.userId()), this::stopScreen);
         Tab participants = new Tab("Thành viên", participantPanel);
         filePanel = new FilePanel(manager);
@@ -477,10 +477,6 @@ public final class MeetingScreen extends BorderPane {
                     setManagementPending(false);
                     if (!disposed) roomError.setText(failure == null ? "" : SceneManager.connectionError(failure));
                 }));
-    }
-    private void invite() {
-        if (!videoRoom || !manager.sfuSession().isHost()) return;
-        new InviteDialog(manager.stage(), manager.room().name(), manager.room().code(), manager.invitationPin()).showAndWait();
     }
     private void hostCommand(String action, Long target) {
         if (!beginManagement()) return;

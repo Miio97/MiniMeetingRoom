@@ -77,7 +77,7 @@ public final class SceneManager {
             if (sfuSession != null) endReason = sfuSession.noticeProperty().get();
             int count = roomInfo == null ? 0 : roomInfo.people();
             long seconds = sfuSession == null ? 0 : sfuSession.elapsedSeconds();
-            roomJoined = false; pendingRoomId = -1; usingSfuRoom = false; invitationPin = "";
+            roomJoined = false; pendingRoomId = -1; usingSfuRoom = false;
             ended(seconds, count);
         }
     }
@@ -92,8 +92,6 @@ public final class SceneManager {
     private volatile RoomResponse meetingState;
     private volatile RoomResponse pendingMeetingState;
     private String endReason = "";
-    private String invitationPin = "";
-    public String invitationPin() { return invitationPin; }
     public String endReason() { return endReason; }
     public RoomResponse meetingState() { return meetingState; }
     public void enterRoom(RoomResponse response, String pin) {
@@ -597,7 +595,6 @@ public final class SceneManager {
     public boolean usesSignalingRooms() { return meetingFactory != null; }
     public void cancelAdmission() { closeSfuSession(); }
     private void closeSfuSession() {
-        invitationPin = "";
         if (sfuSession != null) { sfuSession.roomProperty().removeListener(meetingListener); sfuSession.close(); sfuSession = null; }
         if (usingSfuRoom) { roomJoined = false; pendingRoomId = -1; }
         usingSfuRoom = false; leavingSfuRoom = false;
@@ -608,13 +605,13 @@ public final class SceneManager {
         if (meetingFactory == null) { legacyRoomRequest(() -> authClient.createRoom(token, name, pin, capacity), success, failure); return; }
         var session = sfuSession();
         deliverMeetingRoom(session.create(new common.meeting.CreateRoomParams(name, pin, capacity, locked))
-                .thenCompose(preview -> session.join(false, false)), room -> { invitationPin = pin; success.accept(room); }, failure);
+                .thenCompose(preview -> session.join(false, false)), success, failure);
     }
     public void requestJoinRoom(String identifier, String pin, Consumer<RoomInfo> success, Consumer<Throwable> failure) {
         String token = sessionToken;
         if (meetingFactory == null) { legacyRoomRequest(() -> authClient.joinRoom(token, identifier, pin), success, failure); return; }
         var session = sfuSession();
-        deliverMeetingRoom(session.lookup(identifier, pin).thenCompose(preview -> session.join(false, false)), room -> { invitationPin = pin; success.accept(room); }, error -> {
+        deliverMeetingRoom(session.lookup(identifier, pin).thenCompose(preview -> session.join(false, false)), success, error -> {
             Throwable cause = unwrap(error);
             if (cause instanceof common.signaling.SignalException signal && "ROOM_NOT_FOUND".equals(signal.code())) {
                 closeSfuSession();

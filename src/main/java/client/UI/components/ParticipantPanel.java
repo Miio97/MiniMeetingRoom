@@ -3,6 +3,7 @@ package client.UI.components;
 import client.UI.dialogs.HostMenuPopup;
 import common.meeting.Participant;
 import javafx.collections.*;
+import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
@@ -20,19 +21,16 @@ public final class ParticipantPanel extends BorderPane {
     private long menuTarget;
     private final javafx.beans.property.BooleanProperty pending = new javafx.beans.property.SimpleBooleanProperty();
     public void pending(boolean value) { pending.set(value); }
-    public ParticipantPanel(ObservableList<Participant> people, long selfId, Runnable invite, BiConsumer<String, Long> command) {
-        this(people, selfId, invite, command, person -> false, userId -> { });
+    public ParticipantPanel(ObservableList<Participant> people, long selfId, BiConsumer<String, Long> command) {
+        this(people, selfId, command, person -> false, userId -> { });
     }
-    public ParticipantPanel(ObservableList<Participant> people, long selfId, Runnable invite, BiConsumer<String, Long> command,
+    public ParticipantPanel(ObservableList<Participant> people, long selfId, BiConsumer<String, Long> command,
                             java.util.function.Predicate<Participant> sharing, java.util.function.LongConsumer stopShare) {
         this.people = people; this.sharing = sharing;
         ListView<Participant> list = new ListView<>(people); list.setId("room-members"); list.getStyleClass().add("participant-list");
-        Button invitation = Ui.button("Mời người dùng", "secondary", invite); invitation.setGraphic(IconButton.icon("users")); invitation.setMaxWidth(Double.MAX_VALUE);
-        invitation.setId("room-invite");
         Runnable permissions = () -> {
             boolean wasHost = host;
             host = people.stream().anyMatch(person -> person.userId() == selfId && person.host());
-            invitation.setDisable(!host || pending.get()); invitation.setVisible(host); invitation.setManaged(host);
             if (wasHost != host) list.refresh();
             refreshMenu();
         };
@@ -68,7 +66,10 @@ public final class ParticipantPanel extends BorderPane {
                 row.getStyleClass().add("participant-row"); setGraphic(row);
             }
         });
-        VBox top = Ui.column(10, invitation, queue); top.setPadding(new Insets(10, 12, 10, 12)); setTop(top); setCenter(list); setBottom(status);
+        queue.setPadding(new Insets(10, 12, 10, 12));
+        queue.visibleProperty().bind(Bindings.isNotEmpty(queue.getChildren()));
+        queue.managedProperty().bind(queue.visibleProperty());
+        setTop(queue); setCenter(list); setBottom(status);
     }
     public void refreshMenu() {
         if (activeMenu == null) return;

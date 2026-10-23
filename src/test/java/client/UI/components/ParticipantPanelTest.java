@@ -21,7 +21,7 @@ class ParticipantPanelTest {
         var actions = new java.util.ArrayList<String>();
         try {
             FxTestRuntime.call(() -> {
-                var root = new ParticipantPanel(people, 1, () -> { }, (action, target) -> actions.add(action + ":" + target));
+                var root = new ParticipantPanel(people, 1, (action, target) -> actions.add(action + ":" + target));
                 panel.set(root); var window = new javafx.stage.Stage(); stage.set(window);
                 window.setScene(new Scene(root, 320, 500)); window.show(); root.applyCss(); root.layout();
                 ((Button) root.lookup("#participant-menu-2")).fire();
@@ -54,19 +54,19 @@ class ParticipantPanelTest {
         FxTestRuntime.call(() -> {
             var people = FXCollections.observableArrayList(
                     new Participant(1, "Host", true, true, true), new Participant(2, "Guest", false, true, true));
-            var host = new ParticipantPanel(people, 1, () -> { }, (action, target) -> { });
+            var host = new ParticipantPanel(people, 1, (action, target) -> { });
             new Scene(host, 320, 500); host.applyCss(); host.layout();
             assertNull(host.lookup("#participant-menu-1"));
             assertNotNull(host.lookup("#participant-menu-2"));
             host.pending(true); host.applyCss(); host.layout();
             assertTrue(((Button) host.lookup("#participant-menu-2")).isDisabled());
-            assertTrue(((Button) host.lookup("#room-invite")).isDisabled());
+            assertNull(host.lookup("#room-invite"));
             host.pending(false); host.applyCss(); host.layout();
             assertFalse(((Button) host.lookup("#participant-menu-2")).isDisabled());
-            var guest = new ParticipantPanel(people, 2, () -> { }, (action, target) -> { });
+            var guest = new ParticipantPanel(people, 2, (action, target) -> { });
             new Scene(guest, 320, 500); guest.applyCss(); guest.layout();
             assertNull(guest.lookup("#participant-menu-1")); assertNull(guest.lookup("#participant-menu-2"));
-            assertFalse(guest.lookup("#room-invite").isVisible());
+            assertNull(guest.lookup("#room-invite"));
             people.set(0, new Participant(1, "Host", false, true, true));
             host.applyCss(); host.layout();
             assertNull(host.lookup("#participant-menu-2"));

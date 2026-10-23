@@ -289,9 +289,9 @@ class DucAuthFlowTest {
             assertEquals(ids, roster(guest).stream().map(Participant::userId).sorted().toList());
             assertEquals(ids, roster(third).stream().map(Participant::userId).sorted().toList());
             assertEquals(List.of("Chủ phòng thật", "Thành viên thật", "Thành viên thứ ba"), roster(manager).stream().map(Participant::name).toList());
-            assertTrue(button(manager, "Mời người dùng").isVisible());
-            assertFalse(button(guest, "Mời người dùng").isVisible());
-            assertTrue(button(third, "Mời người dùng").isDisabled());
+            assertNull(root(manager).lookup("#room-invite"));
+            assertNull(root(guest).lookup("#room-invite"));
+            assertNull(root(third).lookup("#room-invite"));
             icon(guest, "Mic").fire(); icon(guest, "Camera").fire();
             return null;
         });
@@ -305,7 +305,8 @@ class DucAuthFlowTest {
         roomCommand(manager, "ROOM_CAMERA_OFF", guestId);
         awaitFx(() -> !guest.mic() && !guest.camera());
         roomCommand(manager, "ROOM_TRANSFER", guestId);
-        awaitFx(() -> !button(manager, "Mời người dùng").isVisible() && button(guest, "Mời người dùng").isVisible());
+        awaitFx(() -> roster(manager).stream().anyMatch(person -> person.userId() == guestId && person.host())
+                && roster(guest).stream().anyMatch(person -> person.userId() == guestId && person.host()));
         RoomRequest denied = fx(() -> manager.roomCommand("ROOM_KICK", thirdId));
         assertEquals("HOST_REQUIRED", assertThrows(RoomException.class, () -> manager.authClient().meeting(denied)).code());
         roomCommand(guest, "ROOM_KICK", thirdId);
@@ -597,7 +598,7 @@ class DucAuthFlowTest {
     }
 
     @Test
-    void hostDialogsKeepRoomSettingsAndInvitationSeparateFromParticipantActions() throws Exception {
+    void hostDialogsKeepRoomSettingsSeparateFromParticipantActions() throws Exception {
         fx(() -> {
             List<String> commands = new ArrayList<>();
             var room = new RoomView(1, "Phòng local", "MMR-LOCAL", 10, false, false, false);
@@ -622,11 +623,6 @@ class DucAuthFlowTest {
             var offMenu = new client.UI.dialogs.HostMenuPopup(false, false, () -> { }, () -> { }, () -> { }, () -> { });
             assertTrue(offMenu.getItems().get(0).isDisable()); assertTrue(offMenu.getItems().get(1).isDisable());
 
-            var invitation = new client.UI.dialogs.InviteDialog(stage, room.name(), room.code(), "1234");
-            List<TextField> credentials = nodes(invitation.getDialogPane().getContent()).filter(TextField.class::isInstance).map(TextField.class::cast).toList();
-            assertEquals(List.of("MMR-LOCAL", "1234"), credentials.stream().map(TextField::getText).toList());
-            assertTrue(credentials.stream().noneMatch(TextField::isEditable));
-            assertTrue(actions.isEmpty(), "Opening invitation must not send a message or create an account");
             return null;
         });
     }
