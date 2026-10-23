@@ -16,6 +16,8 @@ import server.database.DatabaseConnection;
 /** Duc: authenticated membership and host commands; live participants are never generated. */
 public final class LegacyRoomService implements AutoCloseable {
     private final ConnectionProvider connections;
+    private java.util.function.LongConsumer closedRoom=id -> {};
+    void onRoomClosed(java.util.function.LongConsumer listener) {closedRoom=listener;}
     private String legacyOwner;
     void legacyOwner(String instance) {legacyOwner=instance;}
     private final Clock clock;
@@ -31,6 +33,7 @@ public final class LegacyRoomService implements AutoCloseable {
     public synchronized <T> T chat(String token, long roomId, String ticket, ChatAction<T> action)
             throws SQLException, ChatException {
         try (Connection connection = connections.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);connection.setAutoCommit(false);
             User user = authenticate(connection, token);
             if (user == null) throw new ChatException("SESSION_INVALID", "Phiên đăng nhập không hợp lệ.");
             Room room = rooms.get(roomId);
@@ -42,7 +45,14 @@ public final class LegacyRoomService implements AutoCloseable {
                     || member.lastSeen.isBefore(now().minusSeconds(10))) {
                 throw new ChatException("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc chưa được duyệt.");
             }
-            return action.handle(connection, member.view(room.host));
+            // Auth-room close/reopen can run through another legacy adapter. Fence the DB write too.
+            try(var s=connection.prepareStatement("SELECT Trang_Thai FROM Phong_Hop WHERE Ma_Phong=? FOR UPDATE")) {
+                s.setLong(1,roomId);try(var r=s.executeQuery()) {if(!r.next() || "DA_DONG".equals(r.getString(1))) throw new ChatException("ROOM_CLOSED","Phòng đã đóng.");}
+            }
+            try(var s=connection.prepareStatement("SELECT 1 FROM Thanh_Vien_Phong WHERE Ma_Thanh_Vien_Phong=? AND Roi_Phong_Luc IS NULL")) {
+                s.setLong(1,member.membership);try(var r=s.executeQuery()) {if(!r.next()) throw new ChatException("NOT_IN_ROOM","Phiên phòng đã kết thúc.");}
+            }
+            T result=action.handle(connection, member.view(room.host));connection.commit();return result;
         }
     }
 
@@ -59,7 +69,9 @@ public final class LegacyRoomService implements AutoCloseable {
                 if ("ROOM_CREATE".equals(request.action())) result = create(connection, request, user);
                 else if ("ROOM_JOIN".equals(request.action())) result = join(connection, request, user);
                 else result = command(connection, request, user);
-                connection.commit(); return result;
+                connection.commit();
+                for(var room:rooms.values()) {var previous=before.get(room.id);if(room.closed && (previous==null || !previous.closed)) closedRoom.accept(room.id);}
+                return result;
             } catch (SQLException | RuntimeException error) {
                 rooms.clear(); rooms.putAll(before); throw error;
             } finally { connection.rollback(); }
@@ -79,6 +91,7 @@ public final class LegacyRoomService implements AutoCloseable {
         }
         admit(connection, room, new Member(user, UUID.randomUUID().toString(), now()));
         if(legacyOwner!=null) RoomRepository.markLegacyOwnership(connection,room.id,legacyOwner,clock.instant());
+        if(legacyOwner!=null) room.generation=generation(connection,room.id);
         rooms.put(room.id, room); return view(room, user.id(), false);
     }
     private RoomResponse join(Connection connection, RoomRequest request, User user) throws SQLException {
@@ -211,8 +224,17 @@ public final class LegacyRoomService implements AutoCloseable {
         }
     }
     private Room load(Connection connection, long id, String code) throws SQLException {
-        for (Room room : rooms.values()) if (code == null ? room.id == id : room.code.equals(code)) return room;
-        try (PreparedStatement sql = connection.prepareStatement("SELECT Ma_Phong, Ten_Phong, Ma_Phong_Tham_Gia, Ma_PIN_Bam, Ma_Chu_Phong, Da_Khoa, So_Nguoi_Toi_Da, Trang_Thai FROM Phong_Hop WHERE " + (code == null ? "Ma_Phong = ?" : "Ma_Phong_Tham_Gia = ?"))) {
+        for (Room room : List.copyOf(rooms.values())) if (code == null ? room.id == id : room.code.equals(code)) {
+            try(var s=connection.prepareStatement("SELECT Trang_Thai FROM Phong_Hop WHERE Ma_Phong=? FOR UPDATE")) {
+                s.setLong(1,room.id);try(var r=s.executeQuery()) {
+                    if(!r.next()) return null;
+                    boolean closed="DA_DONG".equals(r.getString(1));
+                    if(closed==room.closed && (legacyOwner==null || Objects.equals(room.generation,generation(connection,room.id)))) return room;
+                }
+            }
+            rooms.remove(room.id);break; // A reopened generation gets new tickets and membership objects.
+        }
+        try (PreparedStatement sql = connection.prepareStatement("SELECT Ma_Phong, Ten_Phong, Ma_Phong_Tham_Gia, Ma_PIN_Bam, Ma_Chu_Phong, Da_Khoa, So_Nguoi_Toi_Da, Trang_Thai FROM Phong_Hop WHERE " + (code == null ? "Ma_Phong = ?" : "Ma_Phong_Tham_Gia = ?")+" FOR UPDATE")) {
             if (code == null) sql.setLong(1, id); else sql.setString(1, code);
             try (ResultSet result = sql.executeQuery()) {
                 if (!result.next()) return null;
@@ -220,8 +242,14 @@ public final class LegacyRoomService implements AutoCloseable {
                 if(legacyOwner!=null) try(var owner=connection.prepareStatement("SELECT Instance_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
                     owner.setLong(1,room.id);try(var rows=owner.executeQuery()) {if(rows.next() && !legacyOwner.equals(rows.getString(1))) return null;}
                 }
+                if(legacyOwner!=null) room.generation=generation(connection,room.id);
                 rooms.put(room.id, room); return room;
             }
+        }
+    }
+    private String generation(Connection c,long room) throws SQLException {
+        try(var s=c.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=? AND Instance_ID=?")) {
+            s.setLong(1,room);s.setString(2,legacyOwner);try(var r=s.executeQuery()) {return r.next()?r.getString(1):null;}
         }
     }
     private User authenticate(Connection connection, String token) throws SQLException {
@@ -274,9 +302,9 @@ public final class LegacyRoomService implements AutoCloseable {
         Member copy() { Member member = new Member(user, ticket, lastSeen); member.membership = membership; member.microphone = microphone; member.camera = camera; return member; }
     }
     private static final class Room {
-        long id, host; String name, code, pin; int capacity; boolean locked, approval, closed;
+        long id, host; String name, code, pin,generation; int capacity; boolean locked, approval, closed;
         final Map<Long, Member> members = new LinkedHashMap<>(), waiting = new LinkedHashMap<>();
         RoomView view() { return new RoomView(id, name, code, capacity, locked, approval, closed); }
-        Room copy() { Room room = new Room(); room.id = id; room.host = host; room.name = name; room.code = code; room.pin = pin; room.capacity = capacity; room.locked = locked; room.approval = approval; room.closed = closed; members.forEach((id, member) -> room.members.put(id, member.copy())); waiting.forEach((id, member) -> room.waiting.put(id, member.copy())); return room; }
+        Room copy() { Room room = new Room(); room.id = id; room.host = host; room.name = name; room.code = code; room.pin = pin;room.generation=generation; room.capacity = capacity; room.locked = locked; room.approval = approval; room.closed = closed; members.forEach((id, member) -> room.members.put(id, member.copy())); waiting.forEach((id, member) -> room.waiting.put(id, member.copy())); return room; }
     }
 }

@@ -513,7 +513,7 @@ public final class MeetingScreen extends BorderPane {
         if (disposed) return;
         if (!response.success()) { admissions.retry(); roomError.setText(response.message()); return; }
         managedState = response; updateManagedPeople(response.members()); updateManagement(response);
-        if (response.room().closed()) manager.ended(elapsed(), peakPeople);
+        if (response.room().closed()) manager.ended(elapsed(), peakPeople,"Phòng đã đóng, tác vụ truyền tệp đã dừng.");
         else roomAction(manager.sfuSession().refresh());
     }
     private void updateManagement(common.meeting.RoomResponse response) {

@@ -36,11 +36,13 @@ public final class MeetingEndedScreen extends StackPane {
         }); reopen.setId("reopen-room-submit");
         reopen.textProperty().bind(javafx.beans.binding.Bindings.when(canReopen).then("Mở lại phòng").otherwise("Vào lại phòng"));
         if(room!=null && manager.usesSignalingRooms() && !Boolean.getBoolean("mmr.test.disableCatalog")) {
-            var cleaning=new javafx.beans.property.SimpleBooleanProperty();
-            reopen.textProperty().unbind();reopen.textProperty().bind(javafx.beans.binding.Bindings.when(cleaning).then("Đang dọn dữ liệu…").otherwise(javafx.beans.binding.Bindings.when(canReopen).then("Mở lại phòng").otherwise("Vào lại phòng")));
+            var cleaning=new javafx.beans.property.SimpleBooleanProperty(true);
+            var cleanupLabel=new javafx.beans.property.SimpleStringProperty("Đang dọn dữ liệu…");
+            reopen.textProperty().unbind();reopen.textProperty().bind(javafx.beans.binding.Bindings.when(cleaning).then(cleanupLabel).otherwise(javafx.beans.binding.Bindings.when(canReopen).then("Mở lại phòng").otherwise("Vào lại phòng")));
             reopen.disableProperty().bind(cleaning);
             catalogWatch=manager.sfuSession().watchCatalog(update -> javafx.application.Platform.runLater(() -> {
                 if(disposed) return;cleaning.set(update.cleaning().contains(room.id()));
+                cleanupLabel.set(client.meeting.MeetingSession.cleanupLabel(update.cleanupPhases().get(room.id())));
                 update.rooms().stream().filter(latest -> latest.id()==room.id()).findFirst().ifPresent(latest -> {
                     manager.updateRoom(latest);canReopen.set("DA_DONG".equals(latest.status()) && manager.authenticatedUser()!=null && latest.hostId()==manager.authenticatedUser().id());
                 });

@@ -79,6 +79,13 @@ class LegacyRoomServiceTest {
         assertEquals("WRONG_PIN", rooms.handle(RoomRequest.join(guest.token(), a.room().code(), "9999")).code());
         join(guest, a); assertEquals("ROOM_FULL", join(third, a).code());
     }
+    @Test void reopenedLegacyRoomDropsOldRamTicketsAndCanBeJoinedAgain() throws Exception {
+        var original=create(10);command(host,original,"ROOM_CLOSE",0);
+        try(var c=connection();var s=c.createStatement()) {s.executeUpdate("UPDATE Phong_Hop SET Trang_Thai='DANG_HOAT_DONG',Ngay_Dong=NULL WHERE Ma_Phong="+original.room().id());}
+        assertEquals("NOT_IN_ROOM",command(host,original,"ROOM_POLL",0).code());
+        var joined=join(host,original);assertTrue(joined.success());assertNotEquals(original.ticket(),joined.ticket());
+        assertThrows(common.chat.ChatException.class,() -> rooms.chat(host.token(),original.room().id(),original.ticket(),(c,u) -> null));
+    }
     @Test void approvalAndTransferUseCurrentHostIdentity() throws Exception {
         RoomResponse a = create(10);
         rooms.handle(RoomRequest.settings(host.token(), a.room().id(), a.ticket(), null, true));

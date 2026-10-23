@@ -57,8 +57,9 @@ public interface TransferStorage extends AutoCloseable {
     /** Cancel an unfinished upload; never delete an object awaiting metadata reconciliation. */
     void cancel(UploadSession session) throws IOException;
 
-    /** Admin only: caller holds the session lock and the expired closed room's DB lock.
-     * Must establish that no committed metadata references this upload before calling. */
+    /** Admin only: caller holds the session lock and fences the closed room against reopen.
+     * Active transfers must have drained. Committed metadata must remain until physical deletion
+     * is acknowledged by the guarded cleanup commit; no DB transaction is needed during deletion. */
     void discardExpiredRoomUpload(UploadSession session) throws IOException;
 
     /** Stream an existing immutable object. Caller owns and closes the stream. */

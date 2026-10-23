@@ -164,7 +164,10 @@ public final class MeetingSession implements AutoCloseable {
         default void onChatResync() { }
     }
     private final List<ChatListener> chatListeners = new CopyOnWriteArrayList<>();
-    public record CatalogUpdate(boolean snapshot,long revision,java.util.List<common.room.RoomInfo> rooms,java.util.Set<Long> removed,java.util.Set<Long> cleaning,java.util.Set<Long> evicted) { }
+    private final List<java.util.function.Consumer<String>> roomClosedListeners=new CopyOnWriteArrayList<>();
+    public AutoCloseable onRoomClosed(java.util.function.Consumer<String> listener) {roomClosedListeners.add(listener);return () -> roomClosedListeners.remove(listener);}
+    public record CatalogUpdate(boolean snapshot,long revision,java.util.List<common.room.RoomInfo> rooms,java.util.Set<Long> removed,java.util.Set<Long> cleaning,java.util.Set<Long> evicted,java.util.Map<Long,String> cleanupPhases) { }
+    public static String cleanupLabel(String phase) {return switch(phase==null?"":phase) {case "OWNER_REQUIRED" -> "Chưa xác định server quản lý";case "CANCELLING" -> "Đang dừng truyền tệp…";case "RETRY" -> "Dọn lỗi · đang thử lại…";default -> "Đang dọn dữ liệu…";};}
     public final class CatalogWatch implements AutoCloseable {
         private final java.util.function.Consumer<CatalogUpdate> listener;
         private volatile java.util.Set<Long> focus;
@@ -205,7 +208,8 @@ public final class MeetingSession implements AutoCloseable {
         var removed=new java.util.HashSet<Long>();for(var id:body.getAsJsonArray("removed")) removed.add(id.getAsLong());
         var cleaning=new java.util.HashSet<Long>();for(var id:body.getAsJsonArray("cleaning")) cleaning.add(id.getAsLong());
         var evicted=new java.util.HashSet<Long>();if(body.has("evicted")) for(var id:body.getAsJsonArray("evicted")) evicted.add(id.getAsLong());
-        var update=new CatalogUpdate(snapshot,revision,List.of(JSON.fromJson(body.get("rooms"),common.room.RoomInfo[].class)),java.util.Set.copyOf(removed),java.util.Set.copyOf(cleaning),java.util.Set.copyOf(evicted));
+        var phases=new java.util.HashMap<Long,String>();if(body.has("cleanupPhases")) for(var e:body.getAsJsonObject("cleanupPhases").entrySet()) phases.put(Long.parseLong(e.getKey()),e.getValue().getAsString());
+        var update=new CatalogUpdate(snapshot,revision,List.of(JSON.fromJson(body.get("rooms"),common.room.RoomInfo[].class)),java.util.Set.copyOf(removed),java.util.Set.copyOf(cleaning),java.util.Set.copyOf(evicted),java.util.Map.copyOf(phases));
         for(var watch:catalogListeners) watch.listener.accept(update);
     }
     private void retryCatalog() {
@@ -600,12 +604,14 @@ public final class MeetingSession implements AutoCloseable {
             return;
         }
         if ("ROOM_CLOSED".equals(message.type()) || "ROOM_LEFT".equals(message.type())) {
+            if("ROOM_CLOSED".equals(message.type()) && currentConnection(message) && snapshot!=null && Objects.equals(snapshot.roomId(),message.roomId()))
+                roomClosedListeners.forEach(listener -> listener.accept(message.roomId()));
             submit(() -> {
                 RoomSnapshot current = snapshot;
                 String currentRoom = current != null ? current.roomId() : preview == null ? null : preview.roomId();
                 if (currentConnection(message) && Objects.equals(currentRoom, message.roomId())) {
                     roomTerminated.set(true);
-                    recovery = null; closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); clearChat();
+                    recovery = null; closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "ROOM_CLOSED".equals(message.type())?"Phòng đã đóng, tác vụ truyền tệp đã dừng.":"Bạn đã rời phòng."); clearChat();
                 }
                 return null;
             }); return;
