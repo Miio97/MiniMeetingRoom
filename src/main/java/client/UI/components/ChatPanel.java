@@ -120,7 +120,6 @@ public final class ChatPanel extends BorderPane {
         session.chatHistory(null, 50).thenAccept(batch -> Platform.runLater(() -> {
             if (disposed) return;
             append(batch, false);
-            installHistoryPaging();
         })).exceptionally(error -> {
             Platform.runLater(() -> {
                 if (!disposed) status.setText(SceneManager.connectionError(error));
@@ -135,25 +134,6 @@ public final class ChatPanel extends BorderPane {
             if(disposed) return;
             for(var ack:saved) {var row=pending.get(ack.clientMessageId());if(row!=null) appendVideo(new ChatMessage(ack.id(),roomId,userId,"Bạn",row.message().text(),ack.sentAt()),ack.clientMessageId(),false);}
         }));
-    }
-    private boolean loadingOlder,historyExhausted;
-    private void installHistoryPaging() {
-        if(getTop()!=null) return;
-        var older=Ui.button("Tin nhắn trước","small-button",() -> {
-            if(loadingOlder || historyExhausted) return;
-            Long before=rows.stream().map(row -> row.message().id()).filter(id -> id>0).min(Long::compareTo).orElse(null);
-            if(before==null) return;
-            loadingOlder=true;
-            var anchor=rows.isEmpty()?null:rows.get(0);
-            session.chatHistory(before,50).whenComplete((batch,failure) -> Platform.runLater(() -> {
-                loadingOlder=false;if(disposed) return;
-                if(failure!=null) {status.setText(SceneManager.connectionError(failure));return;}
-                historyExhausted=batch.size()<50;
-                append(batch,false);
-                if(anchor!=null) virtualMessages.scrollTo(anchor);
-            }));
-        });
-        setTop(older);
     }
 
     private void connect() {

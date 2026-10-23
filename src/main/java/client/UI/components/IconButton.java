@@ -28,6 +28,8 @@ public class IconButton extends Button {
         Map.entry("close", "M5 5l14 14 M19 5L5 19"),
         Map.entry("plus", "M12 3v18 M3 12h18"),
         Map.entry("arrow", "M5 12h14 M13 6l6 6-6 6"),
+        Map.entry("chevron-left", "M15 6l-6 6 6 6"),
+        Map.entry("chevron-right", "M9 6l6 6-6 6"),
         Map.entry("check", "M4 12l5 5L20 6"),
         Map.entry("eye", "M2 12Q12 -2 22 12Q12 26 2 12Z M15 12A3 3 0 1 0 9 12A3 3 0 1 0 15 12"),
         Map.entry("eye-off", "M2 12Q12 -2 22 12Q12 26 2 12 M15 12A3 3 0 1 0 9 12 M2 2L22 22"),

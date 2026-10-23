@@ -1,6 +1,7 @@
 package client.UI.components;
 
 import javafx.scene.layout.StackPane;
+import javafx.scene.Group;
 import javafx.scene.shape.SVGPath;
 import javafx.scene.transform.Scale;
 import java.util.Map;
@@ -23,7 +24,8 @@ public final class Icons {
         path.getStyleClass().add("sidebar-icon");
         path.setStrokeWidth(1.8 * 24 / size);
         path.getTransforms().add(new Scale(size / 24, size / 24));
-        StackPane box = new StackPane(path); box.setMinSize(size, size); box.setPrefSize(size, size); box.setMaxSize(size, size);
+        // Group includes the scaled bounds so StackPane centers the visible path, not its unscaled outline.
+        StackPane box = new StackPane(new Group(path)); box.setMinSize(size, size); box.setPrefSize(size, size); box.setMaxSize(size, size);
         return box;
     }
 }

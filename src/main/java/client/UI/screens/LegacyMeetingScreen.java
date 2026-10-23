@@ -57,7 +57,7 @@ public final class LegacyMeetingScreen extends BorderPane {
         networkBadge = new NetworkBadge(this::networkStats);
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, networkBadge); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
-        participantPanel = new ParticipantPanel(actualPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand);
+        participantPanel = new ParticipantPanel(actualPeople, manager.authenticatedUser().id(), this::hostCommand);
         Tab participants = new Tab("Thành viên", participantPanel);
         chatPanel = new ChatPanel(manager);
         Tab chat = new Tab("Chat", chatPanel); Tab files = new Tab("Tệp", new FilePanel(manager));
@@ -119,10 +119,6 @@ public final class LegacyMeetingScreen extends BorderPane {
                 this::failure);
     }
     private void hostCommand(String action, Long target) { send(manager.roomCommand(action, target)); }
-    private void invite() {
-        if (actualPeople.stream().noneMatch(person -> person.userId() == manager.authenticatedUser().id() && person.host())) return;
-        new InviteDialog(manager.stage(), manager.room().name(), manager.room().code(), manager.room().pin()).showAndWait();
-    }
     private void settings() {
         if (actualPeople.stream().noneMatch(person -> person.userId() == manager.authenticatedUser().id() && person.host())) { new DeviceSettingsDialog(manager.stage()).showAndWait(); return; }
         RoomResponse state = manager.meetingState();
@@ -161,8 +157,7 @@ public final class LegacyMeetingScreen extends BorderPane {
         } else if (pinnedIndex >= 0) {
             VideoTile focused = tile(pinnedIndex);
             BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused)); VBox.setVgrow(focus, Priority.ALWAYS);
-            Button back = Ui.button("Trở về lưới", "secondary", () -> { pinnedIndex = -1; renderVideos(); });
-            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label("Đã ghim · " + people.get(pinnedIndex).name(), "strong"), Ui.spacer(), back), focus);
+            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label("Đã ghim · " + people.get(pinnedIndex).name(), "strong"), Ui.spacer()), focus);
             main.setMinWidth(0); HBox.setHgrow(main, Priority.ALWAYS);
             if (people.size() > 1) {
                 VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164);

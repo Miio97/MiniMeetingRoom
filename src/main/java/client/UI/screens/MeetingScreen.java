@@ -56,6 +56,7 @@ public final class MeetingScreen extends BorderPane {
     private final Timeline roomPoll;
     private Timeline panelAnimation;
     private final ControlBar controls;
+    private final MeetingToolbar bottom;
     private FilePanel filePanel;
     private final Label lockLabel = Ui.label("", "caption");
     private final Label participantCount = Ui.label("", "caption");
@@ -149,7 +150,7 @@ public final class MeetingScreen extends BorderPane {
         }
         Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
         HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
-        participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::invite, this::hostCommand,
+        participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::hostCommand,
                 person -> sharingScreen(person.userId()), this::stopScreen);
         Tab participants = new Tab("Thành viên", participantPanel);
         filePanel = new FilePanel(manager);
@@ -172,7 +173,7 @@ public final class MeetingScreen extends BorderPane {
         controls.users.active(true);
         roomError.setWrapText(true); roomError.setId("meeting-room-error");
         roomError.visibleProperty().bind(roomError.textProperty().isNotEmpty()); roomError.managedProperty().bind(roomError.visibleProperty());
-        MeetingToolbar bottom = new MeetingToolbar(controls, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
+        bottom = new MeetingToolbar(controls, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
         videoArea.getChildren().add(bottom.revealControl()); StackPane.setAlignment(bottom.revealControl(), Pos.TOP_LEFT); StackPane.setMargin(bottom.revealControl(), new Insets(12));
         if (videoRoom) {
             var video = manager.sfuSession().video();
@@ -354,6 +355,11 @@ public final class MeetingScreen extends BorderPane {
                 screenImage.imageProperty().bind(mediaController.screen().frames(screenOwner).imageProperty());shared.getChildren().add(screenImage);
             }
             HBox badge=Ui.row(8,IconButton.icon("share"),Ui.label(ownerName+" • Đang chia sẻ", "accent-text"),Ui.spacer());
+            badge.setAlignment(Pos.CENTER_LEFT);
+            badge.setMinHeight(36);
+            badge.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
+                    .then(new Insets(0, 0, 0, 52))
+                    .otherwise(Insets.EMPTY));
             if(own) badge.getChildren().add(Ui.button("Dừng chia sẻ", "secondary", this::toggleShare));
             VBox large=Ui.column(12,badge,shared);VBox.setVgrow(shared,Priority.ALWAYS);HBox.setHgrow(large,Priority.ALWAYS);large.setMinSize(0, 0);
             videoContent.getChildren().add(new HBox(14,large,strip));
@@ -363,14 +369,25 @@ public final class MeetingScreen extends BorderPane {
             ScrollPane strip = Ui.scroll(thumbnails); strip.setPrefWidth(180); strip.setMinWidth(145);
             VBox slide = Ui.column(20, Ui.label("MINI MEETING ROOM", "eyebrow"), Ui.label("Cùng xây dựng\nnhững ý tưởng tốt hơn.", "share-title"), Ui.label("01  /  Tổng quan sản phẩm", "brand-subtitle"), Ui.row(12, shareCard("Kết nối", "Nhóm nhỏ, tập trung"), shareCard("Cộng tác", "Chia sẻ tức thì")));
             slide.setAlignment(Pos.CENTER_LEFT); slide.getStyleClass().add("shared-slide");
-            VBox large = Ui.column(14, Ui.row(8, IconButton.icon("share"), Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text")), slide); VBox.setVgrow(slide, Priority.ALWAYS); HBox.setHgrow(large, Priority.ALWAYS); large.setMinSize(0, 0);
+            HBox badge = Ui.row(8, IconButton.icon("share"), Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text"));
+            badge.setAlignment(Pos.CENTER_LEFT);
+            badge.setMinHeight(36);
+            badge.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
+                    .then(new Insets(0, 0, 0, 52))
+                    .otherwise(Insets.EMPTY));
+            VBox large = Ui.column(14, badge, slide); VBox.setVgrow(slide, Priority.ALWAYS); HBox.setHgrow(large, Priority.ALWAYS); large.setMinSize(0, 0);
             HBox layout = new HBox(14, large, strip); videoContent.getChildren().add(layout);
         } else if (pinnedIndex >= 0 || videoRoom && !people.isEmpty()) {
             VideoTile focused = tile(focusIndex);
             BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused)); VBox.setVgrow(focus, Priority.ALWAYS);
-            Button back = Ui.button("Trở về lưới", "secondary", () -> { pinnedIndex = -1; renderVideos(); });
             focusHeaderLabel = Ui.label((pinnedIndex>=0?"Đã ghim · ":"") + people.get(focusIndex).name(), "strong");
-            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), focusHeaderLabel, Ui.spacer(), back), focus);
+            HBox focusHeader = Ui.row(8, IconButton.icon("pin"), focusHeaderLabel, Ui.spacer());
+            focusHeader.setAlignment(Pos.CENTER_LEFT);
+            focusHeader.setMinHeight(36);
+            focusHeader.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
+                    .then(new Insets(0, 0, 0, 52))
+                    .otherwise(Insets.EMPTY));
+            VBox main = Ui.column(12, focusHeader, focus);
             main.setMinSize(0, 0); HBox.setHgrow(main, Priority.ALWAYS);
             if (people.size() > 1) {
                 VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164);
@@ -460,10 +477,6 @@ public final class MeetingScreen extends BorderPane {
                     setManagementPending(false);
                     if (!disposed) roomError.setText(failure == null ? "" : SceneManager.connectionError(failure));
                 }));
-    }
-    private void invite() {
-        if (!videoRoom || !manager.sfuSession().isHost()) return;
-        new InviteDialog(manager.stage(), manager.room().name(), manager.room().code(), manager.invitationPin()).showAndWait();
     }
     private void hostCommand(String action, Long target) {
         if (!beginManagement()) return;

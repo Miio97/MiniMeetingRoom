@@ -72,10 +72,19 @@ class PreJoinLayoutTest {
                                     for (int[] source : new int[][] {{640,480},{1920,1080},{480,640}}) {
                                         image.setImage(new WritableImage(source[0], source[1])); pulse(screen);
                                         assertTrue(image.isPreserveRatio());
-                                        assertEquals((double) source[0] / source[1], image.getBoundsInLocal().getWidth() / image.getBoundsInLocal().getHeight(), .01);
+                                        // Camera sources of every aspect ratio must cover the preview without letterboxing.
+                                        assertEquals(preview.getWidth(), image.getBoundsInLocal().getWidth(), 1);
+                                        assertEquals(preview.getHeight(), image.getBoundsInLocal().getHeight(), 1);
+                                        var viewport = image.getViewport();
+                                        assertNotNull(viewport);
+                                        assertEquals(source[0] / 2.0, viewport.getMinX() + viewport.getWidth() / 2, .01);
+                                        assertEquals(source[1] / 2.0, viewport.getMinY() + viewport.getHeight() / 2, .01);
+                                        assertTrue(viewport.getMinX() >= 0 && viewport.getMaxX() <= source[0]);
+                                        assertTrue(viewport.getMinY() >= 0 && viewport.getMaxY() <= source[1]);
                                         assertTrue(image.getBoundsInParent().getMaxX() <= preview.getWidth() + 1);
                                         assertTrue(image.getBoundsInParent().getMaxY() <= preview.getHeight() + 1);
                                         assertEquals(preview.getWidth() / 2, image.getBoundsInParent().getCenterX(), 1);
+                                        assertEquals(preview.getHeight() / 2, image.getBoundsInParent().getCenterY(), 1);
                                     }
                                     image.setVisible(false);
                                 }

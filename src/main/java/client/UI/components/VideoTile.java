@@ -6,10 +6,12 @@ import javafx.animation.*;
 import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.control.Label;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.*;
 import javafx.scene.shape.Circle;
+import javafx.scene.shape.Rectangle;
 import javafx.util.Duration;
 
 public final class VideoTile extends StackPane {
@@ -24,11 +26,17 @@ public final class VideoTile extends StackPane {
 
     public VideoTile(common.meeting.ParticipantView participant, boolean self, javafx.beans.property.ReadOnlyObjectProperty<javafx.scene.image.Image> image) {
         live = true; getStyleClass().add("video-tile"); setMinSize(90, 100); setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        clipCorners();
         setStyle("-fx-background-color: #181b29;");
         realVideo = new javafx.scene.image.ImageView(); realVideo.setPreserveRatio(true);
-        realVideo.fitWidthProperty().bind(Bindings.max(1, widthProperty().subtract(16)));
-        realVideo.fitHeightProperty().bind(Bindings.max(1, heightProperty().subtract(44)));
+        realVideo.setSmooth(true);
+        realVideo.fitWidthProperty().bind(Bindings.max(1, widthProperty()));
+        realVideo.fitHeightProperty().bind(Bindings.max(1, heightProperty()));
+        realVideo.imageProperty().addListener((observable, before, after) -> updateViewport());
+        widthProperty().addListener((observable, before, after) -> updateViewport());
+        heightProperty().addListener((observable, before, after) -> updateViewport());
         realVideo.imageProperty().bind(image);
+        updateViewport();
         cameraState = Ui.label("Camera đang tắt hoặc đang chờ video", "caption");
         cameraState.visibleProperty().bind(image.isNull()); cameraState.managedProperty().bind(cameraState.visibleProperty());
         name = Ui.label(participant.displayName() + (self ? " (Bạn)" : ""), "tile-name");
@@ -41,6 +49,7 @@ public final class VideoTile extends StackPane {
 
     public VideoTile(MockData.Participant participant, boolean self) {
         getStyleClass().add("video-tile"); setMinSize(90, 100); setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        clipCorners();
         setStyle("-fx-background-color: linear-gradient(to bottom right, " + participant.color() + ", #181b29);");
         // Avatar thu nhỏ theo chiều cao tile để lưới 10 người không đè lên tên.
         var avatarSize = Bindings.min(76, Bindings.max(24, heightProperty().subtract(64)));
@@ -60,6 +69,35 @@ public final class VideoTile extends StackPane {
         setMuted(participant.muted()); setCamera(participant.camera());
         pulse = new Timeline(new KeyFrame(Duration.ZERO, new KeyValue(border.opacityProperty(), .5)), new KeyFrame(Duration.millis(900), new KeyValue(border.opacityProperty(), 1)));
         pulse.setAutoReverse(true); pulse.setCycleCount(Animation.INDEFINITE);
+    }
+
+    private void clipCorners() {
+        Rectangle clip = new Rectangle();
+        clip.setArcWidth(24); clip.setArcHeight(24);
+        clip.widthProperty().bind(widthProperty());
+        clip.heightProperty().bind(heightProperty());
+        setClip(clip);
+    }
+
+    private void updateViewport() {
+        if (realVideo == null) return;
+        var img = realVideo.getImage();
+        double tileW = getWidth(), tileH = getHeight();
+        if (img == null || img.getWidth() <= 0 || img.getHeight() <= 0 || tileW <= 0 || tileH <= 0) {
+            realVideo.setViewport(null);
+            return;
+        }
+        double imgW = img.getWidth(), imgH = img.getHeight();
+        double tileRatio = tileW / tileH, imgRatio = imgW / imgH;
+        double vpW = imgW, vpH = imgH, vpX = 0, vpY = 0;
+        if (imgRatio > tileRatio) {
+            vpW = imgH * tileRatio;
+            vpX = (imgW - vpW) / 2.0;
+        } else if (imgRatio < tileRatio) {
+            vpH = imgW / tileRatio;
+            vpY = (imgH - vpH) / 2.0;
+        }
+        realVideo.setViewport(new Rectangle2D(vpX, vpY, vpW, vpH));
     }
 
     @Override protected double computePrefWidth(double height) { return 160; }

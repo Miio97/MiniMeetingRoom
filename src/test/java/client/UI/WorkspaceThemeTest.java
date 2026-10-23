@@ -85,7 +85,7 @@ class WorkspaceThemeTest {
             try {
                 Scene scene = new Scene(lobby, 1380, 915); scene.getStylesheets().add(Ui.class.getResource("/styles/app.css").toExternalForm());
                 stage.setScene(scene); ThemeManager.attach(lobby); css(lobby);
-                HBox user = (HBox) lobby.lookup(".sidebar-user");
+                Pane user = (Pane) lobby.lookup(".sidebar-user");
                 assertEquals(1, user.lookupAll(".button").size());
                 HBox profile = (HBox) user.getChildren().getFirst();
                 assertNull(profile.getOnMouseClicked());
