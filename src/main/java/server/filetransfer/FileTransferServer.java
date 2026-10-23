@@ -11,6 +11,8 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
+import java.net.Socket;
+import java.net.ServerSocket;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.Duration;
@@ -26,14 +28,14 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import server.config.ServerConfig;
 
 /** Separate bounded admission/control and transfer pools keep metadata usable during bulk I/O. */
 public final class FileTransferServer implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(FileTransferServer.class.getName());
-    private final SSLServerSocket listener;
+    private final ServerSocket listener;
+    private final SSLContext tls;
     private final FileTransferService service;
     private final FileMetadataRepository repository;
     private final TransferStorage storage;
@@ -47,13 +49,16 @@ public final class FileTransferServer implements AutoCloseable {
     private final ScheduledExecutorService maintenance = Executors.newScheduledThreadPool(2,
             Thread.ofPlatform().daemon().name("file-maintenance").factory());
     private final Map<SSLSocket, Long> sockets = new ConcurrentHashMap<>();
+    private final Map<SSLSocket,Socket> transports=new ConcurrentHashMap<>();
     private final Map<String, RateWindow> rates = new ConcurrentHashMap<>();
     private volatile boolean closed;
+    private volatile java.util.function.BooleanSupplier cleanupStopped=() -> true;
+    public void cleanupTermination(java.util.function.BooleanSupplier stopped) {cleanupStopped=java.util.Objects.requireNonNull(stopped);}
     private Thread acceptThread;
 
     public FileTransferServer(SSLContext tls, TransferConfig config, FileMetadataRepository repository,
             TransferStorage storage) throws IOException {
-        this.config = config; this.storage = storage; this.repository = repository;
+        this.config = config; this.storage = storage; this.repository = repository;this.tls=tls;
         retentionPeriod = retentionPeriod(ServerConfig.get("file.transfer.retention-minutes", null),
                 ServerConfig.get("file.transfer.retention-days", null));
         connectionsPerMinute = ServerConfig.getInt("file.transfer.connections-per-ip-minute", 600);
@@ -62,10 +67,9 @@ public final class FileTransferServer implements AutoCloseable {
         service = new FileTransferService(repository, storage, config);
         transfers = new ThreadPoolExecutor(config.maxConcurrent(), config.maxConcurrent(), 0, TimeUnit.SECONDS,
                 new SynchronousQueue<>(), Thread.ofPlatform().daemon().name("file-transfer-", 0).factory());
-        listener = (SSLServerSocket) tls.getServerSocketFactory().createServerSocket();
+        listener = new ServerSocket();
         try {
             listener.setReuseAddress(true);
-            listener.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
             listener.bind(new InetSocketAddress(config.bind(), config.port()), 32);
         } catch (IOException | RuntimeException e) {
             try { listener.close(); } catch (IOException secondary) { e.addSuppressed(secondary); }
@@ -74,8 +78,21 @@ public final class FileTransferServer implements AutoCloseable {
     }
     public int port() { return listener.getLocalPort(); }
     public void roomSessionGate(FileMetadataRepository.RoomSessionGate gate) { repository.roomSessionGate(gate); }
-    public void cleanupRoom(long roomId) throws SQLException,IOException {retention.sweepRoom(roomId);}
-    public boolean hasPendingRoom(long roomId) throws IOException {return retention.pending(roomId);}
+    /** Reference adapter for older isolated harnesses; production selects cleanupBatch with a fence. */
+    @Deprecated public void cleanupRoom(long roomId) throws SQLException,IOException {retention.sweepRoom(roomId);}
+    public boolean hasPendingRoom(long roomId) throws IOException {return service.roomTransfers().pending(roomId) || retention.pending(roomId);}
+    public void cancelRoom(long roomId,String generation) {service.roomTransfers().cancel(roomId,generation);}
+    public boolean cancelAndDrained(server.meeting.RoomCleanupStore.Fence fence) {
+        cancelRoom(fence.roomId(),fence.generation());return !service.roomTransfers().pending(fence.roomId());
+    }
+    public java.util.List<FileMetadataRepository.RetiredFile> cleanupBatch(server.meeting.RoomCleanupStore.Fence fence,java.util.List<FileMetadataRepository.RetiredFile> batch) throws SQLException,IOException {
+        if(service.roomTransfers().pending(fence.roomId())) throw new IOException("TRANSFER_STILL_ACTIVE");
+        return retention.sweepBatch(fence,batch);
+    }
+    public int activeRoomTransfers() {return service.roomTransfers().size();}
+    public void liveRoomClosed(String generation) {
+        service.roomTransfers().closeGeneration(generation,task -> {try {maintenance.execute(task);} catch(RejectedExecutionException stopped) { /* close() aborts every socket */ }});
+    }
     public synchronized void start() {
         if (closed || acceptThread != null) throw new IllegalStateException("Server cannot be started twice");
         maintenance.scheduleAtFixedRate(this::timeouts, 1, 1, TimeUnit.SECONDS);
@@ -109,7 +126,12 @@ public final class FileTransferServer implements AutoCloseable {
     private void accept() {
         while (!closed) {
             try {
-                SSLSocket socket = (SSLSocket) listener.accept();
+                Socket transport=listener.accept();SSLSocket socket;
+                try {
+                    socket=(SSLSocket)tls.getSocketFactory().createSocket(transport,transport.getInetAddress().getHostAddress(),transport.getPort(),true);
+                    socket.setUseClientMode(false);socket.setEnabledProtocols(new String[]{"TLSv1.3","TLSv1.2"});
+                } catch(IOException|RuntimeException failure) {transport.close();throw failure;}
+                transports.put(socket,transport);
                 socket.setSoTimeout(config.timeoutMillis());
                 sockets.put(socket, System.nanoTime());
                 if (closed) { closeSocket(socket); continue; }
@@ -150,7 +172,7 @@ public final class FileTransferServer implements AutoCloseable {
         finally { if (!handedOff) closeSocket(socket); }
     }
     private void run(SSLSocket socket, Frame request, DataInputStream input, DataOutputStream output) {
-        try { service.handle(request, input, output, () -> touch(socket)); }
+        try { service.handle(request, input, output, () -> touch(socket), () -> abortSocket(socket)); }
         catch (Exception e) { error(request, output, e); }
         finally { closeSocket(socket); }
     }
@@ -175,25 +197,32 @@ public final class FileTransferServer implements AutoCloseable {
     private void timeouts() {
         long now = System.nanoTime();
         // SO_TIMEOUT covers reads; this watchdog also aborts blocked writes/queued handshakes.
-        sockets.forEach((socket, last) -> { if (now - last > TimeUnit.MILLISECONDS.toNanos(config.timeoutMillis())) closeSocket(socket); });
+        sockets.forEach((socket, last) -> { if (now - last > TimeUnit.MILLISECONDS.toNanos(config.timeoutMillis())) abortSocket(socket); });
         rates.entrySet().removeIf(entry -> now - entry.getValue().start > TimeUnit.MINUTES.toNanos(2));
     }
     private void closeSocket(SSLSocket socket) {
         sockets.remove(socket);
-        try { socket.close(); }
+        // Close the underlying transport first; JSSE close() can wait behind its writer lock.
+        Socket transport=transports.remove(socket);
+        try {if(transport!=null) transport.close();socket.close(); }
         catch (IOException e) { LOG.fine("Socket close failed: " + e.getClass().getSimpleName()); }
+    }
+    private void abortSocket(SSLSocket socket) {
+        Socket transport=transports.get(socket);
+        if(transport!=null) try {transport.setSoLinger(true,0);transport.close();} catch(IOException ignored) { }
+        closeSocket(socket);
     }
     @Override public void close() throws IOException {
         closed = true;
         try { listener.close(); }
         finally {
             admission.shutdownNow(); transfers.shutdownNow(); maintenance.shutdownNow();
-            sockets.keySet().forEach(this::closeSocket);
+            sockets.keySet().forEach(this::abortSocket);
             boolean stopped = false;
             try {
                 stopped = admission.awaitTermination(5, TimeUnit.SECONDS)
                         && transfers.awaitTermination(5, TimeUnit.SECONDS)
-                        && maintenance.awaitTermination(5, TimeUnit.SECONDS);
+                        && maintenance.awaitTermination(5, TimeUnit.SECONDS) && cleanupStopped.getAsBoolean();
             } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             if (stopped) storage.close();
             else {
@@ -203,7 +232,7 @@ public final class FileTransferServer implements AutoCloseable {
                     try {
                         while (!admission.awaitTermination(1, TimeUnit.SECONDS)
                                 || !transfers.awaitTermination(1, TimeUnit.SECONDS)
-                                || !maintenance.awaitTermination(1, TimeUnit.SECONDS)) { /* wait off caller thread */ }
+                                || !maintenance.awaitTermination(1, TimeUnit.SECONDS) || !cleanupStopped.getAsBoolean()) {Thread.sleep(100);}
                         storage.close();
                     } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     catch (IOException e) { LOG.warning("STORAGE_ERROR during deferred close"); }

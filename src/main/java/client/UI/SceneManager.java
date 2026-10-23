@@ -617,6 +617,7 @@ public final class SceneManager {
         if (closing || sessionToken == null) return;
         if (roomJoined) { failure.accept(new IOException("Hãy rời phòng hiện tại trước khi mở lại phòng.")); return; }
         String token = sessionToken;
+        String identity=knownRoomIdentity(roomId);
         Consumer<Throwable> rejected = error -> {
             if (closing || !java.util.Objects.equals(token, sessionToken)) return;
             Throwable cause = unwrap(error);
@@ -628,13 +629,13 @@ public final class SceneManager {
         Consumer<RoomInfo> reopened = room -> {
             if (!closing && java.util.Objects.equals(token, sessionToken)) success.accept(room);
         };
-        if (meetingFactory == null) { legacyRoomRequest(() -> authClient.reopenRoom(token, roomId), reopened, rejected); return; }
+        if (meetingFactory == null) { legacyRoomRequest(() -> identity==null?authClient.reopenRoom(token, roomId):authClient.reopenRoom(token, roomId,identity), reopened, rejected); return; }
         var session = sfuSession();
         deliverMeetingRoom(session.reopen(Long.toString(roomId)).thenCompose(preview -> session.join(false, false)), reopened, error -> {
             Throwable cause = unwrap(error);
             if (cause instanceof common.signaling.SignalException signal && "ROOM_NOT_FOUND".equals(signal.code())) {
                 closeSfuSession();
-                legacyRoomRequest(() -> authClient.reopenRoom(token, roomId), reopened, rejected);
+                legacyRoomRequest(() -> identity==null?authClient.reopenRoom(token, roomId):authClient.reopenRoom(token, roomId,identity), reopened, rejected);
             } else rejected.accept(cause);
         });
     }
@@ -646,6 +647,10 @@ public final class SceneManager {
             if (response.success() && response.room() != null) success.accept(response.room());
             else failure.accept(new IOException(response.message() == null ? "Yêu cầu phòng chưa hoàn tất." : response.message()));
         }, error -> { if (!closing && java.util.Objects.equals(ownerToken, sessionToken)) failure.accept(error); });
+    }
+    private String knownRoomIdentity(long id) {
+        if(roomInfo!=null && roomInfo.id()==id && roomInfo.roomIdentity()!=null) return roomInfo.roomIdentity();
+        return recentRooms==null?null:recentRooms.stream().filter(room -> room.id()==id).map(RoomInfo::roomIdentity).filter(java.util.Objects::nonNull).findFirst().orElse(null);
     }
     private void deliverMeetingRoom(java.util.concurrent.CompletableFuture<common.meeting.RoomSnapshot> request,
             Consumer<RoomInfo> success, Consumer<Throwable> failure) {

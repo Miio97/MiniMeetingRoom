@@ -16,6 +16,31 @@ public final class FileRetentionService {
     public boolean pending(long roomId) throws IOException {
         return storage.pendingSessions().stream().anyMatch(session -> session.roomId()==roomId) || !storage.roomObjects(roomId,1).isEmpty();
     }
+    /** Coordinator holds the reopen fence, never a DB transaction, throughout this bounded disk pass. */
+    public java.util.List<FileMetadataRepository.RetiredFile> sweepBatch(server.meeting.RoomCleanupStore.Fence fence,
+            java.util.List<FileMetadataRepository.RetiredFile> batch) throws SQLException,IOException {
+        long roomId=fence.roomId();int processed=0;
+        for(var session:storage.pendingSessions()) {
+            if(session.roomId()!=roomId) continue;
+            if(++processed>100) break;
+            if(!session.lock().tryLock()) throw new IOException("UPLOAD_STILL_ACTIVE");
+            try {
+                if(!session.storageKey().startsWith("rooms/"+roomId+"/files/")) throw new IOException("INVALID_ROOM_OBJECT");
+                // This is room retirement, not user cancellation. Both published and unpublished
+                // objects must go; any committed metadata remains durable until batch acknowledgement.
+                storage.discardExpiredRoomUpload(session);
+            } finally {session.lock().unlock();}
+        }
+        var deleted=new java.util.ArrayList<FileMetadataRepository.RetiredFile>();
+        for(var file:batch) {
+            if(file.roomId()!=roomId || file.storageKey()==null || !file.storageKey().startsWith("rooms/"+roomId+"/files/")) throw new IOException("INVALID_ROOM_OBJECT");
+            storage.deleteStoredFile(file.storageKey());deleted.add(file);
+        }
+        // Immutable generated objects of this closed room, including promote-before-DB failures.
+        // Metadata remains until the following guarded commit, even if this pass fails part way.
+        for(String key:storage.roomObjects(roomId,100)) storage.deleteStoredFile(key);
+        return java.util.List.copyOf(deleted);
+    }
     /** One bounded pass. Errors preserve metadata; the coordinator retries before allowing reopen. */
     public void sweepRoom(long roomId) throws SQLException,IOException {
         Instant cutoff=Instant.now();

@@ -83,6 +83,46 @@ class FileTransferIntegrationTest {
         client = new FileTransferClient("localhost", server.port(), clientTls, 10000);
     }
 
+    /** Opt-in repeatable local baseline/candidate. Never loads server DB configuration. */
+    @Test void cleanupBenchmark() throws Exception {
+        Assumptions.assumeTrue(Boolean.getBoolean("mmr.cleanup.benchmark"));
+        var report = new ArrayList<String>();
+        report.add("scenario,sample,elapsed_ms,batches,db_calls,pool_wait_ms,sql_ms,errors");
+        for (String scenario : List.of("empty", "large", "small", "messages")) {
+            for (int sample = 0; sample < 10; sample++) {
+                sql("UPDATE Phong_Hop SET Trang_Thai='DANG_HOAT_DONG',Ngay_Dong=NULL WHERE Ma_Phong=" + room.id());
+                if (scenario.equals("large")) client.upload(token(1), prepare(file("large.bin", 4 * 1024 * 1024)), new Cancellation(), null);
+                if (scenario.equals("small")) for (int i=0;i<32;i++) client.upload(token(1),prepare(file("small.bin",1024)),new Cancellation(),null);
+                if (scenario.equals("messages")) try(var c=db();var s=c.prepareStatement("INSERT INTO Tin_Nhan(Ma_Phong,Ma_Nguoi_Gui,Loai_Tin_Nhan,Noi_Dung) VALUES(?,1,'VAN_BAN','fixture')")) {
+                    for(int i=0;i<1001;i++) {s.setLong(1,room.id());s.addBatch();}s.executeBatch();
+                }
+                var calls=new java.util.concurrent.atomic.AtomicInteger();var waits=new java.util.concurrent.atomic.AtomicLong();var times=new java.util.concurrent.atomic.AtomicLong();
+                server.auth.ConnectionProvider measured=() -> {
+                    long at=System.nanoTime();var raw=db();waits.addAndGet(System.nanoTime()-at);
+                    return (Connection)java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{Connection.class},(p,m,a) -> {
+                        try {
+                            Object value=m.invoke(raw,a);
+                            if(value instanceof PreparedStatement statement) return java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),new Class[]{PreparedStatement.class},(q,n,b) -> {
+                                long started=System.nanoTime();try {return n.invoke(statement,b);} catch(java.lang.reflect.InvocationTargetException e) {throw e.getCause();}
+                                finally {if(n.getName().startsWith("execute")) {calls.incrementAndGet();times.addAndGet(System.nanoTime()-started);}}
+                            });
+                            return value;
+                        } catch(java.lang.reflect.InvocationTargetException e) {throw e.getCause();}
+                    });
+                };
+                var retention=new FileRetentionService(new FileMetadataRepository(measured),storage);
+                long started=System.nanoTime();int batches=0;
+                closeRoomAt(Instant.now());
+                try(var cleanup=new server.meeting.ImmediateRoomCleanup(measured,"local",false,2,retention::sweepBatch,retention::pending,server::cancelAndDrained,() -> {})) {
+                    while(!cleanup.clean(room.id())) {if(++batches>100) fail("Cleanup did not converge");}batches++;
+                }
+                report.add(String.format(Locale.ROOT,"%s,%d,%.3f,%d,%d,%.3f,%.3f,0",scenario,sample,(System.nanoTime()-started)/1e6,batches,calls.get(),waits.get()/1e6,times.get()/1e6));
+            }
+        }
+        Path output=Path.of(System.getProperty("mmr.cleanup.report","target/cleanup-benchmark.csv"));Files.write(output,report);
+        System.out.println("CLEANUP_BENCHMARK_REPORT "+output.toAbsolutePath());
+    }
+
     @Test void threeUploadsForOneAccountAreAcceptedAndFourthIsBusy() throws Exception {
         server.close(); server = null; start(3);
         Path source = file("three-concurrent.bin", 1000);
@@ -108,6 +148,78 @@ class FileTransferIntegrationTest {
             }
             assertEquals(0, count("Tep_Dinh_Kem"));
         } finally { for (Raw connection : connections) connection.close(); }
+    }
+    @Test void closeActivelyAbortsUploadAndBlockedDownloadThenCleansAndReopens() throws Exception {
+        var source=file("close-large.bin",16*1024*1024);
+        var completed=client.upload(token(1),prepare(source),new Cancellation(),null);
+        Path personal=temporary.resolve("personal-completed.bin");client.download(token(2),completed,personal,new Cancellation(),null);
+        var pending=prepare(file("pending-close.bin",1000));
+        var store=new server.meeting.RoomCleanupStore(this::db,false);
+        try(Raw upload=raw();Raw download=raw()) {
+            upload.send(Type.UPLOAD_INIT,pending.transferId(),uploadHeader(pending,token(1)),new byte[0]);assertEquals(Type.UPLOAD_ACCEPT,upload.read().type());
+            download.socket.setReceiveBufferSize(1024);
+            download.send(Type.DOWNLOAD_REQUEST,UUID.randomUUID(),Map.of("token",token(2),"fileId",completed.id(),"offset",0,"checksum",completed.checksum(),"prefixChecksum",""),new byte[0]);
+            assertEquals(Type.DOWNLOAD_ACCEPT,download.read().type());
+            assertEquals(2,server.activeRoomTransfers());long at=System.nanoTime();closeRoomAt(Instant.now());
+            var fence=store.capture(room.id(),"local");server.cancelRoom(room.id(),fence.generation());
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);while(server.activeRoomTransfers()!=0 && System.nanoTime()<until) Thread.sleep(5);
+            assertEquals(0,server.activeRoomTransfers());assertTrue(System.nanoTime()-at<TimeUnit.SECONDS.toNanos(5));
+            double drainedMs=(System.nanoTime()-at)/1e6;long readyAt;
+            assertCode("PERMISSION_DENIED",() -> client.upload(token(1),prepare(source),new Cancellation(),null));
+            var retention=new FileRetentionService(repository,storage);
+            try(var cleanup=new server.meeting.ImmediateRoomCleanup(this::db,"local",false,2,retention::sweepBatch,server::hasPendingRoom,server::cancelAndDrained,() -> {})) {
+                assertTrue(cleanup.clean(room.id()));assertEquals(0,count("Tin_Nhan"));assertEquals(0,count("Tep_Dinh_Kem"));
+                try(var c=db()) {assertDoesNotThrow(() -> cleanup.check(c,room.id()));}
+                readyAt=System.nanoTime();
+            }
+            roomCommand("REOPEN_ROOM",Instant.now());assertTrue(client.listFiles(token(1),room.id(),0).isEmpty());
+            assertTrue(Files.exists(personal));assertEquals(digest(source),digest(personal));
+            System.out.printf(Locale.ROOT,"CLOSE_TRANSFER_DRAIN drain_ms=%.3f cleanup_ready_ms=%.3f reopen_end_ms=%.3f%n",drainedMs,(readyAt-at)/1e6,(System.nanoTime()-at)/1e6);
+        }
+    }
+    @Test void oldOpaqueIdentityCannotStartAnUploadAfterReopen() throws Exception {
+        repository.legacyOwner("local");
+        String identity;try(var c=db();var s=c.createStatement();var r=s.executeQuery("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh")) {r.next();identity=r.getString(1);}
+        var prepared=prepare(file("stale-generation.bin",100)).inMeeting(identity);
+        closeRoomAt(Instant.now());
+        var rooms=new server.rooms.RoomService(this::db,new server.auth.PasswordHasher(),Clock.systemUTC());rooms.legacyOwner("local");
+        var retention=new FileRetentionService(repository,storage);
+        try(var cleanup=new server.meeting.ImmediateRoomCleanup(this::db,"local",false,2,retention::sweepBatch,server::hasPendingRoom,server::cancelAndDrained,() -> {})) {
+            rooms.setReopenGuard(cleanup);assertTrue(cleanup.clean(room.id()));
+            var response=rooms.handle(new common.auth.AuthRequest("REOPEN_ROOM",null,null,null,null,token(1),new common.room.RoomRequest(null,null,Long.toString(room.id()),0).inMeeting(identity)));
+            assertTrue(response.success());assertNotEquals(identity,response.room().roomIdentity());
+            var staleLeave=rooms.handle(new common.auth.AuthRequest("LEAVE_ROOM",null,null,null,null,token(1),new common.room.RoomRequest(null,null,Long.toString(room.id()),0).inMeeting(identity)));
+            assertFalse(staleLeave.success());assertEquals("STALE_ROOM",staleLeave.code());
+            assertCode("STALE_TRANSFER",() -> client.upload(token(1),prepared,new Cancellation(),null));
+            assertCode("ROOM_GENERATION_REQUIRED",() -> client.upload(token(1),prepared.inMeeting(null),new Cancellation(),null));
+            var current=client.upload(token(1),prepared.inMeeting(response.room().roomIdentity()),new Cancellation(),null);
+            assertCode("STALE_TRANSFER",() -> client.listFiles(token(1),room.id(),0,new Cancellation(),identity));
+            assertCode("STALE_TRANSFER",() -> client.download(token(1),current,temporary.resolve("stale-read.bin"),new Cancellation(),null,identity));
+            assertEquals(1,client.listFiles(token(1),room.id(),0,new Cancellation(),response.room().roomIdentity()).size());
+        }
+    }
+    @Test void physicalDeleteBeforeCommitFailureKeepsMetadataForIdempotentRestart() throws Exception {
+        var file=client.upload(token(1),prepare(file("commit-failure.bin",300)),new Cancellation(),null);
+        String key=repository.storageKey(file.id());closeRoomAt(Instant.now());
+        var store=new server.meeting.RoomCleanupStore(this::db,false);var fence=store.capture(room.id(),"local");var batch=store.batch(fence);
+        new FileRetentionService(repository,storage).sweepBatch(fence,batch);
+        assertFalse(Files.exists(storage.resolve(key)));assertEquals(1,count("Tep_Dinh_Kem"));
+        // No commit models process/connection loss after disk deletion; restart repeats exact keys safely.
+        server.close();server=null;start();var retention=new FileRetentionService(repository,storage);
+        try(var cleanup=new server.meeting.ImmediateRoomCleanup(this::db,"local",false,2,retention::sweepBatch,server::hasPendingRoom,server::cancelAndDrained,() -> {})) {
+            assertTrue(cleanup.clean(room.id()));assertTrue(cleanup.clean(room.id()));assertEquals(0,count("Tin_Nhan"));
+        }
+    }
+    @Test void shutdownRetainsStorageOwnershipUntilCleanupWorkerHasStopped() throws Exception {
+        var stopped=new java.util.concurrent.atomic.AtomicBoolean();server.cleanupTermination(stopped::get);
+        server.close();server=null;
+        assertThrows(IOException.class,() -> new FileStorageService(temporary.resolve("storage"),8L<<30,2L<<30,10,Duration.ofHours(24),true));
+        stopped.set(true);long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);boolean opened=false;
+        while(System.nanoTime()<until) {
+            try(var probe=new FileStorageService(temporary.resolve("storage"),8L<<30,2L<<30,10,Duration.ofHours(24),true)) {opened=true;break;}
+            catch(IOException busy) {Thread.sleep(20);}
+        }
+        assertTrue(opened);
     }
 
     @Test void arbitraryTypesUnicodeAndEmptyArePublishedOnceAndDownloadedByRoomPeer() throws Exception {

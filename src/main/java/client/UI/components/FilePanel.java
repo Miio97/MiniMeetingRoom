@@ -33,11 +33,14 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
     private final ScheduledExecutorService events = Executors.newSingleThreadScheduledExecutor(runnable -> daemon(runnable, "mini-meeting-file-events"));
     private final Cancellation eventCancellation = new Cancellation();
     private volatile boolean disposed;
+    private volatile boolean roomClosed;
+    private AutoCloseable closeWatch;
     private long afterId;
 
     public FilePanel(SceneManager manager) {
         this.manager = manager; client = manager.fileTransferClient(); token = manager.sessionToken(); roomId = manager.serverRoom().id();
-        roomIdentity=manager.hasVideoRoom() && manager.sfuSession().snapshot()!=null?manager.sfuSession().snapshot().roomId():null;
+        roomIdentity=manager.hasVideoRoom() && manager.sfuSession().snapshot()!=null?manager.sfuSession().snapshot().roomId():manager.roomInfo()==null?null:manager.roomInfo().roomIdentity();
+        if(manager.hasVideoRoom()) closeWatch=manager.sfuSession().onRoomClosed(identity -> {if(Objects.equals(roomIdentity,identity)) closedByServer();});
         list.setPadding(new Insets(16)); setCenter(Ui.scroll(list));
         Button send = Ui.button("+  Gửi tệp", "primary", this::chooseUpload); send.setMaxWidth(Double.MAX_VALUE);
         VBox bottom = Ui.column(8, send, status); bottom.setPadding(new Insets(12)); setBottom(bottom);
@@ -47,7 +50,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
     private void refresh() {
         if (disposed) return;
         try {
-            List<FileMetadata> available = client.listFiles(token, roomId, afterId, eventCancellation);
+            List<FileMetadata> available = client.listFiles(token, roomId, afterId, eventCancellation,roomIdentity);
             for (FileMetadata file : available) afterId = Math.max(afterId, file.id());
             fx(() -> { available.forEach(this::addFile); status.setText(files.isEmpty() ? "Chưa có tệp trong phòng." : "Tệp được lưu trên máy chủ · TCP/TLS"); });
         } catch (Exception error) { fx(() -> status.setText("Chưa cập nhật được danh sách: " + message(error))); }
@@ -69,7 +72,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
         row.destination = destination.toPath(); row.finished = false; start(row);
     }
     private void start(TransferRow row) {
-        if (disposed || row.running) return;
+        if (disposed || roomClosed || row.running) return;
         row.cancellation = new Cancellation(); row.cancelRequested = false; row.pauseRequested = false; row.running = true;
         row.progress.setVisible(true); row.progress.setManaged(true); row.pause.setVisible(true); row.pause.setManaged(true);
         row.pause.setDisable(false); row.cancel.setDisable(false); row.retry.setDisable(false);
@@ -84,7 +87,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
             if (row.source != null) {
                 if (row.upload == null) row.upload = client.prepareUpload(roomId, row.source, row.uploadId, row.cancellation, p -> progress(row, p)).inMeeting(roomIdentity);
                 completed = client.upload(token, row.upload, row.cancellation, p -> progress(row, p));
-            } else client.download(token, row.file, row.destination, row.cancellation, p -> progress(row, p));
+            } else client.download(token, row.file, row.destination, row.cancellation, p -> progress(row, p),roomIdentity);
             FileMetadata uploaded = completed;
             fx(() -> {
                 row.running = false; row.finished = true; row.hideActions(); row.progress.setProgress(1);
@@ -94,7 +97,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
             });
         } catch (Exception error) {
             if (row.cancelRequested) cleanupCancelled(row);
-            else fx(() -> { row.running = false; row.failed(row.pauseRequested ? "Đã tạm dừng. Có thể tiếp tục." : message(error)); });
+            else fx(() -> { row.running = false;if(roomClosed) {row.hideActions();row.state.setText("Phòng đã đóng, tác vụ truyền tệp đã dừng.");}else row.failed(row.pauseRequested ? "Đã tạm dừng. Có thể tiếp tục." : message(error)); });
         }
     }
     private void progress(TransferRow row, Progress progress) {
@@ -136,6 +139,10 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
         });
     }
     private void fx(Runnable action) { if (!disposed) Platform.runLater(() -> { if (!disposed) action.run(); }); }
+    private void closedByServer() {
+        roomClosed=true;eventCancellation.cancel();
+        fx(() -> {transfers.forEach(row -> {if(row.cancellation!=null && !row.finished) row.cancellation.cancel();row.hideActions();row.download.setDisable(true);});status.setText("Phòng đã đóng, tác vụ truyền tệp đã dừng.");});
+    }
     private static String message(Throwable error) {
         String value = SceneManager.connectionError(error);
         return error instanceof TransferException transfer ? transfer.code() + ": " + value : value;
@@ -148,6 +155,7 @@ public final class FilePanel extends BorderPane implements AutoCloseable {
     }
     @Override public void close() {
         if (disposed) return; disposed = true; eventCancellation.cancel();
+        if(closeWatch!=null) try {closeWatch.close();} catch(Exception ignored) { }
         transfers.forEach(row -> { if (row.cancellation != null) row.cancellation.cancel(); });
         events.shutdownNow(); workers.shutdownNow();
     }

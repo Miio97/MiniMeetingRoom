@@ -398,6 +398,7 @@ class RoomFlowTest {
     }
     @Test void endedScreenBlocksReopenDuringCleanupAndEnablesImmediatelyAfterPush() throws Exception {
         startCatalog();var room=fixture.client().createRoom(host.token(),"Cleanup UI","1234",3).room();
+        RoomTestFixture.ownLegacyTestRoom(fixture::connection,room.id(),"local");
         var closed=fixture.client().leaveRoom(host.token(),room.id()).room();
         for(int index=0;index<205;index++) fixture.execute("INSERT INTO Phong_Hop(Ma_Phong_Tham_Gia,Ten_Phong,Ma_Chu_Phong,Trang_Thai,Da_Khoa,So_Nguoi_Toi_Da,Ngay_Tao) VALUES('UIHIST-"+index+"','History',"+host.user().id()+",'DA_DONG',FALSE,3,TIMESTAMP '2026-10-22 00:00:00')");
         var busy=new java.util.concurrent.atomic.AtomicBoolean(true);catalog.cleanupStatus(id -> id==room.id() && busy.get());
