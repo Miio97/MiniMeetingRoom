@@ -184,8 +184,7 @@ public final class MeetingScreen extends BorderPane {
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
             video.cameraRequestedProperty().addListener(cameraListener);
             video.cameraPendingProperty().addListener(cameraPendingListener);
-            controls.camera.disableProperty().bind(video.cameraPendingProperty().or(
-                    mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING)));
+            controls.camera.disableProperty().bind(mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
             if (video.latestStats() != null) {
                 networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
             }
@@ -241,7 +240,7 @@ public final class MeetingScreen extends BorderPane {
     private long elapsed() { return (System.nanoTime() - startNanos) / 1_000_000_000; }
     private void toggleMic() {
         if (videoRoom) {
-            if (reconnecting || disposed || mediaController.audio().pendingProperty().get()) return;
+            if (reconnecting || disposed) return;
             audioControls.toggle();
             return;
         }
@@ -249,7 +248,7 @@ public final class MeetingScreen extends BorderPane {
     }
     private void toggleCamera() {
         if (videoRoom) {
-            if (mediaController.cameraPendingProperty().get() || reconnecting || disposed) return;
+            if (reconnecting || disposed) return;
             watchCameraOperation(mediaController.toggleSelectedCamera(), true);
             return;
         }

@@ -73,6 +73,8 @@ type mediaPeer struct {
 	ctx                     context.Context
 	cancel                  context.CancelFunc
 	closed                  atomic.Bool
+	paused                  atomic.Bool
+	pausedAt                time.Time // guarded by engine.mu; devices are stopped by the client
 	closeOnce               sync.Once
 }
 type mediaLease struct {
@@ -105,6 +107,8 @@ type engine struct {
 	pli            atomic.Uint64
 	leaseSequence  atomic.Uint64
 	shutdown       func()
+	sourceRevision uint64
+	sourceChanged  chan struct{}
 }
 
 var opaque = regexp.MustCompile(`^[A-Za-z0-9_-]{1,96}$`)
@@ -180,17 +184,19 @@ func newEngine(secret string) (*engine, error) {
 		return nil, err
 	}
 	return &engine{
-		byKind:       map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}},
-		api:          webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
-		secret:       sha256.Sum256([]byte(secret)),
-		instance:     hex.EncodeToString(instanceBytes),
-		peers:        map[string]*mediaPeer{},
-		leases:       map[string]mediaLease{},
-		pending:      map[string]bool{},
-		stopVersions: map[string]uint64{},
-		slots:        make(chan struct{}, slotsCount),
-		maxPeers:     maxPeers,
-		maxLeases:    maxLeases,
+		byKind:         map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}},
+		api:            webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
+		secret:         sha256.Sum256([]byte(secret)),
+		instance:       hex.EncodeToString(instanceBytes),
+		peers:          map[string]*mediaPeer{},
+		leases:         map[string]mediaLease{},
+		pending:        map[string]bool{},
+		stopVersions:   map[string]uint64{},
+		slots:          make(chan struct{}, slotsCount),
+		maxPeers:       maxPeers,
+		maxLeases:      maxLeases,
+		sourceRevision: 1,
+		sourceChanged:  make(chan struct{}),
 	}, nil
 }
 func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +216,10 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == "GET" && r.URL.Path == "/health" {
 		reply(w, 200, map[string]any{"instance": e.instance, "pid": os.Getpid(), "ready": !e.stopped.Load()})
+		return
+	}
+	if r.Method == "GET" && r.URL.Path == "/v1/sources" {
+		e.watchSources(w, r)
 		return
 	}
 	if r.Method == "POST" && r.URL.Path == "/shutdown" {
@@ -259,14 +269,51 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sources := map[string]string{}
+		pausedSources := map[string]string{}
 		for _, peer := range e.peers {
-			if peer.kind == request.Kind && peer.publisher && peer.active.Load() && !peer.closed.Load() && peer.room == request.Room && e.liveLocked(peer.owner, peer.room, peer.generation) {
-				sources[peer.owner] = peer.id
+			if peer.kind == request.Kind && peer.publisher && !peer.closed.Load() && peer.room == request.Room && e.liveLocked(peer.owner, peer.room, peer.generation) {
+				if peer.paused.Load() {
+					pausedSources[peer.owner] = peer.id
+				} else if peer.active.Load() {
+					sources[peer.owner] = peer.id
+				}
 			}
 		}
 		peers := len(e.peers)
 		e.mu.Unlock()
-		reply(w, 200, map[string]any{"sources": sources, "active_peers": peers, "ingress_packets": e.ingress.Load(), "forwarded_packets": e.forwarded.Load(), "ingress_bytes": e.ingressBytes.Load(), "forwarded_bytes": e.forwardedBytes.Load(), "queue_drops": e.drops.Load(), "write_errors": e.writeErrors.Load(), "pli_requests": e.pli.Load()})
+		reply(w, 200, map[string]any{"sources": sources, "pausedSources": pausedSources, "active_peers": peers, "ingress_packets": e.ingress.Load(), "forwarded_packets": e.forwarded.Load(), "ingress_bytes": e.ingressBytes.Load(), "forwarded_bytes": e.forwardedBytes.Load(), "queue_drops": e.drops.Load(), "write_errors": e.writeErrors.Load(), "pli_requests": e.pli.Load()})
+	case "pause", "resume":
+		e.mu.Lock()
+		if !e.liveLocked(request.Participant, request.Room, request.Generation) {
+			e.mu.Unlock()
+			reply(w, 403, map[string]any{"code": "LEASE_EXPIRED"})
+			return
+		}
+		peer := e.peers[request.Transport]
+		if request.Kind == "SCREEN" || peer == nil || !peer.publisher || peer.closed.Load() || peer.owner != request.Participant || peer.room != request.Room || peer.generation != request.Generation || peer.kind != request.Kind {
+			e.mu.Unlock()
+			reply(w, 409, map[string]any{"code": "MEDIA_REUSE_EXPIRED"})
+			return
+		}
+		paused := request.Operation == "pause"
+		if peer.paused.Swap(paused) != paused {
+			if paused {
+				peer.pausedAt = time.Now()
+				for _, receiver := range e.peers {
+					if receiver.upstream == peer && receiver.queue != nil {
+						receiver.queue.clear()
+					}
+				}
+			} else {
+				peer.pausedAt = time.Time{}
+			}
+			e.sourcesChangedLocked()
+		}
+		e.mu.Unlock()
+		if !paused {
+			e.keyframe(peer)
+		}
+		reply(w, 200, map[string]any{"ok": true, "transport": peer.id})
 	case "renew":
 		if request.TTLMillis < 1 || request.TTLMillis > 15000 {
 			reply(w, 400, map[string]any{"code": "LEASE_LIMIT"})
@@ -355,6 +402,12 @@ func (e *engine) publisherLocked(owner string, kinds ...string) *mediaPeer {
 }
 
 func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
+	var reclaimed []*mediaPeer
+	defer func() {
+		for _, peer := range reclaimed {
+			peer.close()
+		}
+	}()
 	if !opaque.MatchString(request.Transport) || len(request.SDP) > 110000 || !strings.HasPrefix(request.SDP, "v=0") {
 		reply(w, 400, map[string]any{"code": "INVALID_OFFER"})
 		return
@@ -388,6 +441,7 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		}
 		limit -= reserve
 	}
+	reclaimed = e.reclaimPausedLocked(limit)
 	if len(e.peers)+len(e.pending) >= limit || e.pending[request.Transport] {
 		e.mu.Unlock()
 		reply(w, 429, map[string]any{"code": "MEDIA_BUSY"})
@@ -403,7 +457,7 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 		reply(w, 409, map[string]any{"code": "SHARE_IN_USE"})
 		return
 	}
-	if !publisher && (source == nil || source.id != request.Publication || source.room != request.Room || source.owner == request.Participant || !source.active.Load() || !e.liveLocked(source.owner, source.room, source.generation)) {
+	if !publisher && (source == nil || source.id != request.Publication || source.room != request.Room || source.owner == request.Participant || !source.active.Load() || source.paused.Load() || !e.liveLocked(source.owner, source.room, source.generation)) {
 		e.mu.Unlock()
 		reply(w, 403, map[string]any{"code": "SOURCE_UNAVAILABLE"})
 		return
@@ -430,6 +484,10 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 	stopVersion := e.stopVersions[request.Participant+":"+request.Kind]
 	e.pending[request.Transport] = true
 	e.mu.Unlock()
+	for _, retired := range reclaimed {
+		retired.close()
+	}
+	reclaimed = nil
 	defer func() { e.mu.Lock(); delete(e.pending, request.Transport); e.mu.Unlock() }()
 	pc, err := e.api.NewPeerConnection(webrtc.Configuration{BundlePolicy: webrtc.BundlePolicyMaxBundle})
 	if err != nil {
@@ -463,6 +521,9 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 				return
 			}
 			peer.ssrc.Store(uint32(track.SSRC()))
+			e.mu.Lock()
+			e.sourcesChangedLocked()
+			e.mu.Unlock()
 			go e.readTrack(peer, track)
 			go func() {
 				for {
@@ -533,7 +594,7 @@ func (e *engine) negotiate(w http.ResponseWriter, request controlRequest) {
 	if screenConflict {
 		valid = false
 	}
-	if !publisher && (source.closed.Load() || e.publisherLocked(source.owner, source.kind) != source) {
+	if !publisher && (source.closed.Load() || source.paused.Load() || e.publisherLocked(source.owner, source.kind) != source) {
 		valid = false
 	}
 	if !publisher {
@@ -582,6 +643,9 @@ func (e *engine) readTrack(source *mediaPeer, track *webrtc.TrackRemote) {
 		if !valid {
 			return
 		}
+		if source.paused.Load() {
+			continue
+		}
 		e.ingress.Add(1)
 		e.byKind[source.kind].ingress.Add(1)
 		e.ingressBytes.Add(uint64(len(packet.Payload)))
@@ -613,9 +677,13 @@ func (e *engine) forward(peer *mediaPeer) {
 		}
 		e.mu.Lock()
 		valid := e.liveLocked(peer.owner, peer.room, peer.generation)
+		paused := peer.upstream != nil && peer.upstream.paused.Load()
 		e.mu.Unlock()
 		if !valid || peer.closed.Load() {
 			return
+		}
+		if paused {
+			continue
 		}
 		if peer.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
 			e.drops.Add(1)
@@ -690,6 +758,7 @@ func (e *engine) removePeer(peer *mediaPeer) {
 				removed = append(removed, other)
 			}
 		}
+		e.sourcesChangedLocked()
 	}
 	e.mu.Unlock()
 	for _, item := range removed {
@@ -723,12 +792,16 @@ func (e *engine) remove(owner string, generation int64, revoke bool, expiredAt .
 			removed = append(removed, peer)
 		}
 	}
+	if len(removed) > 0 {
+		e.sourcesChangedLocked()
+	}
 	e.mu.Unlock()
 	for _, peer := range removed {
 		peer.close()
 	}
 }
 func (e *engine) expire() {
+	e.expirePaused()
 	e.mu.Lock()
 	expired := map[string]mediaLease{}
 	for owner, lease := range e.leases {
@@ -749,6 +822,7 @@ func (e *engine) close() {
 	peers := e.peers
 	e.peers = map[string]*mediaPeer{}
 	e.leases = map[string]mediaLease{}
+	e.sourcesChangedLocked()
 	e.mu.Unlock()
 	for _, peer := range peers {
 		peer.close()
@@ -787,6 +861,9 @@ func (e *engine) stopKind(owner string, generation int64, kind string) {
 			delete(e.peers, id)
 			removed = append(removed, p)
 		}
+	}
+	if len(removed) > 0 {
+		e.sourcesChangedLocked()
 	}
 	e.mu.Unlock()
 	for _, p := range removed {

@@ -27,6 +27,12 @@ public final class VideoEngineClient implements AutoCloseable {
         if (!instance.matches("[a-f0-9]{32}")) throw new SignalException("ENGINE_UNAVAILABLE");
     }
     public long processId() { return processId; }
+    /** One Java adapter long poll, independent of client count and session SQL. */
+    public JsonObject sources(long afterRevision) throws Exception {
+        JsonObject result = request("GET", "/v1/sources?after=" + Math.max(0, afterRevision), null);
+        if (!instance.equals(result.get("instance").getAsString())) throw new SignalException("ENGINE_CHANGED");
+        return result;
+    }
     public JsonObject control(JsonObject body) throws Exception {
         body = body.deepCopy(); body.addProperty("instance", instance);
         return request("POST", "/v1/control", body);
@@ -37,13 +43,15 @@ public final class VideoEngineClient implements AutoCloseable {
                 .method(method, body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofString(body.toString())).build();
         var reply = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
         try (var input = reply.body()) {
-            byte[] bytes = input.readNBytes(128 * 1024 + 1);
-            if (bytes.length > 128 * 1024) throw new SignalException("MEDIA_CONTROL_LIMIT");
+            // Full instance source snapshots cover many rooms; SDP/control replies keep the tighter cap.
+            int maximum = path.startsWith("/v1/sources?") ? 2 * 1024 * 1024 : 128 * 1024;
+            byte[] bytes = input.readNBytes(maximum + 1);
+            if (bytes.length > maximum) throw new SignalException("MEDIA_CONTROL_LIMIT");
             JsonObject result = JsonParser.parseString(new String(bytes, java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
             if (reply.statusCode() != 200) {
                 String code = result.has("code") ? result.get("code").getAsString() : "MEDIA_CONTROL_FAILED";
                 if (!java.util.Set.of("MEDIA_BUSY", "VIDEO_VIEWPORT_LIMIT", "ENGINE_CHANGED", "LEASE_EXPIRED", "ALREADY_PUBLISHING", "ALREADY_SUBSCRIBED",
-                        "SHARE_IN_USE", "INVALID_MEDIA_KIND", "SOURCE_UNAVAILABLE", "REQUEST_CONFLICT", "OFFER_REJECTED", "ICE_TIMEOUT", "MEDIA_CLOSED").contains(code)) code = "MEDIA_CONTROL_FAILED";
+                        "SHARE_IN_USE", "INVALID_MEDIA_KIND", "SOURCE_UNAVAILABLE", "REQUEST_CONFLICT", "OFFER_REJECTED", "ICE_TIMEOUT", "MEDIA_CLOSED", "MEDIA_REUSE_EXPIRED").contains(code)) code = "MEDIA_CONTROL_FAILED";
                 throw new SignalException(code);
             }
             return result;

@@ -20,6 +20,21 @@ public final class ScreenCallController implements AutoCloseable {
     private final Function<ScreenVideoInput.Choice,VideoInput> inputFactory;
     private final ScheduledThreadPoolExecutor worker=new ScheduledThreadPoolExecutor(1,Thread.ofPlatform().daemon().name("screen-client-owner").factory());
     private final AtomicBoolean closed=new AtomicBoolean(),uiScheduled=new AtomicBoolean(),statusScheduled=new AtomicBoolean();
+    private volatile MediaSourceState pushedSources;
+    private final AtomicBoolean sourcesQueued=new AtomicBoolean();
+    void mediaSources(JsonObject activeSources,JsonObject pausedSources) {
+        var next=new MediaSourceState(activeSources,pausedSources);
+        if(closed.get() || next.equals(pushedSources)) return;
+        pushedSources=next;refreshSources();
+    }
+    private void refreshSources() {
+        if(!entered || !sourcesQueued.compareAndSet(false,true)) return;
+        var observed=pushedSources;
+        submit(() -> {synchronize();return null;}).whenComplete((v,e) -> {
+            sourcesQueued.set(false);if(!closed.get() && observed!=pushedSources) refreshSources();
+        });
+    }
+    void roomChanged() { if(!closed.get()) refreshSources(); }
     private final AtomicReference<String> latestStatus=new AtomicReference<>();
     private final Semaphore admission=new Semaphore(16);
     private final Set<CompletableFuture<?>> jobs=ConcurrentHashMap.newKeySet();
@@ -69,10 +84,10 @@ public final class ScreenCallController implements AutoCloseable {
             try {synchronize();} catch(Exception | LinkageError failure) {disconnect();failed(failure);}
         },1,1,TimeUnit.SECONDS);
     }
-    public void enter() {entered=true;}
+    public void enter() {entered=true;if(pushedSources!=null) refreshSources();}
     private volatile boolean controlConnected = true;
     public void controlConnected(boolean connected) {
-        controlConnected = connected;
+        controlConnected = connected;if(!connected) pushedSources=null;
         if (!connected) submit(() -> { disconnect(); networkPaused = false; appliedNetworkPause = false; return null; });
     }
     public ReadOnlyBooleanProperty requestedProperty() {return requested.getReadOnlyProperty();}
@@ -149,7 +164,9 @@ public final class ScreenCallController implements AutoCloseable {
             long count=frames(self.get()).receivedFrames();if(count!=lastFrameCount) {lastFrameCount=count;lastProgress=System.nanoTime();}
             if(System.nanoTime()-lastProgress>TimeUnit.SECONDS.toNanos(8)) {sharing.resetOff();stop(true);throw new SignalException("SCREEN_NO_FRAMES");}
         }
-        JsonObject sources=command("SCREEN_STATE",new JsonObject()).getAsJsonObject("sources");
+        MediaSourceState sourceState=pushedSources;
+        if(sourceState==null) {JsonObject state=command("SCREEN_STATE",new JsonObject());sourceState=new MediaSourceState(state.getAsJsonObject("sources"),state.getAsJsonObject("pausedSources"));}
+        JsonObject sources=sourceState.sources();
         applyNetworkPause();
         if (networkPaused) return;
         for(String target:new ArrayList<>(subscriptions.keySet())) {
