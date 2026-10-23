@@ -35,6 +35,9 @@ import java.util.function.Consumer;
 /** Điều hướng và dừng animation của màn hình cũ, tránh Timeline chạy ngầm. */
 public final class SceneManager {
     private boolean legacyMeetingUi;
+    private boolean sidebarCollapsed;
+    public boolean sidebarCollapsed() { return sidebarCollapsed; }
+    public void sidebarCollapsed(boolean collapsed) { sidebarCollapsed = collapsed; }
     private final Stage stage;
     private Runnable cleanup = () -> { };
     private ParallelTransition transition;

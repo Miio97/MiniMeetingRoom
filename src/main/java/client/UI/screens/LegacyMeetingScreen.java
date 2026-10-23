@@ -161,8 +161,7 @@ public final class LegacyMeetingScreen extends BorderPane {
         } else if (pinnedIndex >= 0) {
             VideoTile focused = tile(pinnedIndex);
             BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused)); VBox.setVgrow(focus, Priority.ALWAYS);
-            Button back = Ui.button("Trở về lưới", "secondary", () -> { pinnedIndex = -1; renderVideos(); });
-            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label("Đã ghim · " + people.get(pinnedIndex).name(), "strong"), Ui.spacer(), back), focus);
+            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label("Đã ghim · " + people.get(pinnedIndex).name(), "strong"), Ui.spacer()), focus);
             main.setMinWidth(0); HBox.setHgrow(main, Priority.ALWAYS);
             if (people.size() > 1) {
                 VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164);

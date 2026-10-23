@@ -7,10 +7,12 @@ import javafx.animation.*;
 import javafx.beans.binding.Bindings;
 import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.Node;
 import javafx.scene.control.*;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.*;
+import javafx.scene.shape.Rectangle;
 import javafx.util.Duration;
 
 /** Media remains session-owned; this view owns only layout, controls and frame bindings. */
@@ -42,10 +44,15 @@ public final class PreJoinScreen extends BorderPane {
         if (manager.hasVideoRoom()) {
             var session = manager.sfuSession(); var video = session.video();
             nativePreview = new ImageView(); nativePreview.setPreserveRatio(true);
+            nativePreview.setSmooth(true);
             // Source image dimensions must never participate in parent size negotiation.
-            nativePreview.fitWidthProperty().bind(Bindings.max(1, preview.widthProperty().subtract(2)));
-            nativePreview.fitHeightProperty().bind(Bindings.max(1, preview.heightProperty().subtract(2)));
+            nativePreview.fitWidthProperty().bind(Bindings.max(1, preview.widthProperty()));
+            nativePreview.fitHeightProperty().bind(Bindings.max(1, preview.heightProperty()));
+            nativePreview.imageProperty().addListener((observable, before, after) -> updateViewport(preview));
+            preview.widthProperty().addListener((observable, before, after) -> updateViewport(preview));
+            preview.heightProperty().addListener((observable, before, after) -> updateViewport(preview));
             nativePreview.imageProperty().bind(video.frames(session.selfParticipantId()).imageProperty());
+            updateViewport(preview);
             nativePreview.visibleProperty().bind(video.cameraRequestedProperty().and(video.cameraPendingProperty().not()).and(nativePreview.imageProperty().isNotNull()));
             cameraControls = new CameraControls(video, true);
             audioControls = new AudioControls(video.audio());
@@ -118,10 +125,36 @@ public final class PreJoinScreen extends BorderPane {
         footer.getStyleClass().add("prejoin-footer"); setBottom(footer);
     }
 
+    private void updateViewport(PreviewPane preview) {
+        if (nativePreview == null) return;
+        var img = nativePreview.getImage();
+        double tileW = preview.getWidth(), tileH = preview.getHeight();
+        if (img == null || img.getWidth() <= 0 || img.getHeight() <= 0 || tileW <= 0 || tileH <= 0) {
+            nativePreview.setViewport(null);
+            return;
+        }
+        double imgW = img.getWidth(), imgH = img.getHeight();
+        double tileRatio = tileW / tileH, imgRatio = imgW / imgH;
+        double vpW = imgW, vpH = imgH, vpX = 0, vpY = 0;
+        if (imgRatio > tileRatio) {
+            vpW = imgH * tileRatio;
+            vpX = (imgW - vpW) / 2.0;
+        } else if (imgRatio < tileRatio) {
+            vpH = imgW / tileRatio;
+            vpY = (imgH - vpH) / 2.0;
+        }
+        nativePreview.setViewport(new Rectangle2D(vpX, vpY, vpW, vpH));
+    }
+
     /** Width drives height, with a bounded 16:9 surface independent of source resolution. */
     private static final class PreviewPane extends StackPane {
         PreviewPane() {
             getStyleClass().add("prejoin-preview");
+            Rectangle clip = new Rectangle();
+            clip.setArcWidth(24); clip.setArcHeight(24);
+            clip.widthProperty().bind(widthProperty());
+            clip.heightProperty().bind(heightProperty());
+            setClip(clip);
             setMinWidth(0); setMinHeight(USE_PREF_SIZE); setMaxSize(420 * 16.0 / 9, 420);
         }
         @Override public Orientation getContentBias() { return Orientation.HORIZONTAL; }

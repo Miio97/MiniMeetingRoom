@@ -261,20 +261,37 @@ public final class LobbyScreen extends BorderPane {
         catalogWatch.rooms(visible);
     }
     private javafx.scene.Node roomRow(RoomInfo room) {
-            boolean live = "DANG_HOAT_DONG".equals(room.status()) || "CHO".equals(room.status());
-            boolean canReopen = "DA_DONG".equals(room.status()) && !cleaningRooms.contains(room.id()) && manager.authenticatedUser() != null
-                    && room.hostId() == manager.authenticatedUser().id();
-            Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
-            Label title = Ui.label(room.name(), "room-title");
-            title.setMinWidth(0); title.setMaxWidth(Double.MAX_VALUE); HBox.setHgrow(title, Priority.ALWAYS);
-            badge.setMinWidth(Region.USE_PREF_SIZE); badge.setWrapText(false);
-            VBox text = Ui.column(6, Ui.row(10, title, badge), Ui.label(room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + VietnamTime.formatDateTime(room.createdAt()), "room-meta"));
-            text.setMinWidth(0); HBox.setHgrow(text, Priority.ALWAYS);
-            Button action = Ui.button(cleaningRooms.contains(room.id())?"Đang dọn dữ liệu…":canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng", live || canReopen ? "primary" : "secondary", () -> {
-                if (canReopen) { reopen(room); return; }
-                code.setText(room.code()); pin.clear(); pin.requestFocus();
-            }); action.setId("room-action-" + room.id()); action.setDisable(!live && !canReopen); action.setMinWidth(90);
-            HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action); item.getStyleClass().add("room-row"); item.setUserData(room.id());return item;
+        boolean live = "DANG_HOAT_DONG".equals(room.status()) || "CHO".equals(room.status());
+        boolean canReopen = "DA_DONG".equals(room.status()) && !cleaningRooms.contains(room.id()) && manager.authenticatedUser() != null
+                && room.hostId() == manager.authenticatedUser().id();
+        Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
+        badge.setMinWidth(Region.USE_PREF_SIZE);
+        badge.setWrapText(false);
+
+        Label title = Ui.label(room.name(), "room-title");
+        title.setMinWidth(Region.USE_PREF_SIZE);
+        title.setMaxWidth(380);
+        title.setTooltip(new Tooltip(room.name()));
+        HBox titleRow = Ui.row(8, title, badge);
+        titleRow.setAlignment(Pos.CENTER_LEFT);
+        Label meta = Ui.label(room.code() + "  ·  " + room.people() + "/" + room.capacity() + " người  ·  " + VietnamTime.formatDateTime(room.createdAt()), "room-meta");
+        VBox text = Ui.column(6, titleRow, meta);
+        text.setMinWidth(0);
+        HBox.setHgrow(text, Priority.ALWAYS);
+
+        Button action = Ui.button(cleaningRooms.contains(room.id()) ? "Đang dọn dữ liệu…" : canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng",
+                live || canReopen ? "primary" : "secondary", () -> {
+            if (canReopen) { reopen(room); return; }
+            code.setText(room.code()); pin.clear(); pin.requestFocus();
+        });
+        action.setId("room-action-" + room.id());
+        action.setDisable(!live && !canReopen);
+        action.setMinWidth(96);
+        HBox item = Ui.row(14, Ui.avatar(room.name(), 40), text, action);
+        item.setAlignment(Pos.CENTER_LEFT);
+        item.getStyleClass().add("room-row");
+        item.setUserData(room.id());
+        return item;
     }
 
     private void reopen(RoomInfo room) {
