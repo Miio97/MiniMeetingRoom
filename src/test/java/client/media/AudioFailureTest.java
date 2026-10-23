@@ -53,6 +53,39 @@ class AudioFailureTest {
         } finally { controller.close(); controller.closeComplete().get(3, TimeUnit.SECONDS); }
     }
 
+    @Test void blockedReceiverDoesNotHoldCaptureControlQueue() throws Exception {
+        CountDownLatch receiving=new CountDownLatch(1), release=new CountDownLatch(1);
+        var controller=new AudioCallController((type,body,id) -> {
+            JsonObject state=new JsonObject(), sources=new JsonObject();sources.addProperty("other","publication");state.add("sources",sources);
+            return CompletableFuture.completedFuture(state);
+        },this::room,() -> "self",true,new MicrophoneConsentStore(temporary.resolve("independent.properties")),
+            (headless,capture,mic,speaker) -> {
+                receiving.countDown();
+                try {release.await(8,TimeUnit.SECONDS);} catch(InterruptedException interrupted) {Thread.currentThread().interrupt();}
+                throw new IllegalStateException("RECEIVER_TEST_FINISHED");
+            });
+        try {
+            controller.enter();assertTrue(receiving.await(4,TimeUnit.SECONDS));
+            controller.access(true).get(1,TimeUnit.SECONDS);
+            controller.selectMicrophone(null).get(1,TimeUnit.SECONDS);
+            assertEquals(MicrophoneConsentStore.Access.ALLOWED,controller.choice().get(1,TimeUnit.SECONDS).access());
+        } finally {release.countDown();controller.close();controller.closeComplete().get(4,TimeUnit.SECONDS);}
+    }
+
+    @Test void pushedEmptySnapshotReplacesPeriodicStateRequestsWithoutOpeningDevices() throws Exception {
+        AtomicInteger states=new AtomicInteger(), devices=new AtomicInteger();
+        var controller=new AudioCallController((type,body,id) -> {
+            states.incrementAndGet();return CompletableFuture.completedFuture(new JsonObject());
+        },this::room,() -> "self",true,new MicrophoneConsentStore(temporary.resolve("push.properties")),
+                (headless,capture,mic,speaker) -> {devices.incrementAndGet();throw new AssertionError("UNEXPECTED_DEVICE");});
+        try {
+            controller.mediaSources(new JsonObject(),new JsonObject());controller.enter();
+            for(int i=0;i<1000;i++) controller.mediaSources(new JsonObject(),new JsonObject());
+            Thread.sleep(1200);controller.choice().get(2,TimeUnit.SECONDS);
+            assertEquals(0,states.get());assertEquals(0,devices.get());
+        } finally {controller.close();controller.closeComplete().get(4,TimeUnit.SECONDS);}
+    }
+
     @Test void closingDoesNotWaitForeverForAnUninterruptibleNativeCall() throws Exception {
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
         var controller = new AudioCallController((type, body, id) -> CompletableFuture.completedFuture(new JsonObject()),

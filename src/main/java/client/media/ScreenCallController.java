@@ -21,6 +21,21 @@ public final class ScreenCallController implements AutoCloseable {
     private final SystemAudioController systemAudio;
     private final ScheduledThreadPoolExecutor worker=new ScheduledThreadPoolExecutor(1,Thread.ofPlatform().daemon().name("screen-client-owner").factory());
     private final AtomicBoolean closed=new AtomicBoolean(),uiScheduled=new AtomicBoolean(),statusScheduled=new AtomicBoolean();
+    private volatile MediaSourceState pushedSources;
+    private final AtomicBoolean sourcesQueued=new AtomicBoolean();
+    void mediaSources(JsonObject activeSources,JsonObject pausedSources) {
+        var next=new MediaSourceState(activeSources,pausedSources);
+        if(closed.get() || next.equals(pushedSources)) return;
+        pushedSources=next;refreshSources();
+    }
+    private void refreshSources() {
+        if(!entered || !sourcesQueued.compareAndSet(false,true)) return;
+        var observed=pushedSources;
+        submit(() -> {synchronize();return null;}).whenComplete((v,e) -> {
+            sourcesQueued.set(false);if(!closed.get() && observed!=pushedSources) refreshSources();
+        });
+    }
+    void roomChanged() { if(!closed.get()) refreshSources(); }
     private final AtomicReference<String> latestStatus=new AtomicReference<>();
     private final Semaphore admission=new Semaphore(16);
     private final Set<CompletableFuture<?>> jobs=ConcurrentHashMap.newKeySet();
@@ -99,11 +114,11 @@ public final class ScreenCallController implements AutoCloseable {
             try {synchronize();} catch(Exception | LinkageError failure) {failedReceive(failure);}
         },1,1,TimeUnit.SECONDS);
     }
-    public void enter() {entered=true;systemAudio.enter();}
+    public void enter() {entered=true;systemAudio.enter();if(pushedSources!=null) refreshSources();}
     private volatile boolean controlConnected = true;
     public void controlConnected(boolean connected) {
-        controlConnected = connected;
         systemAudio.controlConnected(connected);
+        controlConnected = connected;if(!connected) pushedSources=null;
         if (!connected) submit(() -> { disconnect(); networkPaused = false; appliedNetworkPause = false; return null; });
     }
     public ReadOnlyBooleanProperty requestedProperty() {return requested.getReadOnlyProperty();}
@@ -211,11 +226,15 @@ public final class ScreenCallController implements AutoCloseable {
             try {stop(true);} catch(Exception cleanup) {failure.addSuppressed(cleanup);}
             failed(failure);
         }
+        MediaSourceState sourceState=pushedSources;
+        // The first outgoing RTP must be confirmed before voice priority can pause this publication.
+        if(sourceState==null || active && !publicationConfirmed) {
+            JsonObject state=command("SCREEN_STATE",new JsonObject());
+            publicationConfirmed |= ownPublication!=null && state.has("publication") && ownPublication.equals(state.get("publication").getAsString());
+            if(sourceState==null) sourceState=new MediaSourceState(state.getAsJsonObject("sources"),state.getAsJsonObject("pausedSources"));
+        }
         applyNetworkPause();
-        JsonObject state=command("SCREEN_STATE",new JsonObject());
-        publicationConfirmed |= ownPublication!=null && state.has("publication") && ownPublication.equals(state.get("publication").getAsString());
-        applyNetworkPause();
-        JsonObject sources=state.getAsJsonObject("sources");
+        JsonObject sources=sourceState.sources();
         if (networkPaused) return;
         for(String target:new ArrayList<>(subscriptions.keySet())) {
             var subscription=subscriptions.get(target);

@@ -59,6 +59,7 @@ class VideoCoordinatorTest {
     private ThreadPoolExecutor controls;
     private final AtomicReference<SignalingServer.Connection> authenticated = new AtomicReference<>();
     private final List<CountDownLatch> gates = new ArrayList<>();
+    private final java.util.concurrent.BlockingQueue<SignalMessage> events = new java.util.concurrent.LinkedBlockingQueue<>();
 
     @BeforeAll @Timeout(60)
     static void certificates() throws Exception { tls = RoomTestFixture.certificates(temporary); }
@@ -96,7 +97,7 @@ class VideoCoordinatorTest {
         signaling.start();
         var account = database.account("MediaHost", "Chủ phòng");
         client = new SignalingClient(new SignalingClient.Settings("localhost", signaling.port(), null,
-                SignalWire.DEFAULT_MAX_BYTES), tls.client(), ignored -> { });
+                SignalWire.DEFAULT_MAX_BYTES), tls.client(), events::offer);
         client.connect(account.token());
         client.request("CAPTURE", null, new JsonObject()).get(6, TimeUnit.SECONDS);
         connection = authenticated.get();
@@ -248,6 +249,63 @@ class VideoCoordinatorTest {
                 new CreateRoomParams("Cuộc họp tiếp tục", "1234", 3, false));
     }
 
+    @Test
+    void mediaWatchPushIsRecipientScopedAndPreservesPausedPublication() throws Exception {
+        MemberAuthorization host = joinAndGrant(create());
+        var preview = rooms.getRoom(connection.id(), host.roomId());
+        var account = database.account("MediaGuest", "Người tham gia");
+        var guestEvents = new java.util.concurrent.LinkedBlockingQueue<SignalMessage>();
+        try (var guest = new SignalingClient(new SignalingClient.Settings("localhost", signaling.port(), null,
+                SignalWire.DEFAULT_MAX_BYTES), tls.client(), guestEvents::offer)) {
+            guest.connect(account.token()); guest.request("CAPTURE", null, new JsonObject()).get(6, TimeUnit.SECONDS);
+            var guestConnection = authenticated.get();
+            rooms.join(guestConnection.principal(), guestConnection.id(), guestConnection.generation(), UUID.randomUUID().toString(),
+                    host.roomId(), preview.joinCode(), "1234", false, false);
+            var member = rooms.assertMember(guestConnection.id(), host.roomId());
+            JsonObject initial = coordinator.handle(guestConnection, guestConnection.message("MEDIA_WATCH", UUID.randomUUID().toString(), host.roomId(), null, new JsonObject()));
+            assertTrue(initial.get("snapshot").getAsBoolean()); assertEquals(member.generation(), initial.get("generation").getAsLong());
+            assertTrue(initial.get("revision").getAsLong() >= 1);
+            rooms.setMediaRequested(connection.id(), "VIDEO", true);
+            fake.source(host, "VIDEO", "host-video", false);
+            SignalMessage published = awaitSources(guestEvents, "sources", "VIDEO", host.participantId(), "host-video");
+            assertEquals(host.roomId(), published.roomId());
+            assertEquals(member.generation(), published.body().get("generation").getAsLong());
+            JsonObject own = coordinator.handle(connection, connection.message("MEDIA_WATCH", UUID.randomUUID().toString(), host.roomId(), null, new JsonObject()));
+            assertFalse(own.getAsJsonObject("sources").getAsJsonObject("VIDEO").has(host.participantId()), "Own source must never loop back");
+            rooms.setMediaRequested(connection.id(), "VIDEO", false);
+            fake.source(host, "VIDEO", "host-video", true);
+            SignalMessage paused = awaitSources(guestEvents, "pausedSources", "VIDEO", host.participantId(), "host-video");
+            assertFalse(paused.body().getAsJsonObject("sources").getAsJsonObject("VIDEO").has(host.participantId()));
+            assertTrue(paused.body().get("revision").getAsLong() > published.body().get("revision").getAsLong());
+            JsonObject resynchronized = coordinator.handle(guestConnection, guestConnection.message("MEDIA_WATCH", UUID.randomUUID().toString(), host.roomId(), null, new JsonObject()));
+            assertEquals("host-video", resynchronized.getAsJsonObject("pausedSources").getAsJsonObject("VIDEO").get(host.participantId()).getAsString(), "A repeat watch must return the authoritative cache even if no new push is due");
+            assertTrue(resynchronized.get("revision").getAsLong() >= paused.body().get("revision").getAsLong());
+            // Wrong membership generation cannot be resurrected by a cached engine event.
+            fake.source(new MemberAuthorization(host.roomId(), host.participantId(), host.generation() + 1, host.role(), host.mediaState()), "VIDEO", "stale-video", false);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+            boolean observed = false;
+            while (System.nanoTime() < deadline) {
+                SignalMessage event = guestEvents.poll(200, TimeUnit.MILLISECONDS);
+                if (event != null && event.type().equals("MEDIA_SOURCES") && event.body().get("revision").getAsLong() > paused.body().get("revision").getAsLong()) {
+                    assertFalse(event.body().getAsJsonObject("sources").getAsJsonObject("VIDEO").has(host.participantId())); observed = true; break;
+                }
+            }
+            assertTrue(observed, "Generation change must produce a filtered authoritative snapshot");
+        }
+    }
+
+    private SignalMessage awaitSources(java.util.concurrent.BlockingQueue<SignalMessage> queue, String field, String kind, String participant, String publication) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+        while (System.nanoTime() < deadline) {
+            SignalMessage event = queue.poll(200, TimeUnit.MILLISECONDS);
+            if (event != null && event.type().equals("MEDIA_SOURCES")) {
+                JsonObject sources = event.body().getAsJsonObject(field).getAsJsonObject(kind);
+                if (sources.has(participant) && sources.get(participant).getAsString().equals(publication)) return event;
+            }
+        }
+        throw new AssertionError("Media source snapshot was not pushed");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"AUDIO", "VIDEO", "SCREEN"})
     void hostStopReachesEngineForEachMediaKind(String kind) throws Exception {
@@ -333,6 +391,9 @@ class VideoCoordinatorTest {
         private final Set<String> leases = ConcurrentHashMap.newKeySet();
         private final ConcurrentHashMap<String, AtomicInteger> renewals = new ConcurrentHashMap<>();
         private final ConcurrentHashMap<String, AtomicInteger> stops = new ConcurrentHashMap<>();
+        private final Object sourceLock = new Object();
+        private final JsonObject sourceRooms = new JsonObject();
+        private long sourceRevision = 1;
 
         FakeEngine() throws Exception {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 16);
@@ -340,6 +401,17 @@ class VideoCoordinatorTest {
             server.createContext("/health", exchange -> {
                 JsonObject body = new JsonObject(); body.addProperty("instance", "a".repeat(32));
                 body.addProperty("pid", ProcessHandle.current().pid());
+                byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (var output = exchange.getResponseBody()) { output.write(bytes); }
+            });
+            server.createContext("/v1/sources", exchange -> {
+                long after = Long.parseLong(exchange.getRequestURI().getQuery().substring("after=".length()));
+                JsonObject body = new JsonObject();
+                synchronized (sourceLock) {
+                    if (after == sourceRevision) try { sourceLock.wait(500); } catch (InterruptedException ended) { Thread.currentThread().interrupt(); }
+                    body.addProperty("instance", "a".repeat(32)); body.addProperty("revision", sourceRevision); body.add("rooms", sourceRooms.deepCopy());
+                }
                 byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, bytes.length);
                 try (var output = exchange.getResponseBody()) { output.write(bytes); }
@@ -368,6 +440,22 @@ class VideoCoordinatorTest {
         }
 
         int port() { return server.getAddress().getPort(); }
+        void source(MemberAuthorization member, String kind, String publication, boolean paused) {
+            synchronized (sourceLock) {
+                JsonObject room = sourceRooms.getAsJsonObject(member.roomId());
+                if (room == null) {
+                    room = new JsonObject(); room.add("generations", new JsonObject());
+                    for (String field : List.of("sources", "pausedSources")) {
+                        JsonObject kinds = new JsonObject(); for (String media : List.of("VIDEO", "AUDIO", "SCREEN")) kinds.add(media, new JsonObject()); room.add(field, kinds);
+                    }
+                    sourceRooms.add(member.roomId(), room);
+                }
+                room.getAsJsonObject("generations").addProperty(member.participantId(), member.generation());
+                room.getAsJsonObject(paused ? "sources" : "pausedSources").getAsJsonObject(kind).remove(member.participantId());
+                room.getAsJsonObject(paused ? "pausedSources" : "sources").getAsJsonObject(kind).addProperty(member.participantId(), publication);
+                sourceRevision++; sourceLock.notifyAll();
+            }
+        }
         boolean has(MemberAuthorization member) { return leases.contains(key(member)); }
         int renewals(MemberAuthorization member) { return renewals.getOrDefault(key(member), new AtomicInteger()).get(); }
         int stops(MemberAuthorization member, String kind) { return stops.getOrDefault(key(member) + "/" + kind, new AtomicInteger()).get(); }

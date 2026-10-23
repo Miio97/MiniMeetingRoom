@@ -253,6 +253,41 @@ func realFanout(t *testing.T, kind string) {
 	if e.forwarded.Load() == 0 || e.forwardedBytes.Load() == 0 {
 		t.Fatal("forward diagnostics absent")
 	}
+	if kind != "SCREEN" {
+		request := controlRequest{Operation: "pause", Kind: kind, Room: "room-a", Participant: "publisher", Generation: 1, Transport: "publication-a"}
+		if status, _ := control(t, e, request); status != 200 {
+			t.Fatal("publication pause failed")
+		}
+		// Let any packet already in a transport write finish, then verify no further fanout.
+		time.Sleep(100 * time.Millisecond)
+		before := e.forwarded.Load()
+		time.Sleep(100 * time.Millisecond)
+		if e.forwarded.Load() != before {
+			t.Fatal("paused publisher continued forwarding")
+		}
+		for _, frames := range channels {
+			for len(frames) > 0 {
+				<-frames
+			}
+		}
+		request.Operation = "resume"
+		if status, _ := control(t, e, request); status != 200 {
+			t.Fatal("publication resume failed")
+		}
+		for _, frames := range channels {
+			select {
+			case <-frames:
+			case <-time.After(2 * time.Second):
+				t.Fatal("retained receiver did not resume RTP")
+			}
+		}
+		e.mu.Lock()
+		count := len(e.peers)
+		e.mu.Unlock()
+		if count != 3+extra {
+			t.Fatal("resume recreated transports")
+		}
+	}
 	control(t, e, controlRequest{Operation: "revoke", Room: "room-a", Participant: "receiver-a", Generation: 1})
 	e.mu.Lock()
 	count := len(e.peers)

@@ -70,7 +70,7 @@ public final class AudioControls extends VBox {
         dialog.setOnHidden(event -> { permissionDialog=null; result.complete(dialog.getResult()==allow); }); dialog.show(); return result;
     }
     public void toggle() {
-        if(disposed || prompting || (operation != null && !operation.isDone()) || audio.pendingProperty().get()) return;
+        if(disposed || prompting) return;
         if(!loaded) {
             initialChoice.whenComplete((choice,failure) -> Platform.runLater(() -> {
                 if(!disposed && loaded && !prompting && (operation == null || operation.isDone()) && !audio.pendingProperty().get()) toggle();
@@ -106,9 +106,8 @@ public final class AudioControls extends VBox {
         return toggle;
     }
     private void update() {
-        boolean busy = (operation != null && !operation.isDone()) || audio.pendingProperty().get();
-        toggle.setText(prompting ? "Đang xin quyền…" : busy ? "Đang xử lý…" : audio.requestedProperty().get() ? "Tắt mic" : "Bật mic");
-        toggle.setDisable(!loaded || prompting || busy);
+        toggle.setText(prompting ? "Đang xin quyền…" : audio.requestedProperty().get() ? "Tắt mic" : "Bật mic");
+        toggle.setDisable(!loaded || prompting);
     }
     public javafx.beans.property.ReadOnlyStringProperty errorProperty() { return error.textProperty(); }
     public void dispose() {

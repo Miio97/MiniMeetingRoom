@@ -18,6 +18,10 @@ public final class VideoCoordinator implements AutoCloseable {
     private final ConcurrentHashMap<String, Owner> owners = new ConcurrentHashMap<>();
     private final Object[] permissionLocks = java.util.stream.IntStream.range(0, 64).mapToObj(ignored -> new Object()).toArray();
     private final java.util.Set<String> renewing = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> watching = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, JsonObject> lastPushed = new ConcurrentHashMap<>();
+    private final ExecutorService sourceWatcher = Executors.newSingleThreadExecutor(Thread.ofPlatform().daemon().name("media-source-watch").factory());
+    private volatile JsonObject sourceSnapshot;
     private final ThreadPoolExecutor controls;
     private final AtomicBoolean closed = new AtomicBoolean();
     public VideoCoordinator(RoomService rooms, VideoEngineClient engine) {
@@ -26,6 +30,7 @@ public final class VideoCoordinator implements AutoCloseable {
     }
     VideoCoordinator(RoomService rooms, VideoEngineClient engine, ThreadPoolExecutor controls) {
         this.rooms = rooms; this.engine = engine; this.controls = controls;
+        sourceWatcher.execute(this::watchSources);
     }
     private JsonObject envelope(String operation, MemberAuthorization member) {
         JsonObject body = new JsonObject(); body.addProperty("operation", operation); body.addProperty("room", member.roomId());
@@ -53,6 +58,14 @@ public final class VideoCoordinator implements AutoCloseable {
         Owner owner = new Owner(connection, member); owners.put(connection.id(), owner); grant(owner);
         String kind = request.type().startsWith("SCREEN_AUDIO_") ? "SCREEN_AUDIO" : request.type().startsWith("AUDIO_") ? "AUDIO" : request.type().startsWith("SCREEN_") ? "SCREEN" : "VIDEO";
         switch (request.type()) {
+            case "MEDIA_WATCH" -> {
+                watching.add(connection.id());
+                JsonObject snapshot = sourceSnapshot;
+                if (snapshot == null) snapshot = engine.sources(0);
+                JsonObject reply = recipientSnapshot(owner, snapshot);
+                lastPushed.put(connection.id(), snapshotContent(reply));
+                return reply;
+            }
             case "VIDEO_STATE", "AUDIO_STATE", "SCREEN_STATE", "SCREEN_AUDIO_STATE" -> {
                 JsonObject stateBody = envelope("state", member); stateBody.addProperty("kind", kind);
                 JsonObject state = engine.control(stateBody);
@@ -67,8 +80,11 @@ public final class VideoCoordinator implements AutoCloseable {
                 for (var entry : state.getAsJsonObject("sources").entrySet()) {
                     if (!entry.getKey().equals(member.participantId()) && participants.stream().anyMatch(p -> p.participantId().equals(entry.getKey()))) sources.add(entry.getKey(), entry.getValue());
                 }
-                JsonObject result = new JsonObject(); result.add("sources", sources);
-                // A SCREEN sender may pause only after this exact publication has sent RTP.
+                JsonObject paused = new JsonObject();
+                if (state.has("pausedSources")) for (var entry : state.getAsJsonObject("pausedSources").entrySet()) {
+                    if (!entry.getKey().equals(member.participantId()) && participants.stream().anyMatch(p -> p.participantId().equals(entry.getKey()))) paused.add(entry.getKey(), entry.getValue());
+                }
+                JsonObject result = new JsonObject(); result.add("sources", sources); result.add("pausedSources", paused);
                 if(kind.equals("SCREEN") && state.getAsJsonObject("sources").has(member.participantId()))
                     result.add("publication",state.getAsJsonObject("sources").get(member.participantId()));
                 return result;
@@ -82,6 +98,22 @@ public final class VideoCoordinator implements AutoCloseable {
             case "VIDEO_STOP", "AUDIO_STOP", "SCREEN_STOP", "SCREEN_AUDIO_STOP" -> {
                 JsonObject stop = envelope("stop", member); stop.addProperty("kind", kind); engine.control(stop); if(!kind.equals("SCREEN_AUDIO")) rooms.setMediaRequested(connection.id(), kind, false);
                 JsonObject result = new JsonObject(); result.addProperty("ok", true); return result;
+            }
+            case "VIDEO_PAUSE", "AUDIO_PAUSE", "VIDEO_RESUME", "AUDIO_RESUME" -> {
+                boolean resume = request.type().endsWith("_RESUME");
+                JsonObject body = envelope(resume ? "resume" : "pause", member);
+                body.addProperty("kind", kind); body.addProperty("transport", text(request.body(), "transport", 96));
+                // Requested intent precedes asynchronous SFU work so a concurrent host stop wins.
+                rooms.setMediaRequested(connection.id(), kind, resume);
+                JsonObject reply;
+                try { reply = engine.control(body); }
+                catch (Exception failure) { if (resume) rooms.setMediaRequested(connection.id(), kind, false); throw failure; }
+                MemberAuthorization after = rooms.assertMember(connection.id(), member.roomId());
+                if (after.generation() != member.generation() || connection.isClosed() || resume && !requested(after.mediaState(), kind)) {
+                    JsonObject stop = envelope("stop", member); stop.addProperty("kind", kind); engine.control(stop);
+                    throw new SignalException("MEDIA_CLOSED");
+                }
+                return reply;
             }
             case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE" -> {
                 JsonObject body = envelope(request.type().endsWith("_PUBLISH") ? "publish" : "subscribe", member);
@@ -100,12 +132,96 @@ public final class VideoCoordinator implements AutoCloseable {
                 catch (Exception failure) { if (request.type().endsWith("_PUBLISH") && !kind.equals("SCREEN_AUDIO")) rooms.setMediaRequested(connection.id(), kind, false); throw failure; }
                 if (connection.isClosed()) { revoke(connection.id()); throw new SignalException("CONNECTION_CLOSED"); }
                 MemberAuthorization after = rooms.assertMember(connection.id(), member.roomId());
-                if(request.type().endsWith("_PUBLISH") && !requested(after.mediaState(),kind)) {
+                if(after.generation() != member.generation() || request.type().endsWith("_PUBLISH") && !requested(after.mediaState(),kind)) {
                     JsonObject stop=envelope("stop",member);stop.addProperty("kind",kind);engine.control(stop);throw new SignalException("MEDIA_CLOSED");
                 }
                 return reply;
             }
             default -> throw new SignalException("UNKNOWN_OPERATION");
+        }
+    }
+    private static JsonObject emptyKinds() {
+        JsonObject kinds = new JsonObject();
+        for (String kind : java.util.List.of("VIDEO", "AUDIO", "SCREEN")) kinds.add(kind, new JsonObject());
+        return kinds;
+    }
+    private static JsonObject snapshotContent(JsonObject snapshot) {
+        JsonObject content = snapshot.deepCopy(); content.remove("revision"); return content;
+    }
+    /** Each push is a complete filtered snapshot, so skipped global revisions are safe. */
+    private JsonObject recipientSnapshot(Owner owner, JsonObject snapshot) throws Exception {
+        if (owner.connection().isClosed() || !owner.connection().principal().expiresAt().isAfter(java.time.Instant.now())) throw new SignalException("SESSION_INVALID");
+        MemberAuthorization member = rooms.assertMember(owner.connection().id(), owner.member().roomId());
+        if (member.generation() != owner.member().generation()) throw new SignalException("MEDIA_CLOSED");
+        JsonObject result = new JsonObject(); result.addProperty("generation", member.generation());
+        result.addProperty("revision", snapshot.get("revision").getAsLong()); result.addProperty("snapshot", true);
+        JsonObject active = emptyKinds(), paused = emptyKinds(); result.add("sources", active); result.add("pausedSources", paused);
+        JsonObject room = snapshot.getAsJsonObject("rooms").getAsJsonObject(member.roomId());
+        if (room == null) return result;
+        var participants = rooms.getRoom(owner.connection().id(), member.roomId()).participants();
+        for (Owner source : owners.values()) {
+            if (!source.member().roomId().equals(member.roomId()) || source.member().participantId().equals(member.participantId())) continue;
+            String id = source.member().participantId();
+            if (participants.stream().noneMatch(p -> p.participantId().equals(id)) || !generationMatches(room, source)) continue;
+            MemberAuthorization live;
+            try { live = rooms.assertMember(source.connection().id(), member.roomId()); }
+            catch (RuntimeException ended) { continue; }
+            if (live.generation() != source.member().generation()) continue;
+            for (String kind : java.util.List.of("VIDEO", "AUDIO", "SCREEN")) {
+                JsonObject available = room.getAsJsonObject("sources").getAsJsonObject(kind);
+                JsonObject retained = room.getAsJsonObject("pausedSources").getAsJsonObject(kind);
+                if (available.has(id) && requested(live.mediaState(), kind)) active.getAsJsonObject(kind).add(id, available.get(id));
+                if (retained.has(id)) paused.getAsJsonObject(kind).add(id, retained.get(id));
+            }
+        }
+        return result;
+    }
+    private static boolean generationMatches(JsonObject room, Owner owner) {
+        JsonObject generations = room.getAsJsonObject("generations");
+        return generations != null && generations.has(owner.member().participantId())
+                && generations.get(owner.member().participantId()).getAsLong() == owner.member().generation();
+    }
+    private void watchSources() {
+        long revision = 0, backoff = 250;
+        while (!closed.get() && !Thread.currentThread().isInterrupted()) {
+            try {
+                JsonObject snapshot = engine.sources(revision);
+                long next = snapshot.get("revision").getAsLong();
+                if (next != revision || sourceSnapshot == null) {
+                    sourceSnapshot = snapshot; revision = next;
+                    confirmSources(snapshot);
+                    for (String id : watching) {
+                        Owner owner = owners.get(id);
+                        if (owner == null || owner.connection().isClosed()) { watching.remove(id); lastPushed.remove(id); continue; }
+                        try {
+                            JsonObject body = recipientSnapshot(owner, snapshot);
+                            JsonObject content = snapshotContent(body);
+                            if (!content.equals(lastPushed.put(id, content))) owner.connection().event("MEDIA_SOURCES", owner.member().roomId(), revision, body);
+                        } catch (RuntimeException | SignalException ended) { watching.remove(id); lastPushed.remove(id); }
+                    }
+                }
+                backoff = 250;
+            } catch (InterruptedException ended) { Thread.currentThread().interrupt(); return; }
+            catch (Exception failure) {
+                if (closed.get()) return;
+                Diagnostics.current().failure("media.sources.failed", failure, Map.of("phase", "snapshot"));
+                try { Thread.sleep(backoff); } catch (InterruptedException ended) { Thread.currentThread().interrupt(); return; }
+                backoff = Math.min(5000, backoff * 2);
+            }
+        }
+    }
+    private void confirmSources(JsonObject snapshot) {
+        for (Owner owner : owners.values()) {
+            try {
+                MemberAuthorization live = rooms.assertMember(owner.connection().id(), owner.member().roomId());
+                if (live.generation() != owner.member().generation()) continue;
+                JsonObject room = snapshot.getAsJsonObject("rooms").getAsJsonObject(live.roomId());
+                for (String kind : java.util.List.of("VIDEO", "AUDIO", "SCREEN")) {
+                    boolean active = room != null && generationMatches(room, owner)
+                            && room.getAsJsonObject("sources").getAsJsonObject(kind).has(live.participantId());
+                    switch (kind) { case "AUDIO" -> rooms.confirmAudio(owner.connection().id(), active); case "SCREEN" -> rooms.confirmShare(owner.connection().id(), active); default -> rooms.confirmVideo(owner.connection().id(), active); }
+                }
+            } catch (RuntimeException ended) { /* Room closure/revocation owns cleanup. */ }
         }
     }
     public void validated(SignalingServer.Connection connection) {
@@ -152,6 +268,7 @@ public final class VideoCoordinator implements AutoCloseable {
     private void revokeLocked(Owner owner) {
         // Delayed cleanup belongs to this membership, even when the connection has joined another room run.
         owners.remove(owner.connection().id(), owner);
+        if (!owners.containsKey(owner.connection().id())) { watching.remove(owner.connection().id()); lastPushed.remove(owner.connection().id()); }
         long start = System.nanoTime();
         try { engine.control(envelope("revoke", owner.member())); }
         catch (Exception failure) { Diagnostics.current().failure("video.revoke.failed", failure, Map.of("phase", "close")); }
@@ -168,6 +285,6 @@ public final class VideoCoordinator implements AutoCloseable {
     }
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        controls.shutdownNow(); owners.keySet().forEach(this::revoke);
+        sourceWatcher.shutdownNow(); controls.shutdownNow(); owners.keySet().forEach(this::revoke); watching.clear(); lastPushed.clear();
     }
 }

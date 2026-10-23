@@ -56,15 +56,88 @@ public final class MeetingSession implements AutoCloseable {
     private volatile RoomSnapshot snapshot;
     private volatile String self;
     private volatile client.media.VideoCallController video;
+    // Media requests never wait on the room owner thread. Each media kind retains wire order.
+    private final Object mediaAdmission = new Object();
+    private final java.util.Map<String, CompletableFuture<Void>> mediaTails = new java.util.HashMap<>();
+    private int mediaPending;
+    private volatile boolean leavingRoom;
+    private volatile long mediaRevision = -1;
+    private volatile String mediaRevisionRoom;
     public CompletableFuture<JsonObject> videoRequest(String type, JsonObject body, String requestId) {
-        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP",
-                "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP",
-                "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_UNSUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE", "SCREEN_AUDIO_UNSUBSCRIBE", "SCREEN_AUDIO_STATE", "SCREEN_AUDIO_STOP", "SCREEN_STATE", "SCREEN_STOP").contains(type))
+        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_UNSUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE", "SCREEN_AUDIO_UNSUBSCRIBE", "SCREEN_AUDIO_STATE", "SCREEN_AUDIO_STOP", "SCREEN_STATE", "SCREEN_STOP", "VIDEO_PAUSE", "VIDEO_RESUME", "AUDIO_PAUSE", "AUDIO_RESUME", "MEDIA_WATCH").contains(type))
             return CompletableFuture.failedFuture(new SignalException("INVALID_REQUEST"));
-        return submit(() -> command(type, requireRoom().roomId(), body, requestId).body());
+        final RoomSnapshot expected = snapshot;
+        final SignalingClient transport = client;
+        final String participant = self;
+        final long queuedAt = System.nanoTime();
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        final CompletableFuture<Void> before;
+        final JsonObject payload = body.deepCopy();
+        synchronized (mediaAdmission) {
+            if (!mediaContext(expected, transport, participant))
+                return CompletableFuture.failedFuture(new SignalException("CONNECTION_RESTORING"));
+            if (mediaPending >= 16) return CompletableFuture.failedFuture(new SignalException("CLIENT_BUSY"));
+            mediaPending++; jobs.add(result);
+            String kind = type.substring(0, type.indexOf('_'));
+            if(type.endsWith("_SUBSCRIBE") || type.endsWith("_UNSUBSCRIBE") || type.endsWith("_STATE")) kind += "_RECEIVE";
+            before = mediaTails.getOrDefault(kind, CompletableFuture.completedFuture(null));
+            CompletableFuture<Void> finished = new CompletableFuture<>();
+            mediaTails.put(kind, finished);
+            result.whenComplete((v,e) -> {
+                synchronized (mediaAdmission) {mediaPending--; jobs.remove(result);}
+                finished.complete(null);
+            });
+        }
+        // Transport admission may complete callbacks while holding its lock. Do not nest our admission lock.
+        before.whenComplete((ignored, previousFailure) -> {
+                if(result.isDone()) return;
+                if (!mediaContext(expected, transport, participant)) {
+                    result.completeExceptionally(new SignalException("STALE_ROOM")); return;
+                }
+                long started = System.nanoTime();
+                common.diagnostics.Diagnostics.current().event("media.client.dispatch", java.util.Map.of(
+                        "action",type,"operation_id",requestId,"queue_ms",(started-queuedAt)/1_000_000.0));
+                transport.request(type, expected.roomId(), payload, requestId).whenComplete((reply, failure) -> {
+                    common.diagnostics.Diagnostics.current().event("signaling.client.request", java.util.Map.of(
+                            "action",type,"operation_id",requestId,"signaling_round_trip_ms",(System.nanoTime()-started)/1_000_000.0));
+                    if (!mediaContext(expected, transport, participant)) result.completeExceptionally(new SignalException("STALE_ROOM"));
+                    else if (failure != null) result.completeExceptionally(failure);
+                    else result.complete(reply.body());
+                });
+            });
+        return result;
+    }
+    private boolean mediaContext(RoomSnapshot expected, SignalingClient transport, String participant) {
+        RoomSnapshot current = snapshot;
+        return !closed.get() && !applicationLeaving.get() && !leavingRoom && !roomTerminated.get() && recovery == null
+                && expected != null && current != null && expected.roomId().equals(current.roomId())
+                && participant != null && participant.equals(self) && transport != null && client == transport
+                && transport.state() == SignalingClient.State.CONNECTED;
+    }
+    private void watchMediaSources() {
+        if (video == null || snapshot == null) return;
+        SignalingClient transport = client; String roomId = snapshot.roomId();
+        videoRequest("MEDIA_WATCH", new JsonObject(), UUID.randomUUID().toString()).whenComplete((body,failure) -> {
+            if(failure==null) applyMediaSources(transport,roomId,body);
+            // Old servers retain the controller's bounded reconciliation fallback.
+        });
+    }
+    private synchronized void applyMediaSources(SignalingClient transport,String roomId,JsonObject body) {
+        if (transport == null || client != transport || snapshot == null || !snapshot.roomId().equals(roomId)
+                || recovery != null || leavingRoom || roomTerminated.get() || closed.get() || video == null) return;
+        try {
+            if (!body.get("snapshot").getAsBoolean() || body.get("generation").getAsLong()!=transport.generation()) return;
+            long revision = body.get("revision").getAsLong();
+            if (!roomId.equals(mediaRevisionRoom)) {mediaRevisionRoom=roomId;mediaRevision=-1;}
+            if(revision<=mediaRevision) return;
+            // Full snapshots supersede earlier snapshots; global revisions may skip other rooms.
+            video.mediaSources(body.deepCopy()); mediaRevision=revision;
+        } catch (RuntimeException invalid) {
+            common.diagnostics.Diagnostics.current().failure("media.snapshot.invalid",invalid,java.util.Map.of("phase","apply"));
+        }
     }
     public synchronized client.media.VideoCallController video() {
-        if (video == null) video = mediaFactory.apply(this);
+        if (video == null) {video = mediaFactory.apply(this); watchMediaSources();}
         return video;
     }
     public int maxRoomCapacity() {
@@ -230,7 +303,7 @@ public final class MeetingSession implements AutoCloseable {
     }
     private RoomSnapshot acceptJoin(RoomJoinReply joined) {
         self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null; reopenIntent = null; pin = "";
-        admissionPending = false; roomTerminated.set(false);
+        admissionPending = false; roomTerminated.set(false); watchMediaSources();
         publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
     }
     private CompletableFuture<RoomSnapshot> awaitAdmission(CompletableFuture<RoomSnapshot> attempt) {
@@ -346,7 +419,8 @@ public final class MeetingSession implements AutoCloseable {
         return leaveBody(body);
     }
     private CompletableFuture<Void> leaveBody(JsonObject body) {
-        return submit(() -> {
+        leavingRoom = true;
+        return this.<Void>submit(() -> {
             if(snapshot==null) return null;
             String roomId=requireRoom().roomId();
             JsonObject intent=body.deepCopy();intent.addProperty("roomId",roomId);
@@ -355,7 +429,7 @@ public final class MeetingSession implements AutoCloseable {
             exitIntent=null;
             closeVideo();recovery=null;snapshot=null;self=null;pin="";joinIntent=null;reopenIntent=null;joinedAt=0;
             closeTransport();publish(State.READY,"Đã rời phòng.");clearChat();return null;
-        });
+        }).whenComplete((v,e) -> leavingRoom=false);
     }
     /** Wait for an intentional leave before releasing signaling; the server chooses a host atomically. */
     public synchronized CompletableFuture<Void> leaveForApplicationClose() {
@@ -449,6 +523,7 @@ public final class MeetingSession implements AutoCloseable {
                         throw new SignalException("INVALID_RESPONSE");
                     snapshot = resumed.room(); recovery = null;
                     if (video != null) video.controlConnected(true);
+                    watchMediaSources();
                     publish(State.CONNECTED, "Đã kết nối lại. Bạn có thể bật lại camera và mic.");
                     for(var listener:chatListeners) listener.onChatResync();
                 }
@@ -498,6 +573,7 @@ public final class MeetingSession implements AutoCloseable {
         if (closed.get() || connection == null || !Objects.equals(message.connectionId(), connection.connectionId())
                 || message.generation() != connection.generation()) return;
         if("ROOM_CATALOG_CHANGED".equals(message.type())) {applyCatalog(message.body());return;}
+        if("MEDIA_SOURCES".equals(message.type())) {applyMediaSources(connection,message.roomId(),message.body());return;}
         if("SERVER_DATABASE_STATUS".equals(message.type())) {
             boolean available=message.body().get("available").getAsBoolean();
             publish(State.CONNECTED,available?"Kết nối dữ liệu đã phục hồi.":"Database tạm gián đoạn. Dữ liệu đang hiển thị có thể chưa được cập nhật.");return;
@@ -528,6 +604,7 @@ public final class MeetingSession implements AutoCloseable {
                 RoomSnapshot current = snapshot;
                 String currentRoom = current != null ? current.roomId() : preview == null ? null : preview.roomId();
                 if (currentConnection(message) && Objects.equals(currentRoom, message.roomId())) {
+                    roomTerminated.set(true);
                     recovery = null; closeVideo(); snapshot = null; self = null; publish(State.CONNECTED, "Bạn đã rời phòng hoặc phòng đã đóng."); clearChat();
                 }
                 return null;
@@ -610,6 +687,7 @@ public final class MeetingSession implements AutoCloseable {
     }
     private synchronized void publish(State value, String text) {
         currentState = closed.get() ? State.CLOSED : recovery != null && value == State.CONNECTED ? State.RECONNECTING : value;
+        if (value == State.CONNECTED && snapshot != null && video != null && recovery == null) video.roomChanged();
         latest.set(new Update(currentState, snapshot, text));
         scheduleFx();
     }
@@ -624,6 +702,7 @@ public final class MeetingSession implements AutoCloseable {
     }
     private void closeTransport() {
         incomingRoom.set(null);
+        mediaRevisionRoom=null;mediaRevision=-1;
         synchronized (transportLock) { SignalingClient current = client; client = null; if (current != null) current.close(); }
     }
     @Override public void close() {

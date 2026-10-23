@@ -51,9 +51,9 @@ public final class NativeVideoSession implements AutoCloseable {
     public final class Peer implements PeerConnectionObserver, AutoCloseable {
         private final RTCPeerConnection connection;
         private final boolean publisher;
-        private final VideoTrack local;
+        private VideoTrack local;
         private final VideoFrameMailbox sink;
-        private final VideoTrackSink binding;
+        private VideoTrackSink binding;
         private final AtomicBoolean closing = new AtomicBoolean();
         private final CompletableFuture<Void> gathered = new CompletableFuture<>();
         private final Set<CompletableFuture<?>> pending = ConcurrentHashMap.newKeySet();
@@ -65,10 +65,27 @@ public final class NativeVideoSession implements AutoCloseable {
         private final SingleFlightStats statsFlight=new SingleFlightStats();
         private volatile VideoTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
+        private volatile boolean presentationPaused;
+        private volatile VideoTrackSink outputBinding;
+        private VideoTrackSink bindOutput() {
+            outputBinding = sink.bind();
+            return frame -> { if (presentationPaused) frame.release(); else outputBinding.onVideoFrame(frame); };
+        }
+        public void pausePresentation(boolean paused) {
+            if (presentationPaused == paused) return;
+            if (paused) {
+                presentationPaused = true;
+                sink.pause(); // Invalidates conversions already running when PAUSE arrived.
+            } else {
+                outputBinding = sink.bind();
+                presentationPaused = false;
+            }
+        }
+        public boolean presentationPaused() { return presentationPaused; }
         private Peer(VideoTrack track, boolean publisher, VideoFrameMailbox sink, int bitrate, int fps) {
             if (closed.get()) throw new IllegalStateException("VIDEO_OWNER_CLOSED");
             this.publisher = publisher; this.local = track; this.sink = sink;
-            this.binding = sink.bind();
+            this.binding = bindOutput();
             connection = factory.createPeerConnection(new RTCConfiguration(), this);
             if (connection == null) throw new IllegalStateException("VIDEO_PEER_FAILED");
             try {
@@ -89,6 +106,27 @@ public final class NativeVideoSession implements AutoCloseable {
         }
         public boolean failed() { return state == RTCPeerConnectionState.FAILED || state == RTCPeerConnectionState.CLOSED; }
         public boolean connected() { return state == RTCPeerConnectionState.CONNECTED; }
+        /** Detach before the owner disposes the input. The transport survives, the device does not. */
+        public void pauseInput() {
+            synchronized (nativeLifecycle) {
+                if (!publisher || closing.get() || local == null) return;
+                sender.replaceTrack(null);
+                local.removeSink(binding); local.dispose(); local = null;
+                sink.pause();
+            }
+        }
+        /** Same media kind and negotiated codec; SDK rejects unsupported replacement instead of renegotiating. */
+        public void resumeInput(VideoInput input) {
+            synchronized (nativeLifecycle) {
+                if (!publisher || closing.get() || local != null) throw new IllegalStateException("VIDEO_REUSE_UNAVAILABLE");
+                VideoTrack next = factory.createVideoTrack("camera-video", input.source());
+                VideoTrackSink nextBinding = bindOutput();
+                try { sender.replaceTrack(next); next.addSink(nextBinding); }
+                catch (RuntimeException | Error failure) { next.dispose(); throw failure; }
+                local = next; binding = nextBinding;
+                sourceWidth = input.width(); sourceHeight = input.height(); sourceFps = input.fps();
+            }
+        }
         @Override public void onIceCandidate(RTCIceCandidate candidate) { }
         @Override public void onIceGatheringChange(RTCIceGatheringState value) { if (value == RTCIceGatheringState.COMPLETE) gathered.complete(null); }
         @Override public void onConnectionChange(RTCPeerConnectionState value) { state = value; }
@@ -173,13 +211,13 @@ public final class NativeVideoSession implements AutoCloseable {
             pending.forEach(future -> future.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED")));
             gathered.completeExceptionally(new IllegalStateException("VIDEO_PEER_CLOSED"));
             synchronized (trackLifecycle) {
-                if (publisher) local.removeSink(binding);
+                if (publisher && local != null) local.removeSink(binding);
                 VideoTrack received = remote; if (received != null) received.removeSink(binding);
             }
             sink.pause();
             synchronized (nativeLifecycle) { connection.close(); if (sender != null) { sender.dispose(); sender = null; } }
             receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
-            if (publisher) local.dispose(); peers.remove(this);
+            if (publisher && local != null) { local.dispose(); local = null; } peers.remove(this);
         }
     }
     @Override public void close() {

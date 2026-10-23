@@ -26,9 +26,30 @@ public final class AudioCallController implements AutoCloseable {
     private final MicrophoneConsentStore consent;
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1,
             Thread.ofPlatform().daemon().name("audio-client-owner").factory());
+    private final ThreadPoolExecutor receiver = new ThreadPoolExecutor(1,1,0,TimeUnit.SECONDS,new ArrayBlockingQueue<>(8),
+            Thread.ofPlatform().daemon().name("audio-client-receive").factory());
+    private final AtomicBoolean receiving = new AtomicBoolean(), receiveAgain = new AtomicBoolean(), receiveReset = new AtomicBoolean();
+    private final AtomicLong receiveEpoch = new AtomicLong();
     private final Semaphore admission=new Semaphore(16);
     private final Set<CompletableFuture<?>> jobs=ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean(), uiScheduled = new AtomicBoolean();
+    private volatile MediaSourceState pushedSources;
+    private final AtomicBoolean sourcesQueued = new AtomicBoolean();
+    void mediaSources(JsonObject activeSources, JsonObject pausedSources) {
+        var next = new MediaSourceState(activeSources,pausedSources);
+        if (closed.get() || next.equals(pushedSources)) return;
+        pushedSources = next; receiveEpoch.incrementAndGet();
+        refreshSources();
+    }
+    private void refreshSources() {
+        if (!entered || !sourcesQueued.compareAndSet(false,true)) return;
+        var observed = pushedSources;
+        submit(() -> { synchronize(); return null; }).whenComplete((v,e) -> {
+            sourcesQueued.set(false);
+            if (!closed.get() && observed != pushedSources) refreshSources();
+        });
+    }
+    void roomChanged() { if (!closed.get()) refreshSources(); }
     private final ReadOnlyStringWrapper status=new ReadOnlyStringWrapper("");
     private final AtomicReference<String> latestStatus=new AtomicReference<>();
     private final AtomicBoolean statusScheduled=new AtomicBoolean();
@@ -44,16 +65,21 @@ public final class AudioCallController implements AutoCloseable {
     private volatile boolean entered, active;
     private long publishedAt;
     private boolean micRequestConfirmed;
-    private NativeAudioSession receive, capture;
+    private NativeAudioSession receive;
+    private volatile NativeAudioSession capture;
     private volatile NativeAudioSession.Peer publisher;
+    private NativeAudioSession.Peer retainedPublisher;
+    private String publisherTransport, retainedTransport, retainedRoom, retainedSelf;
+    private long retainUntil;
+    private ScheduledFuture<?> retentionExpiry;
     private volatile AdaptiveVideoPolicy.Evidence voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN;
     AdaptiveVideoPolicy.Evidence networkQuality() {return voiceEvidence;}
     void networkSample(NetworkSample sample) {voiceEvidence=sample.voiceUp().evidence().merge(sample.voiceDown().evidence());}
     void statsSources(List<MediaStatsSource> target) {
         if(!entered || !controlConnected || closed.get()) return;
         var current=publisher;
-        if(current!=null) target.add(new MediaStatsSource(current,MediaStatsSource.Kind.AUDIO,true,false,current::statsAsync));
-        for(var sub:subscriptions.values()) target.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.AUDIO,false,false,sub.peer()::statsAsync));
+        if(current!=null && active) target.add(new MediaStatsSource(current,MediaStatsSource.Kind.AUDIO,true,false,current::statsAsync));
+        for(var sub:subscriptions.values()) target.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.AUDIO,false,sub.peer().presentationPaused(),sub.peer()::statsAsync));
     }
     private AudioDevice selectedMicrophone;
     private volatile AudioDevice selectedSpeaker;
@@ -95,7 +121,7 @@ public final class AudioCallController implements AutoCloseable {
     public CompletableFuture<List<AudioDevice>> speakers() { return submit(() -> headless ? List.of() : MediaDevices.getAudioRenderDevices()); }
     public CompletableFuture<AudioDevice> defaultMicrophone() { return submit(() -> headless ? null : MediaDevices.getDefaultAudioCaptureDevice()); }
     public CompletableFuture<Void> selectMicrophone(AudioDevice device) {
-        return submit(() -> { if (active || microphone.pending()) throw new SignalException("MEDIA_BUSY"); selectedMicrophone=device;
+        return submit(() -> { if (active || microphone.pending()) throw new SignalException("MEDIA_BUSY"); releaseRetained(true); selectedMicrophone=device;
             if (device != null) consent.device(device.getDescriptor()); return null; });
     }
     public CompletableFuture<Void> selectSpeaker(AudioDevice device) {
@@ -103,24 +129,24 @@ public final class AudioCallController implements AutoCloseable {
             selectedSpeaker=device;
             speakerChanged.run();
             if (device != null) consent.speaker(device.getDescriptor());
-            if (entered && controlConnected) for (var subscription : subscriptions.values()) release(subscription);
-            closeSubscriptions(); if (receive != null) { receive.close(); receive=null; }
+            receiveEpoch.incrementAndGet(); receiveReset.set(true); scheduleReceive();
             return null;
         });
     }
     public void enter() {
         entered = true;
+        if (pushedSources != null) refreshSources();
         if (!closed.get() && active && publisher == null && microphone.wanted()) {
             submit(() -> { synchronize(); return null; });
         }
     }
     private volatile boolean controlConnected = true;
     public void controlConnected(boolean connected) {
-        controlConnected = connected; if(!connected) voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN;
+        controlConnected = connected; if(!connected) { pushedSources = null; receiveEpoch.incrementAndGet(); voiceEvidence=AdaptiveVideoPolicy.Evidence.UNKNOWN; }
         if (!connected) submit(() -> { disconnect(); return null; });
     }
     public CompletableFuture<Void> toggle() {
-        return microphone.toggle(active, () -> submit(() -> { start(); return null; }), () -> submit(() -> { stop(true); return null; }));
+        return microphone.toggle(active, () -> submit(() -> { start(); return null; }), () -> submit(() -> { stop(true,true); return null; }));
     }
     private void changed() {
         Runnable update = () -> {
@@ -140,7 +166,9 @@ public final class AudioCallController implements AutoCloseable {
                 String preferred=consent.read().preferredDevice();
                 selectedMicrophone=MediaDevices.getAudioCaptureDevices().stream().filter(d -> d.getDescriptor().equals(preferred)).findFirst().orElse(null);
             }
-            wanted(); capture=sessions.create(headless,true,selectedMicrophone,null); wanted();
+            wanted();
+            if (!canReusePublisher()) { releaseRetained(true); capture=sessions.create(headless,true,selectedMicrophone,null); }
+            wanted();
             active=true;
             // Pre-join opens capture only after the user's click, and creates no publication.
             if (entered) { attempted=true; publish(); }
@@ -151,10 +179,33 @@ public final class AudioCallController implements AutoCloseable {
         }
     }
     private void publish() throws Exception {
-        wanted(); publisher=capture.publisher(); JsonObject body=new JsonObject(); body.addProperty("sdp",publisher.offer()); wanted();
-        JsonObject answer=command("AUDIO_PUBLISH",body); publisher.answer(answer.get("sdp").getAsString()); wanted();
+        long started = System.nanoTime();
+        boolean reused = false;
+        wanted();
+        if (canReusePublisher()) {
+            publisher = retainedPublisher; publisherTransport = retainedTransport;
+            retainedPublisher = null; retainedTransport = null;
+            if (retentionExpiry != null) { retentionExpiry.cancel(false); retentionExpiry = null; }
+            try {
+                // A new user click authorizes reopening the recording endpoint.
+                publisher.resumeInput();
+                JsonObject body = new JsonObject(); body.addProperty("transport",publisherTransport);
+                command("AUDIO_RESUME",body); reused = true;
+            } catch (SignalException expired) {
+                if (!"MEDIA_REUSE_EXPIRED".equals(expired.code())) throw expired;
+                publisher.close(); publisher = null; publisherTransport = null;
+            }
+        }
+        if (!reused) {
+            wanted(); publisher=capture.publisher(); JsonObject body=new JsonObject(); body.addProperty("sdp",publisher.offer()); wanted();
+            JsonObject answer=command("AUDIO_PUBLISH",body); publisher.answer(answer.get("sdp").getAsString());
+            publisherTransport=answer.has("transport") ? answer.get("transport").getAsString() : null;
+        }
+        wanted();
         publishedAt = System.nanoTime();
-        micRequestConfirmed = false;
+        var acknowledgedRoom=room.get();
+        micRequestConfirmed = acknowledgedRoom!=null && acknowledgedRoom.participants().stream()
+                .anyMatch(p -> p.participantId().equals(self.get()) && p.mediaState().micRequested());
         if (headless) generated=worker.scheduleAtFixedRate(new Runnable() {
             private long sample;
             public void run() {
@@ -164,16 +215,58 @@ public final class AudioCallController implements AutoCloseable {
                 capture.push(pcm);
             }
         },0,10,TimeUnit.MILLISECONDS);
+        common.diagnostics.Diagnostics.current().event("media.client.activation",Map.of("kind","AUDIO","phase",reused ? "warm" : "cold","duration_ms",(System.nanoTime()-started)/1_000_000.0));
     }
     private void stop(boolean notify) throws Exception {
+        stop(notify,false);
+    }
+    private void stop(boolean notify, boolean retain) throws Exception {
         active=false;
         publishedAt = 0;
         micRequestConfirmed = false;
         if (generated != null) { generated.cancel(false); generated=null; }
+        if (retain && notify && entered && controlConnected && publisher != null && publisherTransport != null && room.get()!=null && !publisher.failed()) {
+            try {
+                publisher.pauseInput();
+                JsonObject body=new JsonObject(); body.addProperty("transport",publisherTransport);
+                command("AUDIO_PAUSE",body);
+                releaseRetained(false); retainedPublisher=publisher; retainedTransport=publisherTransport;
+                retainedRoom=room.get()==null ? null : room.get().roomId(); retainedSelf=self.get();
+                publisher=null; publisherTransport=null; retainUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
+                var retained=retainedPublisher;
+                retentionExpiry=worker.schedule(() -> {
+                    if (retainedPublisher==retained) {
+                        releaseRetained(true);
+                        if (controlConnected && room.get()!=null) try { command("AUDIO_STOP",new JsonObject()); } catch(Exception failure) {report(failure);}
+                    }
+                },30,TimeUnit.SECONDS);
+                changed(); return;
+            } catch(Exception | Error failure) {
+                // Close the complete owner on any device-stop failure: no background capture is acceptable.
+                if(publisher!=null) {publisher.close();publisher=null;}
+                if(capture!=null) {capture.close();capture=null;}
+                publisherTransport=null;releaseRetained(false);changed();
+                try {command("AUDIO_STOP",new JsonObject());} catch(Exception cleanup) {failure.addSuppressed(cleanup);}
+                if (!(failure instanceof SignalException signal) || !Set.of("UNKNOWN_MESSAGE","UNKNOWN_TYPE","UNKNOWN_OPERATION","MEDIA_REUSE_EXPIRED").contains(signal.code())) throw failure;
+                return;
+            }
+        }
         if (publisher != null) { publisher.close(); publisher=null; }
+        publisherTransport=null;releaseRetained(false);
         if (capture != null) { capture.close(); capture=null; }
         changed();
         if (notify && room.get()!=null) command("AUDIO_STOP",new JsonObject());
+    }
+    private boolean canReusePublisher() {
+        var current=room.get();
+        return retainedPublisher!=null && !retainedPublisher.failed() && controlConnected && current!=null
+                && System.nanoTime()<retainUntil && Objects.equals(retainedRoom,current.roomId()) && Objects.equals(retainedSelf,self.get());
+    }
+    private void releaseRetained(boolean closeCapture) {
+        if(retentionExpiry!=null) {retentionExpiry.cancel(false);retentionExpiry=null;}
+        if(retainedPublisher!=null) {retainedPublisher.close();retainedPublisher=null;}
+        retainedTransport=retainedRoom=retainedSelf=null;retainUntil=0;
+        if(closeCapture && capture!=null) {capture.close();capture=null;}
     }
     private void synchronize() throws Exception {
         if (!controlConnected) return;
@@ -203,10 +296,40 @@ public final class AudioCallController implements AutoCloseable {
             command("AUDIO_STOP", new JsonObject());
             publish();
         }
-        JsonObject sources=command("AUDIO_STATE",new JsonObject()).getAsJsonObject("sources");
+        scheduleReceive();
+    }
+    private void scheduleReceive() {
+        receiveAgain.set(true);
+        if (closed.get() || !receiving.compareAndSet(false,true)) return;
+        try { receiver.execute(() -> {
+            try {
+                do { receiveAgain.set(false); synchronizeReceived(); } while(receiveAgain.get() && !closed.get());
+            } catch(Exception | Error failure) { receiveAgain.set(false); report(failure); }
+            finally { receiving.set(false); if (!closed.get() && receiveAgain.get()) scheduleReceive(); }
+        }); } catch(RejectedExecutionException ignored) { receiving.set(false); }
+    }
+    private void disposeReceived() {
+        if (controlConnected && !closed.get()) for (var subscription : subscriptions.values()) {
+            try { release(subscription); } catch (Exception failure) { report(failure); }
+        }
+        closeSubscriptions(); samplesBySource.clear(); if(receive!=null) { receive.close(); receive=null; }
+    }
+    private void synchronizeReceived() throws Exception {
+        if (receiveReset.getAndSet(false)) disposeReceived();
+        if (!controlConnected || closed.get()) return;
+        RoomSnapshot snapshot=room.get(); if(snapshot==null) {disposeReceived();return;}
+        long epoch=receiveEpoch.get();
+        MediaSourceState sourceState = pushedSources;
+        if (sourceState == null) {
+            JsonObject state = command("AUDIO_STATE",new JsonObject());
+            sourceState = new MediaSourceState(state.getAsJsonObject("sources"),state.getAsJsonObject("pausedSources"));
+        }
+        JsonObject sources=sourceState.sources();
         for(String target:new ArrayList<>(subscriptions.keySet())) {
             Subscription s=subscriptions.get(target);
-            if (!sources.has(target) || !s.publication().equals(sources.get(target).getAsString()) || s.peer().failed() || s.peer().stalled()) {
+            boolean retained=sourceState.retained(target,s.publication());
+            s.peer().pausePresentation(retained);
+            if ((!sources.has(target) && !retained) || sources.has(target) && !s.publication().equals(sources.get(target).getAsString()) || s.peer().failed() || !retained && s.peer().stalled()) {
                 try { release(s); }
                 catch (Exception failure) { report(failure); continue; }
                 s.peer().close(); subscriptions.remove(target);
@@ -236,7 +359,11 @@ public final class AudioCallController implements AutoCloseable {
                 JsonObject answer = command("AUDIO_SUBSCRIBE",body);
                 transport = answer.get("transport").getAsString();
                 peer.answer(answer.get("sdp").getAsString());
-                subscriptions.put(source.getKey(),new Subscription(source.getValue().getAsString(),transport,peer));
+                var ready=new Subscription(source.getValue().getAsString(),transport,peer);
+                if (closed.get() || !controlConnected || epoch!=receiveEpoch.get() || room.get()==null || !Objects.equals(snapshot.roomId(),room.get().roomId())) {
+                    try { release(ready); } finally { peer.close(); } continue;
+                }
+                subscriptions.put(source.getKey(),ready);
             } catch (Exception | Error failure) {
                 if (transport != null) try { release(new Subscription(source.getValue().getAsString(), transport, peer)); }
                 catch (Exception cleanup) { failure.addSuppressed(cleanup); }
@@ -258,7 +385,7 @@ public final class AudioCallController implements AutoCloseable {
     private void closeSubscriptions() { subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear(); }
     private void disconnect() {
         microphone.resetOff(); try { stop(false); } catch (Exception ignored) { }
-        closeSubscriptions(); samplesBySource.clear(); if(receive!=null) { receive.close(); receive=null; }
+        receiveReset.set(true); scheduleReceive();
     }
     private void show(String message) {
         latestStatus.set(message);if(!statusScheduled.compareAndSet(false,true)) return;
@@ -282,12 +409,13 @@ public final class AudioCallController implements AutoCloseable {
     }
     @Override public void close() {
         if (!closed.compareAndSet(false,true)) return;
-        microphone.close(); worker.shutdownNow(); jobs.forEach(job -> job.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
+        microphone.close(); worker.shutdownNow(); receiver.shutdownNow(); jobs.forEach(job -> job.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
         closeComplete.orTimeout(10, TimeUnit.SECONDS);
         Thread.ofVirtual().name("audio-client-close").start(() -> {
             try {
                 if (!worker.awaitTermination(6,TimeUnit.SECONDS)) throw new IllegalStateException("AUDIO_CLEANUP_FAILED");
-                disconnect(); closeComplete.complete(null);
+                if (!receiver.awaitTermination(6,TimeUnit.SECONDS)) throw new IllegalStateException("AUDIO_CLEANUP_FAILED");
+                disconnect(); disposeReceived(); closeComplete.complete(null);
             } catch(Exception | Error failure) {
                 closeComplete.completeExceptionally(new IllegalStateException("AUDIO_CLEANUP_FAILED", failure));
             }

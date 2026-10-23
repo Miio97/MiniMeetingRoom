@@ -25,8 +25,39 @@ public final class VideoCallController implements AutoCloseable {
     private final Supplier<String> self;
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(16),
             Thread.ofPlatform().daemon().name("video-client-owner").factory());
+    private final ThreadPoolExecutor receiver = new ThreadPoolExecutor(1,1,0,TimeUnit.SECONDS,new ArrayBlockingQueue<>(8),
+            Thread.ofPlatform().daemon().name("video-client-receive").factory());
+    private final AtomicBoolean receiving = new AtomicBoolean(), receiveAgain = new AtomicBoolean(), receiveReset = new AtomicBoolean();
+    private final AtomicLong receiveEpoch = new AtomicLong();
+    private NativeVideoSession receiveSession;
     private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("video-poll").factory());
     private final AtomicBoolean closed = new AtomicBoolean(), polling = new AtomicBoolean(), statusScheduled = new AtomicBoolean();
+    private volatile MediaSourceState pushedSources;
+    private final AtomicBoolean sourcesQueued = new AtomicBoolean();
+    /** MeetingSession validates recipient generation/revision before dispatching a full snapshot. */
+    public void mediaSources(JsonObject snapshot) {
+        JsonObject active = snapshot.getAsJsonObject("sources"), paused = snapshot.getAsJsonObject("pausedSources");
+        acceptSources(new MediaSourceState(MediaSourceState.kind(active,"VIDEO"), MediaSourceState.kind(paused,"VIDEO")));
+        audio.mediaSources(MediaSourceState.kind(active,"AUDIO"), MediaSourceState.kind(paused,"AUDIO"));
+        screen.mediaSources(MediaSourceState.kind(active,"SCREEN"), MediaSourceState.kind(paused,"SCREEN"));
+    }
+    private void acceptSources(MediaSourceState next) {
+        if (closed.get() || next.equals(pushedSources)) return;
+        pushedSources = next; receiveEpoch.incrementAndGet();
+        refreshSources();
+    }
+    private void refreshSources() {
+        if (!sourcesQueued.compareAndSet(false,true)) return;
+        var observed = pushedSources;
+        submit(() -> { synchronize(); return null; }).whenComplete((v,e) -> {
+            sourcesQueued.set(false);
+            if (!closed.get() && observed != pushedSources) refreshSources();
+        });
+    }
+    public void roomChanged() {
+        if (closed.get()) return;
+        refreshSources(); audio.roomChanged(); screen.roomChanged();
+    }
     private final ThreadPoolExecutor preferences = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(8),
             Thread.ofPlatform().daemon().name("camera-preferences").factory());
     private final ThreadPoolExecutor discovery = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(2),
@@ -41,7 +72,7 @@ public final class VideoCallController implements AutoCloseable {
         for(String id:participants) {if(selected.size()==6) break;if(id!=null) selected.add(id);}
         var next=java.util.Set.copyOf(selected);
         if(next.equals(viewport)) return;
-        viewport=next;
+        viewport=next; receiveEpoch.incrementAndGet();
         if(viewportQueued.compareAndSet(false,true)) submit(() -> {synchronize();return null;}).whenComplete((v,e) -> viewportQueued.set(false));
     }
     private final NetworkStatsConfig statsConfig=NetworkStatsConfig.load();
@@ -74,10 +105,10 @@ public final class VideoCallController implements AutoCloseable {
     /** Transport recovery preserves the controller borrowed by the view, but never reopens capture. */
     public void controlConnected(boolean connected) {
         controlConnected = connected; audio.controlConnected(connected); screen.controlConnected(connected);
-        if(!connected) {statsBuffer.reset(statsGeneration.incrementAndGet());statsCollector.reset();currentStats=null;pendingStatsUi.set(null);}
+        if(!connected) {pushedSources=null;receiveEpoch.incrementAndGet();statsBuffer.reset(statsGeneration.incrementAndGet());statsCollector.reset();currentStats=null;pendingStatsUi.set(null);}
         if (!connected) submit(() -> {
             cameraSwitch.resetOff(); stopLocalCamera();
-            subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
+            receiveEpoch.incrementAndGet(); receiveReset.set(true); scheduleReceive();
             adaptivePolicy.reset(); appliedQuality = AdaptiveVideoPolicy.Profile.LOW; lastAnalysis=lastStatsUi=lastApplyFailure=Long.MIN_VALUE;
             Platform.runLater(() -> { if (!closed.get()) quality.set(AdaptiveVideoPolicy.Profile.LOW); }); return null;
         });
@@ -90,6 +121,11 @@ public final class VideoCallController implements AutoCloseable {
     private boolean cameraRequestConfirmed;
     private NativeVideoSession nativeSession;
     private volatile NativeVideoSession.Peer publisher;
+    private NativeVideoSession.Peer retainedPublisher;
+    private String publisherTransport, retainedTransport, retainedRoom, retainedSelf;
+    private long retainUntil;
+    private ScheduledFuture<?> retentionExpiry;
+    private static final long RETAIN_NANOS = TimeUnit.SECONDS.toNanos(30);
     private NativeVideoSession.Preview preview;
     private volatile VideoInput input;
     private boolean inputStarted;
@@ -207,7 +243,7 @@ public final class VideoCallController implements AutoCloseable {
             if (room.get() == null || self.get() == null) throw new SignalException("NOT_A_MEMBER");
             if (publisher != null) return null;
             show("Đang bật camera và thiết lập WebRTC…");
-            stopLocalCamera();
+            if (!canReusePublisher()) stopLocalCamera();
             try {
                 if (nativeSession == null) nativeSession = new NativeVideoSession();
                 input = source.get(); publishInput(wanted);
@@ -217,22 +253,49 @@ public final class VideoCallController implements AutoCloseable {
     }
     private void publishInput(java.util.function.BooleanSupplier wanted) throws Exception {
         boolean publicationAttempted = false;
+        boolean reused = false;
+        long started = System.nanoTime();
         try {
             requireWanted(wanted);
             if (preview != null) { preview.close(); preview = null; }
             if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
-            publisher = nativeSession.publisher(input, frames(self.get()));
+            if (canReusePublisher()) {
+                publisher = retainedPublisher; publisherTransport = retainedTransport;
+                retainedPublisher = null; retainedTransport = null;
+                if (retentionExpiry != null) { retentionExpiry.cancel(false); retentionExpiry = null; }
+                try { publisher.resumeInput(input); reused = true; }
+                catch (RuntimeException failure) { publisher.close(); publisher = null; publisherTransport = null; }
+            }
+            if (publisher == null) publisher = nativeSession.publisher(input, frames(self.get()));
             if (!inputStarted) { requireWanted(wanted); long before = frames(self.get()).receivedFrames(); input.start(); inputStarted = true; awaitCameraFrame(before, wanted); }
-            requireWanted(wanted); String offer = publisher.offer(); requireWanted(wanted);
-            JsonObject body = new JsonObject(); body.addProperty("sdp", offer);
-            publicationAttempted = true; JsonObject answer = command("VIDEO_PUBLISH", body);
+            if (reused) {
+                requireWanted(wanted);
+                JsonObject body = new JsonObject(); body.addProperty("transport",publisherTransport);
+                try { command("VIDEO_RESUME",body); }
+                catch (SignalException expired) {
+                    if (!"MEDIA_REUSE_EXPIRED".equals(expired.code())) throw expired;
+                    publisher.close(); publisher = nativeSession.publisher(input,frames(self.get()));
+                    publisherTransport = null; reused = false;
+                }
+            }
+            if (!reused) {
+                requireWanted(wanted); String offer = publisher.offer(); requireWanted(wanted);
+                JsonObject body = new JsonObject(); body.addProperty("sdp", offer);
+                publicationAttempted = true; JsonObject answer = command("VIDEO_PUBLISH", body);
+                publisherTransport = answer.has("transport") ? answer.get("transport").getAsString() : null;
+                publisher.answer(answer.get("sdp").getAsString());
+            }
             if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
-            publisher.answer(answer.get("sdp").getAsString()); requireWanted(wanted);
+            requireWanted(wanted);
             publisher.quality(appliedQuality,appliedLimitation,statsConfig); activeCamera = true;
-            publishedAt = System.nanoTime(); cameraRequestConfirmed = false;
+            publishedAt = System.nanoTime();
+            var acknowledgedRoom=room.get();
+            cameraRequestConfirmed = acknowledgedRoom!=null && acknowledgedRoom.participants().stream()
+                    .anyMatch(p -> p.participantId().equals(self.get()) && p.mediaState().cameraRequested());
             show("Camera đang bật; đang thiết lập kết nối WebRTC với SFU.");
+            common.diagnostics.Diagnostics.current().event("media.client.activation",Map.of("kind","VIDEO","phase",reused ? "warm" : "cold","duration_ms",(System.nanoTime()-started)/1_000_000.0));
         } catch (Exception | LinkageError failure) {
-            stopLocalCamera(); if (publicationAttempted) try { command("VIDEO_STOP", new JsonObject()); } catch (Exception ignored) { }
+            stopLocalCamera(); if (publicationAttempted || reused) try { command("VIDEO_STOP", new JsonObject()); } catch (Exception ignored) { }
             if (!(failure instanceof CancellationException)) { mediaFailure("publish", failure); show(CameraErrors.message(failure)); } throw failure;
         }
     }
@@ -256,7 +319,29 @@ public final class VideoCallController implements AutoCloseable {
     public CompletableFuture<Void> stopCamera() {
         return submit(() -> {
             boolean published = publisher != null;
-            stopLocalCamera(); if (published) command("VIDEO_STOP", new JsonObject());
+            if (published && inMeeting && controlConnected && publisherTransport != null && room.get() != null && !publisher.failed()) {
+                try {
+                    publisher.pauseInput();
+                    // The native track is detached before closing its device/source.
+                    if (input != null) { input.close(); input = null; } inputStarted = false;
+                    activeCamera = false; publishedAt = 0; cameraRequestConfirmed = false;
+                    JsonObject body = new JsonObject(); body.addProperty("transport",publisherTransport);
+                    command("VIDEO_PAUSE",body);
+                    releaseRetained(); retainedPublisher = publisher; retainedTransport = publisherTransport;
+                    retainedRoom = room.get() == null ? null : room.get().roomId(); retainedSelf = self.get();
+                    publisher = null; publisherTransport = null; retainUntil = System.nanoTime() + RETAIN_NANOS;
+                    var retained = retainedPublisher;
+                    retentionExpiry = timer.schedule(() -> submit(() -> {
+                        if (retainedPublisher == retained) { releaseRetained(); if (controlConnected && room.get()!=null) command("VIDEO_STOP",new JsonObject()); }
+                        return null;
+                    }),30,TimeUnit.SECONDS);
+                } catch (Exception | LinkageError failure) {
+                    stopLocalCamera();
+                    try { command("VIDEO_STOP",new JsonObject()); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+                    // Old servers can still stop normally; reuse is an optional negotiated optimization.
+                    if (!(failure instanceof SignalException signal) || !Set.of("UNKNOWN_MESSAGE","UNKNOWN_TYPE","UNKNOWN_OPERATION","MEDIA_REUSE_EXPIRED").contains(signal.code())) throw failure;
+                }
+            } else { stopLocalCamera(); if (published) command("VIDEO_STOP", new JsonObject()); }
             show("Camera đã tắt. Bạn vẫn có thể nhận video của người khác."); return null;
         });
     }
@@ -269,8 +354,19 @@ public final class VideoCallController implements AutoCloseable {
         finally {
             if (preview != null) { preview.close(); preview = null; }
             if (publisher != null) { publisher.close(); publisher = null; }
+            publisherTransport = null; releaseRetained();
         }
         show("Camera đã tắt.");
+    }
+    private boolean canReusePublisher() {
+        RoomSnapshot current = room.get();
+        return retainedPublisher != null && !retainedPublisher.failed() && controlConnected && current != null
+                && System.nanoTime() < retainUntil && Objects.equals(retainedRoom,current.roomId()) && Objects.equals(retainedSelf,self.get());
+    }
+    private void releaseRetained() {
+        if (retentionExpiry != null) { retentionExpiry.cancel(false); retentionExpiry = null; }
+        if (retainedPublisher != null) { retainedPublisher.close(); retainedPublisher = null; }
+        retainedTransport = retainedRoom = retainedSelf = null; retainUntil = 0;
     }
     private void synchronize() throws Exception {
         if (!controlConnected) return;
@@ -284,12 +380,40 @@ public final class VideoCallController implements AutoCloseable {
                 cameraSwitch.resetOff(); stopLocalCamera();
             }
         }
+        scheduleReceive();
+    }
+    private void scheduleReceive() {
+        receiveAgain.set(true);
+        if (closed.get() || !receiving.compareAndSet(false,true)) return;
+        submitTo(receiver, () -> {
+            do { receiveAgain.set(false); synchronizeReceived(); } while (receiveAgain.get() && !closed.get());
+            return null;
+        }).whenComplete((v,e) -> {
+            if (e != null) receiveAgain.set(false); // A failed transport retries on the bounded periodic tick.
+            receiving.set(false); if (!closed.get() && receiveAgain.get()) scheduleReceive();
+        });
+    }
+    private void disposeReceived() {
+        subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
+        if (receiveSession != null) { receiveSession.close(); receiveSession = null; }
+    }
+    private void synchronizeReceived() throws Exception {
+        if (receiveReset.getAndSet(false)) disposeReceived();
+        if (!controlConnected || closed.get()) return;
+        RoomSnapshot current = room.get(); if (current==null) { disposeReceived(); return; }
+        String own = self.get(); long epoch=receiveEpoch.get();
+        MediaSourceState sourceState = pushedSources;
         JsonObject sources;
-        try { sources = command("VIDEO_STATE", new JsonObject()).getAsJsonObject("sources"); }
+        try {
+            if (sourceState == null) {
+                JsonObject state = command("VIDEO_STATE", new JsonObject());
+                sourceState = new MediaSourceState(state.getAsJsonObject("sources"), state.getAsJsonObject("pausedSources"));
+            }
+            sources = sourceState.sources();
+        }
         catch (Exception failure) {
-            cameraSwitch.resetOff();
-            stopLocalCamera(); subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
-            show("Kết nối video gián đoạn. Camera đã tắt; hãy bật lại bằng tay khi server sẵn sàng."); throw failure;
+            disposeReceived();
+            show("Kết nối nhận video gián đoạn; đang chờ đồng bộ lại."); throw failure;
         }
         if (appliedQuality == AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {
             var stopped=new ArrayList<>(subscriptions.values());subscriptions.clear();unsubscribe(stopped);
@@ -298,22 +422,29 @@ public final class VideoCallController implements AutoCloseable {
         var stopped=new ArrayList<Subscription>();
         for (String target : new ArrayList<>(subscriptions.keySet())) {
             Subscription subscription = subscriptions.get(target);
-            if (!sources.has(target) || viewport!=null && !viewport.contains(target) || !sources.get(target).getAsString().equals(subscription.publication()) || subscription.peer().failed()) {
+            boolean retained = sourceState.retained(target,subscription.publication());
+            subscription.peer().pausePresentation(retained);
+            if ((!sources.has(target) && !retained) || viewport!=null && !viewport.contains(target) || sources.has(target) && !sources.get(target).getAsString().equals(subscription.publication()) || subscription.peer().failed()) {
                 subscription.peer().close(); subscriptions.remove(target);stopped.add(subscription);
             }
         }
         unsubscribe(stopped);
+        if (subscriptions.isEmpty() && sources.isEmpty() && receiveSession != null) { receiveSession.close(); receiveSession = null; }
         for (var source : sources.entrySet()) {
             if (closed.get()) return;
             String target = source.getKey(), publication = source.getValue().getAsString();
             if(viewport!=null && !viewport.contains(target)) continue;
             if (target.equals(own) || subscriptions.containsKey(target) || current.participants().stream().noneMatch(p -> p.participantId().equals(target))) continue;
-            if (nativeSession == null) nativeSession = new NativeVideoSession();
-            NativeVideoSession.Peer peer = nativeSession.subscriber(frames(target));
+            if (receiveSession == null) receiveSession = new NativeVideoSession();
+            NativeVideoSession.Peer peer = receiveSession.subscriber(frames(target));
             try {
                 JsonObject body = new JsonObject(); body.addProperty("source", target); body.addProperty("publication", publication); body.addProperty("sdp", peer.offer());
                 JsonObject answer = command("VIDEO_SUBSCRIBE", body); peer.answer(answer.get("sdp").getAsString());
-                subscriptions.put(target, new Subscription(publication,answer.get("transport").getAsString(),peer));
+                var ready = new Subscription(publication,answer.get("transport").getAsString(),peer);
+                if (closed.get() || !controlConnected || epoch != receiveEpoch.get() || room.get()==null || !Objects.equals(current.roomId(),room.get().roomId())) {
+                    unsubscribe(List.of(ready)); continue;
+                }
+                subscriptions.put(target, ready);
             } catch (Exception failure) { peer.close(); mediaFailure("subscribe", failure); show("Không nhận được một video: " + CameraErrors.message(failure)); }
         }
         for (String participant : new ArrayList<>(frames.keySet())) if (current.participants().stream().noneMatch(p -> p.participantId().equals(participant))) {
@@ -367,7 +498,7 @@ public final class VideoCallController implements AutoCloseable {
         List<MediaStatsSource> sources=new ArrayList<>();var current=publisher;
         if(current!=null) sources.add(new MediaStatsSource(current,MediaStatsSource.Kind.CAMERA,true,
                 appliedQuality==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY,current::statsAsync));
-        for(var sub:subscriptions.values()) sources.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.CAMERA,false,false,sub.peer()::statsAsync));
+        for(var sub:subscriptions.values()) sources.add(new MediaStatsSource(sub.peer(),MediaStatsSource.Kind.CAMERA,false,sub.peer().presentationPaused(),sub.peer()::statsAsync));
         audio.statsSources(sources);screen.statsSources(sources);return sources;
     }
     private int[] captureMode() {var source=input;return source==null?new int[]{0,0,0}:new int[]{source.width(),source.height(),source.fps()};}
@@ -406,8 +537,9 @@ public final class VideoCallController implements AutoCloseable {
                 screen.prioritizeVoice(next==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY).whenComplete((ignored,failure) -> {
                     if(failure!=null && !closed.get()) mediaFailure("adaptive_screen",failure);
                 });
+                if ((next==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY)!=(appliedQuality==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY)) receiveEpoch.incrementAndGet();
                 appliedQuality=next;appliedLimitation=reason;lastApplyFailure=Long.MIN_VALUE;
-                if(next==AdaptiveVideoPolicy.Profile.VOICE_PRIORITY) {subscriptions.values().forEach(s -> s.peer().close());subscriptions.clear();}
+                scheduleReceive();
                 Platform.runLater(() -> {if(!closed.get() && generation==statsGeneration.get()) quality.set(next);});
             } catch(RuntimeException failure) {lastApplyFailure=sample.atNanos();mediaFailure("adaptive_quality",failure);}
             return null;
@@ -431,14 +563,15 @@ public final class VideoCallController implements AutoCloseable {
             latestStats.set(null);
         }
         cameraSwitch.close(); audio.close(); screen.close(); formatCache.clear(); knownCameras = List.of();
-        timer.shutdownNow(); worker.shutdownNow(); preferences.shutdownNow(); discovery.shutdownNow(); frames.values().forEach(VideoFrameMailbox::close);
+        timer.shutdownNow(); worker.shutdownNow(); receiver.shutdownNow(); preferences.shutdownNow(); discovery.shutdownNow(); frames.values().forEach(VideoFrameMailbox::close);
         jobs.forEach(future -> future.completeExceptionally(new SignalException("CONNECTION_CLOSED"))); jobs.clear();
         Thread.ofVirtual().name("video-client-close").start(() -> {
             long started = System.nanoTime();
             try {
             try { while (!worker.awaitTermination(2, TimeUnit.SECONDS)) { /* Do not dispose a factory still used by a native call. */ } }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
-            stopLocalCamera(); subscriptions.values().forEach(s -> s.peer().close()); subscriptions.clear();
+            while (!receiver.awaitTermination(2,TimeUnit.SECONDS)) { /* Native receiver owns its factory until stopped. */ }
+            stopLocalCamera(); disposeReceived();
             if (nativeSession != null) nativeSession.close(); audio.closeComplete().get(20, TimeUnit.SECONDS); screen.closeComplete().get(20, TimeUnit.SECONDS); show("Video đã đóng.");
             common.diagnostics.Diagnostics.current().event("video.client.closed", Map.of("shutdown_ms", (System.nanoTime() - started) / 1_000_000.0));
             closeComplete.complete(null);
