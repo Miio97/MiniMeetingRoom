@@ -53,8 +53,6 @@ public final class RoomService {
     public void setReopenGuard(server.meeting.RoomReopenGuard guard) {reopenGuard=Objects.requireNonNull(guard);}
     private volatile Runnable changed=() -> { };
     public void onChanged(Runnable listener) {changed=Objects.requireNonNull(listener);}
-    private volatile java.util.function.LongConsumer closedRoom=id -> {};
-    public void onRoomClosed(java.util.function.LongConsumer listener) {closedRoom=Objects.requireNonNull(listener);}
 
     public RoomService() {
         this(DatabaseConnection::getConnection, new PasswordHasher(), Clock.systemUTC());
@@ -117,7 +115,6 @@ public final class RoomService {
                 if (readOnly) return response;
                 if (response.success()) {
                     connection.commit();
-                    if("LEAVE_ROOM".equals(action) && response.room()!=null && "DA_DONG".equals(response.room().status())) closedRoom.accept(response.room().id());
                     changed.run();
                 } else {
                     connection.rollback();
@@ -219,17 +216,12 @@ public final class RoomService {
         if (!"DA_DONG".equals(room.status())) {
             return AuthResponse.error("ROOM_ALREADY_ACTIVE", "Phòng chưa kết thúc hoặc đã được mở lại.");
         }
-        var stale=staleGeneration(connection,room.id(),request);if(stale!=null) return stale;
         if(room.capacity()>50) return AuthResponse.error("ROOM_CAPACITY_POLICY","Phòng cũ vượt giới hạn 50 người. Cần điều chỉnh sức chứa trước khi mở lại.");
         Instant now = clock.instant();
         // Keep every previous attendance record ended, including stale active rows from an older server.
         try {reopenGuard.check(connection,room.id());}
         catch(server.meeting.RoomException cleaning) {return AuthResponse.error(cleaning.code(),cleaning.code().equals("ROOM_CLEANUP_OWNER_REQUIRED")?"Phòng legacy cũ chưa xác định server quản lý. Cần xác nhận trước khi dọn và mở lại.":"Đang dọn dữ liệu phòng. Vui lòng thử lại sau.");}
         markLegacyOwner(connection,room.id());
-        if(legacyOwner!=null) try(var s=connection.prepareStatement("UPDATE MMR_Phong_Van_Hanh SET Room_Opaque_ID=? WHERE Ma_Phong=? AND Instance_ID=?")) {
-            s.setString(1,"l_"+Base64.getUrlEncoder().withoutPadding().encodeToString(random.generateSeed(16)));s.setLong(2,room.id());s.setString(3,legacyOwner);
-            if(s.executeUpdate()!=1) throw new SQLException("ROOM_GENERATION_MISSING");
-        }
         try (PreparedStatement statement = connection.prepareStatement(
                 "UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = ?, Ly_Do_Roi = 'PHONG_DONG' "
                         + "WHERE Ma_Phong = ? AND Roi_Phong_Luc IS NULL")) {
@@ -252,8 +244,7 @@ public final class RoomService {
         List<RoomInfo> rooms = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + ROOM_COLUMNS + ", (SELECT COUNT(DISTINCT t.Ma_Nguoi_Dung) FROM Thanh_Vien_Phong t "
-                        + "WHERE t.Ma_Phong = p.Ma_Phong AND t.Roi_Phong_Luc IS NULL) AS So_Thanh_Vien, "
-                        + (legacyOwner==null?"NULL":"(SELECT x.Room_Opaque_ID FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong)")+" AS Room_Identity "
+                        + "WHERE t.Ma_Phong = p.Ma_Phong AND t.Roi_Phong_Luc IS NULL) AS So_Thanh_Vien "
                         + "FROM Phong_Hop p WHERE (p.Ma_Chu_Phong = ? OR EXISTS "
                         + "(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong = p.Ma_Phong AND h.Ma_Nguoi_Dung = ?)) "
                         + "ORDER BY p.Ngay_Tao DESC, p.Ma_Phong DESC LIMIT ? OFFSET ?")) {
@@ -263,8 +254,7 @@ public final class RoomService {
             statement.setInt(4, offset);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
-                    var room=toInfo(readRoom(result), result.getInt("So_Thanh_Vien"), List.of());
-                    rooms.add(new RoomInfo(room.id(),room.name(),room.code(),room.hostId(),room.createdAt(),room.status(),room.locked(),room.capacity(),room.people(),room.participants(),result.getString("Room_Identity")));
+                    rooms.add(toInfo(readRoom(result), result.getInt("So_Thanh_Vien"), List.of()));
                 }
             }
         }
@@ -291,7 +281,6 @@ public final class RoomService {
         if (room.hostId() != userId && !hasEverParticipated(connection, room.id(), userId)) {
             return AuthResponse.error("ROOM_ACCESS_DENIED", "Bạn chưa từng tham gia phòng này.");
         }
-        var stale=staleGeneration(connection,room.id(),request);if(stale!=null) return stale;
         Instant now = clock.instant();
         int removed;
         try (PreparedStatement statement = connection.prepareStatement(
@@ -326,16 +315,6 @@ public final class RoomService {
             }
         }
     }
-    private AuthResponse staleGeneration(Connection c,long room,RoomRequest request) throws SQLException {
-        if(legacyOwner==null) return null; // Isolated reference adapters have no runtime marker.
-        String expected=request.roomIdentity();
-        if(expected==null || expected.isBlank()) return AuthResponse.error("ROOM_GENERATION_REQUIRED","Cần cập nhật ứng dụng và tải lại thông tin phòng.");
-        try(var s=c.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=? AND Instance_ID=?")) {
-            s.setLong(1,room);s.setString(2,legacyOwner);try(var r=s.executeQuery()) {
-                return r.next() && expected.equals(r.getString(1))?null:AuthResponse.error("STALE_ROOM","Yêu cầu thuộc phiên phòng cũ. Hãy tải lại thông tin phòng.");
-            }
-        }
-    }
 
     private static String validate(String action, RoomRequest request) {
         if ("LIST_ROOMS".equals(action)) {
@@ -347,7 +326,6 @@ public final class RoomService {
         if (request == null) {
             return "Thiếu thông tin phòng.";
         }
-        if(request.roomIdentity()!=null && (request.roomIdentity().isBlank() || request.roomIdentity().length()>24)) return "Phiên phòng không hợp lệ.";
         String error;
         if ("CREATE_ROOM".equals(action)) {
             error = RoomValidation.nameError(request.name());
@@ -463,7 +441,7 @@ public final class RoomService {
         }
     }
 
-    private RoomInfo snapshot(Connection connection, RoomRow room, boolean includeParticipants) throws SQLException {
+    private static RoomInfo snapshot(Connection connection, RoomRow room, boolean includeParticipants) throws SQLException {
         List<RoomParticipant> participants = new ArrayList<>();
         if (includeParticipants) {
             try (PreparedStatement statement = connection.prepareStatement(
@@ -481,11 +459,7 @@ public final class RoomService {
             }
         }
         int people = includeParticipants ? participants.size() : activeCount(connection, room.id());
-        var info=toInfo(room, people, List.copyOf(participants));String identity=null;
-        if(legacyOwner!=null) try(var s=connection.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=? AND Instance_ID=?")) {
-            s.setLong(1,room.id());s.setString(2,legacyOwner);try(var r=s.executeQuery()) {if(r.next()) identity=r.getString(1);}
-        }
-        return new RoomInfo(info.id(),info.name(),info.code(),info.hostId(),info.createdAt(),info.status(),info.locked(),info.capacity(),info.people(),info.participants(),identity);
+        return toInfo(room, people, List.copyOf(participants));
     }
 
     private static RoomInfo toInfo(RoomRow room, int people, List<RoomParticipant> participants) {

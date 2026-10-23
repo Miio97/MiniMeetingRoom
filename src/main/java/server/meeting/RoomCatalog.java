@@ -16,22 +16,19 @@ public final class RoomCatalog implements AutoCloseable {
     private static final class Watch {
         final SignalingServer.Connection connection;final long user;final int limit;String watchId;
         Set<Long> focus=Set.of();
-        Map<Long,RoomInfo> last=Map.of();Set<Long> cleaning=Set.of();Map<Long,String> phases=Map.of();long revision;
+        Map<Long,RoomInfo> last=Map.of();Set<Long> cleaning=Set.of();long revision;
         Watch(SignalingServer.Connection connection,long user,int limit) {this.connection=connection;this.user=user;this.limit=limit;}
     }
     private final ConnectionProvider connections;
     private final ConcurrentHashMap<String,Watch> watchers=new ConcurrentHashMap<>();
     private final ScheduledThreadPoolExecutor worker=new ScheduledThreadPoolExecutor(1,Thread.ofPlatform().daemon().name("room-catalog").factory());
     private final AtomicBoolean queued=new AtomicBoolean(),dirty=new AtomicBoolean(),closed=new AtomicBoolean();
-    private volatile BiPredicate<Long,String> cleanup=(id,generation) -> false;
-    private volatile LongFunction<String> cleanupPhase=id -> "";
-    public void cleanupPhase(LongFunction<String> phase) {this.cleanupPhase=phase;}
+    private volatile LongPredicate cleanup=id -> false;
     private volatile SignalingServer server;
     private int failures;
     public RoomCatalog(ConnectionProvider connections) {this.connections=connections;worker.setRemoveOnCancelPolicy(true);worker.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);}
     public void bind(SignalingServer server) {this.server=server;}
-    public void cleanupStatus(LongPredicate cleanup) {this.cleanup=(id,generation) -> cleanup.test(id);}
-    public void cleanupGenerationStatus(BiPredicate<Long,String> cleanup) {this.cleanup=cleanup;}
+    public void cleanupStatus(LongPredicate cleanup) {this.cleanup=cleanup;}
     public JsonObject subscribe(SignalingServer.Connection connection,int limit) throws Exception {
         return subscribe(connection,limit,java.util.UUID.randomUUID().toString());
     }
@@ -66,36 +63,32 @@ public final class RoomCatalog implements AutoCloseable {
         } else {failures=0;if(dirty.get()) invalidate();}
     }
     private JsonObject read(Watch watch,boolean snapshot) throws Exception {
-        var next=new LinkedHashMap<Long,RoomInfo>();var cleaning=new HashSet<Long>();var phases=new HashMap<Long,String>();
+        var next=new LinkedHashMap<Long,RoomInfo>();var cleaning=new HashSet<Long>();
         String priority=watch.focus.isEmpty()?"":"CASE WHEN p.Ma_Phong IN ("+String.join(",",Collections.nCopies(watch.focus.size(),"?"))+") THEN 0 ELSE 1 END,";
         try(var connection=connections.getConnection();var query=connection.prepareStatement(
                 "SELECT p.Ma_Phong,p.Ten_Phong,p.Ma_Phong_Tham_Gia,p.Ma_Chu_Phong,p.Ngay_Tao,p.Trang_Thai,p.Da_Khoa,p.So_Nguoi_Toi_Da,"+
                 "(SELECT COUNT(DISTINCT t.Ma_Nguoi_Dung) FROM Thanh_Vien_Phong t WHERE t.Ma_Phong=p.Ma_Phong AND t.Roi_Phong_Luc IS NULL),"+
-                "EXISTS(SELECT 1 FROM Tin_Nhan m WHERE m.Ma_Phong=p.Ma_Phong),EXISTS(SELECT 1 FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong),(SELECT x.Room_Opaque_ID FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong) FROM Phong_Hop p WHERE p.Ma_Chu_Phong=? OR EXISTS(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong=p.Ma_Phong AND h.Ma_Nguoi_Dung=?) ORDER BY "+priority+"p.Ngay_Tao DESC,p.Ma_Phong DESC LIMIT ?")) {
+                "EXISTS(SELECT 1 FROM Tin_Nhan m WHERE m.Ma_Phong=p.Ma_Phong),EXISTS(SELECT 1 FROM MMR_Phong_Van_Hanh x WHERE x.Ma_Phong=p.Ma_Phong) FROM Phong_Hop p WHERE p.Ma_Chu_Phong=? OR EXISTS(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong=p.Ma_Phong AND h.Ma_Nguoi_Dung=?) ORDER BY "+priority+"p.Ngay_Tao DESC,p.Ma_Phong DESC LIMIT ?")) {
             query.setLong(1,watch.user);query.setLong(2,watch.user);int index=3;for(long id:watch.focus) query.setLong(index++,id);query.setInt(index,watch.limit);
             try(var rows=query.executeQuery()) {while(rows.next()) {
                 long id=rows.getLong(1);var created=rows.getTimestamp(5,Calendar.getInstance(TimeZone.getTimeZone("UTC")));
-                var room=new RoomInfo(id,rows.getString(2),rows.getString(3),rows.getLong(4),created.toInstant().toString(),rows.getString(6),rows.getBoolean(7),rows.getInt(8),rows.getInt(9),List.of(),rows.getString(12));
-                next.put(id,room);
-                if("DA_DONG".equals(room.status()) && !rows.getBoolean(11)) {cleaning.add(id);phases.put(id,"OWNER_REQUIRED");}
-                else if("DA_DONG".equals(room.status()) && (rows.getBoolean(10)||cleanup.test(id,room.roomIdentity()))) cleaning.add(id);
+                var room=new RoomInfo(id,rows.getString(2),rows.getString(3),rows.getLong(4),created.toInstant().toString(),rows.getString(6),rows.getBoolean(7),rows.getInt(8),rows.getInt(9),List.of());
+                next.put(id,room);if("DA_DONG".equals(room.status()) && (rows.getBoolean(11) && rows.getBoolean(10)||cleanup.test(id))) cleaning.add(id);
             }}
         }
-        for(long id:cleaning) phases.putIfAbsent(id,cleanupPhase.apply(id).isEmpty()?"CLEANING":cleanupPhase.apply(id));
         var missing=new HashSet<>(watch.last.keySet());missing.addAll(watch.focus);missing.removeAll(next.keySet());
         var stillAllowed=new HashSet<Long>();
         if(!missing.isEmpty()) try(var connection=connections.getConnection();var query=connection.prepareStatement("SELECT p.Ma_Phong FROM Phong_Hop p WHERE p.Ma_Phong IN ("+String.join(",",Collections.nCopies(missing.size(),"?"))+") AND (p.Ma_Chu_Phong=? OR EXISTS(SELECT 1 FROM Thanh_Vien_Phong h WHERE h.Ma_Phong=p.Ma_Phong AND h.Ma_Nguoi_Dung=?))")) {
             int index=1;for(long id:missing) query.setLong(index++,id);query.setLong(index++,watch.user);query.setLong(index,watch.user);
             try(var rows=query.executeQuery()) {while(rows.next()) stillAllowed.add(rows.getLong(1));}
         }
-        if(!snapshot && next.equals(watch.last) && cleaning.equals(watch.cleaning) && phases.equals(watch.phases) && missing.isEmpty()) return null;
+        if(!snapshot && next.equals(watch.last) && cleaning.equals(watch.cleaning) && missing.isEmpty()) return null;
         var changed=new JsonArray();var removed=new JsonArray();var evicted=new JsonArray();
         for(var entry:next.entrySet()) if(snapshot || !entry.getValue().equals(watch.last.get(entry.getKey())) || cleaning.contains(entry.getKey())!=watch.cleaning.contains(entry.getKey())) changed.add(JSON.toJsonTree(entry.getValue()));
         for(long id:missing) {if(stillAllowed.contains(id)) evicted.add(id);else removed.add(id);}
         var body=new JsonObject();body.addProperty("watchId",watch.watchId);body.addProperty("snapshot",snapshot);body.addProperty("revision",++watch.revision);body.add("rooms",changed);body.add("removed",removed);body.add("cleaning",JSON.toJsonTree(cleaning));
         body.add("evicted",evicted);
-        body.add("cleanupPhases",JSON.toJsonTree(phases));
-        watch.last=Map.copyOf(next);watch.cleaning=Set.copyOf(cleaning);watch.phases=Map.copyOf(phases);return body;
+        watch.last=Map.copyOf(next);watch.cleaning=Set.copyOf(cleaning);return body;
     }
     @Override public void close() {if(closed.compareAndSet(false,true)) {worker.shutdownNow();watchers.clear();}}
 }

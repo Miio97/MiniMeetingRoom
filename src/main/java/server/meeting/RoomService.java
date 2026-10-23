@@ -52,7 +52,7 @@ public final class RoomService implements AutoCloseable {
     private record PendingTransfer(String roomOpaqueId,long previousHost,long userId) { }
     private final Map<Long, PendingTransfer> pendingTransfers = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile java.util.function.LongConsumer closedRoom=id -> { };
-    public void onRoomClosed(java.util.function.LongConsumer listener) {closedRoom=Objects.requireNonNull(listener);if(legacy!=null) legacy.onRoomClosed(listener);}
+    public void onRoomClosed(java.util.function.LongConsumer listener) {closedRoom=Objects.requireNonNull(listener);}
     private final java.util.concurrent.CopyOnWriteArrayList<Consumer<String>> liveRoomClosed=new java.util.concurrent.CopyOnWriteArrayList<>();
     /** RAM lifecycle, independent of eventual database cleanup. Listener must never do I/O. */
     public Runnable onLiveRoomClosed(Consumer<String> listener) {
@@ -695,12 +695,10 @@ public final class RoomService implements AutoCloseable {
         Instant now = clock.instant(); room.revision++;
         boolean closeRoom = room.members.size() == 1 || "PHONG_DONG".equals(reason);
         if (closeRoom) {
-            long blockedAt=System.nanoTime();
             broadcast(room, "ROOM_CLOSED", Map.of("reason", reason));
             for (Member other : room.members.values()) connections.remove(other.connectionId);
             room.members.clear(); room.waiting.clear(); rooms.remove(member.roomId);
             chatRoomClosed(member.roomId);
-            common.diagnostics.Diagnostics.current().event("room.close.blocked",Map.of("room_id",room.stored.id(),"duration_ms",(System.nanoTime()-blockedAt)/1e6));
             pendingTransfers.remove(room.stored.id());
             if(!alreadyPersisted) persist(new PendingHistory(true, room.stored.id(), room.stored.roomId(), now, "PHONG_DONG"));
         } else {

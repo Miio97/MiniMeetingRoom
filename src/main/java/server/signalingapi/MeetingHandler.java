@@ -23,8 +23,6 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
     private final server.meeting.RoomCatalog catalog;
     public void catalogChanged() {catalog.invalidate();}
     public void cleanupStatus(java.util.function.LongPredicate status) {catalog.cleanupStatus(status);}
-    public void cleanupGenerationStatus(java.util.function.BiPredicate<Long,String> status) {catalog.cleanupGenerationStatus(status);}
-    public void cleanupPhase(java.util.function.LongFunction<String> phase) {catalog.cleanupPhase(phase);}
     private volatile ChatDispatcher dispatcher;
     private final ConcurrentHashMap<String, ChatRateLimiter> chatLimits = new ConcurrentHashMap<>();
     private final RoomChatStore chat=new RoomChatStore();

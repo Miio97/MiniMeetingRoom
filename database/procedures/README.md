@@ -1,8 +1,5 @@
 # Stored procedure cho create / join / exit phòng
 
-Cleanup theo lô được bàn giao riêng trong `006-room-cleanup-v1.sql` (3 procedure mới, không thay 005).
-Hợp đồng, cài đặt, rollback và giới hạn kiểm chứng: [room-cleanup.md](../../docs/room-cleanup.md).
-
 Bộ SQL chuẩn bị ngày 23/10/2026, đối chiếu `RoomRepository`, `RoomService`, `SessionValidator`, schema và migration runtime hiện tại. Java server hiện đã tích hợp create/join/exit; xem `docs/room-stored-procedure-integration.md` để chạy bản mới. Cài routine không tự cập nhật một tiến trình Java đang chạy. Không có tỷ lệ tăng tốc được cam kết, chưa có benchmark MySQL/Railway cho bộ routine này.
 
 ## File đưa lên database

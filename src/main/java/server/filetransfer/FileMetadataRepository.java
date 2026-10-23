@@ -43,29 +43,6 @@ public final class FileMetadataRepository {
     private final SecureRandom random = new SecureRandom();
     private String legacyOwner;
     public void legacyOwner(String instance) {legacyOwner=Objects.requireNonNull(instance);}
-    public boolean requiresGeneration() {return legacyOwner!=null;}
-    @FunctionalInterface public interface TransferAdmission<T> {T run(String generation) throws IOException;}
-    /** Register before releasing the same room lock used by close/finalize/reopen. No socket I/O here. */
-    public <T> T admitTransfer(long user,long room,String token,String expected,TransferAdmission<T> admission) throws SQLException,IOException {
-        try(var c=connections.getConnection()) {
-            beginMutation(c);
-            try {
-                requireOpenRoom(lockRoom(c,room));authorize(c,user,room);requireRoomSession(c,token,user,room);
-                String generation;
-                try(var s=c.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
-                    s.setLong(1,room);try(var r=s.executeQuery()) {if(r.next()) generation=r.getString(1);else if(legacyOwner==null) generation="unmarked-"+room;else throw new SQLException("ROOM_GENERATION_MISSING");}
-                } catch(SQLException failure) {
-                    // Historical isolated H2 fixtures predate the runtime table. Never a MySQL fallback.
-                    if(legacyOwner==null && failure.getErrorCode()==42102 && "H2".equals(c.getMetaData().getDatabaseProductName())) generation="membership-"+membershipGeneration(c,user,room);
-                    else throw failure;
-                }
-                if(expected!=null && !expected.isBlank() && !expected.equals(generation)) throw new TransferException("STALE_TRANSFER","Lượt truyền thuộc phiên phòng cũ.");
-                T result=admission.run(generation);
-                try {c.commit();return result;}
-                catch(SQLException failure) {if(result instanceof AutoCloseable resource) try {resource.close();} catch(Exception secondary) {failure.addSuppressed(secondary);}throw failure;}
-            } catch(SQLException|IOException|RuntimeException e) {rollback(c,e);throw e;}
-        }
-    }
     @FunctionalInterface public interface RoomSessionGate {
         boolean permits(long roomId, long userId, String tokenHash);
     }
@@ -128,7 +105,6 @@ public final class FileMetadataRepository {
         return beginUpload(user,room,opaque,null,action);
     }
     public BoundUpload beginUpload(long user,long room,String opaque,String token,UploadBegin action) throws SQLException,TransferException,IOException {
-        final String generation;
         try(var connection=connections.getConnection()) {
             beginMutation(connection);
             try {
@@ -138,12 +114,10 @@ public final class FileMetadataRepository {
                 if(opaque!=null && !opaque.isBlank()) try(var query=connection.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
                     query.setLong(1,room);try(var rows=query.executeQuery()) {if(!rows.next() || !opaque.equals(rows.getString(1))) throw new TransferException("STALE_TRANSFER","Phòng đã được mở lại.");}
                 }
-                generation=membershipGeneration(connection,user,room);
-                connection.commit();
+                String generation=membershipGeneration(connection,user,room);
+                var session=action.begin(generation);connection.commit();return new BoundUpload(session,generation);
             } catch(SQLException | IOException | RuntimeException failure) {rollback(connection,failure);throw failure;}
         }
-        // The transport lease registered by admitTransfer fences cleanup until this I/O ends.
-        return new BoundUpload(action.begin(generation),generation);
     }
     private static String membershipGeneration(Connection connection,long userId,long roomId) throws SQLException,TransferException {
         try(var query=connection.prepareStatement("SELECT Ma_Thanh_Vien_Phong FROM Thanh_Vien_Phong WHERE Ma_Phong=? AND Ma_Nguoi_Dung=? AND Roi_Phong_Luc IS NULL ORDER BY Ma_Thanh_Vien_Phong DESC LIMIT 1")) {
@@ -183,8 +157,8 @@ public final class FileMetadataRepository {
                     }
                     if(legacyOwner!=null) server.meeting.RoomRepository.markLegacyOwnership(connection,roomId,legacyOwner,clock.instant());
                     addMembership(connection, roomId, userId, "CHU_PHONG");
-                    var result=withIdentity(connection,new RoomInfo(roomId, code, roomName, capacity, userId));
-                    connection.commit();return result;
+                    connection.commit();
+                    return new RoomInfo(roomId, code, roomName, capacity, userId);
                 } catch (SQLException | TransferException | RuntimeException error) {
                     rollback(connection, error);
                     // The only generated unique field is the room code. Retry a rare collision.
@@ -231,8 +205,8 @@ public final class FileMetadataRepository {
                     addMembership(connection, room.info().id(), userId,
                             room.info().ownerId() == userId ? "CHU_PHONG" : "THANH_VIEN");
                 }
-                var result=withIdentity(connection,room.info());
-                connection.commit();return result;
+                connection.commit();
+                return room.info();
             } catch (SQLException | TransferException | RuntimeException error) {
                 rollback(connection, error);
                 throw error;
@@ -243,22 +217,12 @@ public final class FileMetadataRepository {
     public void leaveRoom(long userId, long roomId) throws SQLException, TransferException {
         leaveRoom(userId, roomId, null);
     }
-    private RoomInfo withIdentity(Connection c,RoomInfo room) throws SQLException {
-        if(legacyOwner==null) return room;
-        try(var s=c.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
-            s.setLong(1,room.id());try(var r=s.executeQuery()) {if(!r.next()) throw new SQLException("ROOM_GENERATION_MISSING");return new RoomInfo(room.id(),room.code(),room.name(),room.capacity(),room.ownerId(),r.getString(1));}
-        }
-    }
     public void leaveRoom(long userId, long roomId, String token) throws SQLException, TransferException {
-        leaveRoom(userId,roomId,token,null);
-    }
-    public void leaveRoom(long userId,long roomId,String token,String expected) throws SQLException,TransferException {
         if (userId <= 0 || roomId <= 0) throw invalid("Phòng không hợp lệ.");
         try (Connection connection = connections.getConnection()) {
             beginMutation(connection);
             try {
                 lockRoom(connection, roomId); // Same lock as join/complete: leaving revokes future commits.
-                checkGeneration(connection,roomId,expected);
                 requireRoomSession(connection, token, userId, roomId);
                 try (PreparedStatement statement = connection.prepareStatement("""
                         UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = ?, Ly_Do_Roi = 'TU_ROI'
@@ -280,16 +244,9 @@ public final class FileMetadataRepository {
     /** Cursor-based room metadata delivery; file bytes and storage paths are never included. */
     public List<FileMetadata> list(long userId, long roomId, long afterId)
             throws SQLException, TransferException {
-        return list(userId,roomId,afterId,null,null);
-    }
-    public List<FileMetadata> list(long userId,long roomId,long afterId,String token,String expected) throws SQLException,TransferException {
         if (afterId < 0) throw invalid("Mốc danh sách tệp không hợp lệ.");
         try (Connection connection = connections.getConnection()) {
-            beginMutation(connection);
-            try {
-            requireOpenRoom(lockRoom(connection,roomId));checkGeneration(connection,roomId,expected);
             authorize(connection, userId, roomId);
-            requireRoomSession(connection,token,userId,roomId);
             try (PreparedStatement statement = connection.prepareStatement(FILE_SELECT + """
                     WHERE t.Ma_Phong = ? AND f.Ma_Tep > ? AND t.Ngay_Xoa IS NULL
                     ORDER BY f.Ma_Tep LIMIT ?
@@ -301,16 +258,8 @@ public final class FileMetadataRepository {
                 try (ResultSet result = statement.executeQuery()) {
                     while (result.next()) files.add(readFile(result).metadata());
                 }
-                connection.commit();return List.copyOf(files);
+                return List.copyOf(files);
             }
-            } catch(SQLException|TransferException|RuntimeException failure) {rollback(connection,failure);throw failure;}
-        }
-    }
-    private void checkGeneration(Connection c,long room,String expected) throws SQLException,TransferException {
-        if((expected==null || expected.isBlank()) && legacyOwner==null) return;
-        if(expected==null || expected.isBlank()) throw new TransferException("ROOM_GENERATION_REQUIRED","Cần cập nhật ứng dụng và vào lại phòng.");
-        try(var s=c.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
-            s.setLong(1,room);try(var r=s.executeQuery()) {if(!r.next() || !expected.equals(r.getString(1))) throw new TransferException("STALE_TRANSFER","Yêu cầu thuộc phiên phòng cũ.");}
         }
     }
 

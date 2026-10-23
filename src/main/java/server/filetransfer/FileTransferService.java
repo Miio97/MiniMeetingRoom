@@ -33,8 +33,6 @@ public final class FileTransferService {
     private final TransferConfig config;
     private final Map<Long, Integer> userCounts = new ConcurrentHashMap<>();
     private final Semaphore slots;
-    private final RoomTransfers roomTransfers = new RoomTransfers();
-    public RoomTransfers roomTransfers() {return roomTransfers;}
 
     public FileTransferService(FileMetadataRepository repository, TransferStorage storage, TransferConfig config) {
         this.repository = repository; this.storage = storage; this.config = config;
@@ -42,10 +40,6 @@ public final class FileTransferService {
     }
 
     public void handle(Frame request, DataInputStream input, DataOutputStream output, Runnable activity)
-            throws IOException, SQLException {
-        handle(request,input,output,activity,() -> {});
-    }
-    public void handle(Frame request, DataInputStream input, DataOutputStream output, Runnable activity,Runnable abort)
             throws IOException, SQLException {
         String token = string(request.header(), "token", 256);
         long user = repository.authenticate(token);
@@ -57,16 +51,8 @@ public final class FileTransferService {
                 int count = userCounts.compute(user, (key, previous) -> previous == null ? 1 : previous + 1);
                 admitted = true;
                 if (count > config.maxPerUser()) throw failure("USER_BUSY", "Đã đạt giới hạn truyền đồng thời.");
-                long room=request.type()==Type.UPLOAD_INIT?number(request.header(),"roomId"):repository.find(user,number(request.header(),"fileId")).roomId();
-                String expected=optional(request.header(),"roomIdentity",96);
-                if(repository.requiresGeneration() && expected.isBlank())
-                    throw failure("ROOM_GENERATION_REQUIRED","Cần cập nhật ứng dụng và vào lại phòng trước khi gửi tệp.");
-                try(var lease=repository.admitTransfer(user,room,token,expected,generation -> roomTransfers.register(room,generation,abort))) {
-                    Runnable checked=() -> {try {lease.check();} catch(TransferException e) {throw new java.util.concurrent.CancellationException("ROOM_TRANSFER_STOPPED");}if(Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("ROOM_TRANSFER_STOPPED");activity.run();};
-                    lease.check();
-                    if (request.type() == Type.UPLOAD_INIT) upload(request, user, token, input, output, checked);
-                    else download(request, user, token, output, checked);
-                }
+                if (request.type() == Type.UPLOAD_INIT) upload(request, user, token, input, output, activity);
+                else download(request, user, token, output, activity);
             } finally {
                 if (admitted) userCounts.computeIfPresent(user, (key, count) -> count <= 1 ? null : count - 1);
                 slots.release();
@@ -80,14 +66,15 @@ public final class FileTransferService {
             case ROOM_JOIN -> send(output, Type.ROOM_RESULT, request, repository.joinRoom(user,
                     string(request.header(), "code", 20), optional(request.header(), "pin", 128), token));
             case ROOM_LEAVE -> {
-                repository.leaveRoom(user, number(request.header(), "roomId"), token,optional(request.header(),"roomIdentity",96));
+                repository.leaveRoom(user, number(request.header(), "roomId"), token);
                 send(output, Type.ROOM_RESULT, request, Map.of());
             }
             case FILE_LIST -> {
+                repository.authorizeSession(token, user, number(request.header(), "roomId"));
                 long after = number(request.header(), "afterId");
                 if (after < 0) throw failure("INVALID_REQUEST", "Mốc danh sách không hợp lệ.");
                 JsonObject header = new JsonObject(); JsonArray files = new JsonArray(); header.add("files", files);
-                for (FileMetadata file : repository.list(user, number(request.header(), "roomId"), after,token,optional(request.header(),"roomIdentity",96))) {
+                for (FileMetadata file : repository.list(user, number(request.header(), "roomId"), after)) {
                     files.add(TransferProtocol.GSON.toJsonTree(file));
                     if (TransferProtocol.GSON.toJson(header).getBytes(StandardCharsets.UTF_8).length > TransferProtocol.MAX_HEADER) {
                         files.remove(files.size() - 1); break;

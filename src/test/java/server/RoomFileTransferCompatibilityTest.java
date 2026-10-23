@@ -92,19 +92,6 @@ class RoomFileTransferCompatibilityTest {
             }
         }
     }
-    @Test void legacyTlsClientCarriesGenerationAcrossListReopenAndLeave() throws Exception {
-        RoomTestFixture.ownershipSchema(fixture::connection);fixture.rooms.legacyOwner("local");
-        var created=control.createRoom(host.token(),"Generation fence","1234",4);assertTrue(created.success());
-        long id=created.room().id();String old=created.room().roomIdentity();assertNotNull(old);
-        try(var cleanup=new server.meeting.ImmediateRoomCleanup(fixture::connection,"local",room -> {},room -> false,() -> {})) {
-            fixture.rooms.setReopenGuard(cleanup);
-            assertTrue(control.leaveRoom(host.token(),id).success());assertTrue(cleanup.clean(id));
-            var fresh=fixture.client();assertTrue(fresh.listRooms(host.token()).success());
-            var reopened=fresh.reopenRoom(host.token(),id);assertTrue(reopened.success(),reopened.message());assertNotEquals(old,reopened.room().roomIdentity());
-            var stale=fixture.rooms.handle(new common.auth.AuthRequest("LEAVE_ROOM",null,null,null,null,host.token(),new common.room.RoomRequest(null,null,Long.toString(id),0).inMeeting(old)));
-            assertEquals("STALE_ROOM",stale.code());assertTrue(fresh.leaveRoom(host.token(),id).success());
-        }
-    }
 
     @Test
     void realRoomJoinGrantsFileAccessAndAuthLeaveRevokesItWithoutDeletingSenderFiles() throws Exception {

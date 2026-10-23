@@ -56,7 +56,6 @@ public final class FileStorageService implements TransferStorage {
     private final boolean resumeEnabled;
     private final ConcurrentHashMap<UUID, Session> sessions = new ConcurrentHashMap<>();
     private final java.util.Map<String, Integer> readers = new java.util.HashMap<>();
-    private final Set<String> deleting = new java.util.HashSet<>();
     private final ReentrantLock accounting = new ReentrantLock();
     private final FileChannel processLockChannel;
     private final FileLock processLock;
@@ -315,18 +314,13 @@ public final class FileStorageService implements TransferStorage {
         accounting.lock();
         try {
             if (sessions.get(session.id) != session) return;
-            if (readers.containsKey(session.storageKey()) || !deleting.add(session.storageKey())) throw error("TRANSFER_BUSY", "Stored file is being read or deleted.");
-        } finally {accounting.unlock();}
-        boolean removed=false;
-        try {
+            if (readers.containsKey(session.storageKey())) throw error("TRANSFER_BUSY", "Stored file is being read.");
             Files.deleteIfExists(checked(session.part));
             Files.deleteIfExists(checked(finalPath(session)));
             Files.deleteIfExists(checked(manifest(session)));
-            removed=true;
-        } finally {
-            accounting.lock();try {deleting.remove(session.storageKey());if(removed && sessions.remove(session.id,session)) accountedBytes-=session.size;}
-            finally {accounting.unlock();}
-        }
+            sessions.remove(session.id, session);
+            accountedBytes -= session.size;
+        } finally { accounting.unlock(); }
     }
 
     /** Resolves only generated object keys and rejects symlinks in every ancestor. */
@@ -346,7 +340,7 @@ public final class FileStorageService implements TransferStorage {
         return checked(root.resolve(storageKey));
     }
 
-    /** Admin/room-retention hook: coordinator fences the closed room against reopen. */
+    /** Admin/room-retention hook: caller holds the closed room's DB lock. */
     @Override public java.util.List<String> roomObjects(long roomId,int limit) throws IOException {
         if(roomId<1 || limit<1 || limit>100) throw new IllegalArgumentException("ROOM_SCAN_LIMIT");
         Path directory=checked(root.resolve("rooms/"+roomId+"/files"));
@@ -368,17 +362,19 @@ public final class FileStorageService implements TransferStorage {
             if (sessions.values().stream().anyMatch(s -> s.storageKey().equals(storageKey))) {
                 throw error("TRANSFER_BUSY", "Reconcile pending upload metadata before deleting this file.");
             }
-            if(!deleting.add(storageKey)) throw error("TRANSFER_BUSY","Stored file is being deleted.");
-        } finally {accounting.unlock();}
-        long removed=0;
-        try {if(Files.exists(path,LinkOption.NOFOLLOW_LINKS)) {long size=Files.size(path);Files.delete(path);removed=size;}}
-        finally {accounting.lock();try {deleting.remove(storageKey);accountedBytes-=removed;} finally {accounting.unlock();}}
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                long size = Files.size(path);
+                Files.delete(path);
+                accountedBytes -= size;
+            }
+        } finally {
+            accounting.unlock();
+        }
     }
 
     @Override public InputStream open(String storageKey) throws IOException {
         accounting.lock();
         try {
-            if(deleting.contains(storageKey)) throw error("TRANSFER_BUSY","Stored file is being deleted.");
             InputStream input = Files.newInputStream(regularObject(storageKey), LinkOption.NOFOLLOW_LINKS);
             readers.merge(storageKey, 1, Integer::sum);
             return new FilterInputStream(input) {

@@ -39,15 +39,12 @@ public final class FileTransferClient implements AutoCloseable {
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
     private final Set<Cancellation> active = ConcurrentHashMap.newKeySet();
-    private final Map<Long,String> identities=new ConcurrentHashMap<>();
-    private RoomInfo remember(RoomInfo room) {if(room.roomIdentity()!=null) identities.put(room.id(),room.roomIdentity());return room;}
     private volatile boolean closed;
 
     /** Closing the active socket interrupts both reads and blocked writes, preserving resume data. */
     public static final class Cancellation implements AutoCloseable {
         private boolean cancelled;
         private Socket socket;
-        private boolean finished;
         public synchronized boolean isCancelled() { return cancelled; }
         private synchronized void bind(Socket value) throws IOException {
             if (cancelled) { value.close(); throw new TransferException("CANCELLED", "Đã dừng truyền tệp."); }
@@ -55,17 +52,10 @@ public final class FileTransferClient implements AutoCloseable {
         }
         private synchronized void unbind(Socket value) { if (socket == value) socket = null; }
         public synchronized void cancel() {
-            if(finished) return;
             cancelled = true;
-            if (socket != null) try { socket.setSoLinger(true,0);socket.close(); } catch (IOException error) {
+            if (socket != null) try { socket.close(); } catch (IOException error) {
                 System.getLogger(FileTransferClient.class.getName()).log(System.Logger.Level.DEBUG, "Socket close failed", error);
             }
-        }
-        private synchronized void publishDownload(Path part,Path target) throws IOException {
-            check();
-            try {Files.move(part,target,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
-            catch(AtomicMoveNotSupportedException e) {Files.move(part,target,StandardCopyOption.REPLACE_EXISTING);}
-            finished=true;
         }
         private void check() throws IOException {
             if (isCancelled() || Thread.currentThread().isInterrupted()) throw new TransferException("CANCELLED", "Đã dừng truyền tệp.");
@@ -79,18 +69,17 @@ public final class FileTransferClient implements AutoCloseable {
     }
     public RoomInfo createRoom(String token, String name, String pin, int capacity) throws IOException {
         JsonObject header = authenticated(token); header.addProperty("name", name); header.addProperty("pin", pin); header.addProperty("capacity", capacity);
-        return remember(TransferProtocol.GSON.fromJson(request(Type.ROOM_CREATE, UUID.randomUUID(), header, Type.ROOM_RESULT).header(), RoomInfo.class));
+        return TransferProtocol.GSON.fromJson(request(Type.ROOM_CREATE, UUID.randomUUID(), header, Type.ROOM_RESULT).header(), RoomInfo.class);
     }
     public RoomInfo joinRoom(String token, String code, String pin) throws IOException {
         JsonObject header = authenticated(token); header.addProperty("code", code); header.addProperty("pin", pin);
-        return remember(TransferProtocol.GSON.fromJson(request(Type.ROOM_JOIN, UUID.randomUUID(), header, Type.ROOM_RESULT).header(), RoomInfo.class));
+        return TransferProtocol.GSON.fromJson(request(Type.ROOM_JOIN, UUID.randomUUID(), header, Type.ROOM_RESULT).header(), RoomInfo.class);
     }
     public void leaveRoom(String token, long roomId) throws IOException {
         leaveRoom(token, roomId, new Cancellation());
     }
     public void leaveRoom(String token, long roomId, Cancellation cancellation) throws IOException {
         JsonObject header = authenticated(token); header.addProperty("roomId", roomId);
-        if(identities.containsKey(roomId)) header.addProperty("roomIdentity",identities.get(roomId));
         UUID id = UUID.randomUUID();
         try (Connection connection = connect(cancellation)) {
             connection.send(Type.ROOM_LEAVE, id, header, new byte[0]); require(connection.receive(id), Type.ROOM_RESULT);
@@ -100,11 +89,7 @@ public final class FileTransferClient implements AutoCloseable {
         return listFiles(token, roomId, afterId, new Cancellation());
     }
     public List<FileMetadata> listFiles(String token, long roomId, long afterId, Cancellation cancellation) throws IOException {
-        return listFiles(token,roomId,afterId,cancellation,identities.get(roomId));
-    }
-    public List<FileMetadata> listFiles(String token,long roomId,long afterId,Cancellation cancellation,String identity) throws IOException {
         JsonObject header = authenticated(token); header.addProperty("roomId", roomId); header.addProperty("afterId", afterId);
-        if(identity!=null) header.addProperty("roomIdentity",identity);
         Frame result;
         UUID id = UUID.randomUUID();
         try (Connection connection = connect(cancellation)) {
@@ -115,7 +100,6 @@ public final class FileTransferClient implements AutoCloseable {
     }
     public Upload prepareUpload(long roomId, Path source, UUID transferId, Cancellation cancellation,
             ProgressListener listener) throws IOException {
-        String identity=identities.get(roomId);
         Path path = source.toAbsolutePath().normalize();
         BasicFileAttributes before = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         if (!before.isRegularFile() || before.isSymbolicLink()) throw new TransferException("INVALID_FILE", "Chọn tệp thông thường, không phải liên kết.");
@@ -126,7 +110,7 @@ public final class FileTransferClient implements AutoCloseable {
         if (before.size() != after.size() || !before.lastModifiedTime().equals(after.lastModifiedTime())) throw changed();
         String mime = Files.probeContentType(path);
         return new Upload(transferId, roomId, path, path.getFileName().toString(), mime == null ? "application/octet-stream" : mime,
-                before.size(), before.lastModifiedTime().toMillis(), checksum,identity);
+                before.size(), before.lastModifiedTime().toMillis(), checksum);
     }
     public FileMetadata upload(String token, Upload upload, Cancellation cancellation, ProgressListener listener) throws IOException {
         checkSource(upload); cancellation.check();
@@ -166,9 +150,6 @@ public final class FileTransferClient implements AutoCloseable {
     }
     public Path download(String token, FileMetadata file, Path destination, Cancellation cancellation,
             ProgressListener listener) throws IOException {
-        return download(token,file,destination,cancellation,listener,identities.get(file.roomId()));
-    }
-    public Path download(String token,FileMetadata file,Path destination,Cancellation cancellation,ProgressListener listener,String identity) throws IOException {
         validateFile(file); cancellation.check();
         Path target = destination.toAbsolutePath().normalize(); Path part = partialPath(file, target);
         if (!Files.isDirectory(target.getParent()) || Files.isSymbolicLink(target)) throw new TransferException("INVALID_PATH", "Nơi lưu tệp không hợp lệ.");
@@ -182,7 +163,6 @@ public final class FileTransferClient implements AutoCloseable {
             reporter.status("Đang kiểm tra dữ liệu tải dở", offset);
             String prefix = offset == 0 ? "" : hash(output, offset, cancellation);
             JsonObject header = authenticated(token); header.addProperty("fileId", file.id()); header.addProperty("offset", offset);
-            if(identity!=null) header.addProperty("roomIdentity",identity);
             header.addProperty("checksum", file.checksum()); header.addProperty("prefixChecksum", prefix);
             UUID requestId = UUID.randomUUID();
             try (Connection connection = connect(cancellation)) {
@@ -214,7 +194,8 @@ public final class FileTransferClient implements AutoCloseable {
         } catch (java.nio.channels.OverlappingFileLockException busy) {
             throw new TransferException("BUSY", "Tệp này đang được tải ở tác vụ khác.");
         }
-        cancellation.publishDownload(part,target);
+        try { Files.move(part, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+        catch (AtomicMoveNotSupportedException unsupported) { Files.move(part, target, StandardCopyOption.REPLACE_EXISTING); }
         if (listener != null) listener.onProgress(new Progress("Tải thành công", file.sizeBytes(), file.sizeBytes(), 0));
         return target;
     }
@@ -262,16 +243,16 @@ public final class FileTransferClient implements AutoCloseable {
             if (closed) { cancellation.cancel(); cancellation.check(); }
             plain.connect(new InetSocketAddress(settings.host(), settings.port()), Math.min(settings.timeoutMillis(), 5000));
             SSLSocket socket = (SSLSocket) tls.getSocketFactory().createSocket(plain, settings.host(), settings.port(), true);
-            socket.setSoTimeout(settings.timeoutMillis()); socket.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
+            cancellation.bind(socket); socket.setSoTimeout(settings.timeoutMillis()); socket.setEnabledProtocols(new String[]{"TLSv1.3", "TLSv1.2"});
             SSLParameters parameters = socket.getSSLParameters(); parameters.setEndpointIdentificationAlgorithm("HTTPS"); socket.setSSLParameters(parameters);
-            socket.startHandshake(); return new Connection(socket, plain, cancellation);
+            socket.startHandshake(); return new Connection(socket, cancellation);
         } catch (IOException | RuntimeException failure) { active.remove(cancellation); plain.close(); cancellation.unbind(plain); throw failure; }
     }
     private final class Connection implements AutoCloseable {
-        private final SSLSocket socket; private final Socket transport;private final Cancellation cancellation;
+        private final SSLSocket socket; private final Cancellation cancellation;
         private final DataInputStream input; private final DataOutputStream output;
-        Connection(SSLSocket socket, Socket transport,Cancellation cancellation) throws IOException {
-            this.socket = socket;this.transport=transport; this.cancellation = cancellation;
+        Connection(SSLSocket socket, Cancellation cancellation) throws IOException {
+            this.socket = socket; this.cancellation = cancellation;
             input = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 65536));
             output = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 65536));
         }
@@ -287,7 +268,7 @@ public final class FileTransferClient implements AutoCloseable {
             }
             return frame;
         }
-        @Override public void close() throws IOException {active.remove(cancellation);cancellation.unbind(transport);socket.close();}
+        @Override public void close() throws IOException { active.remove(cancellation); cancellation.unbind(socket); socket.close(); }
     }
     @Override public void close() { closed = true; active.forEach(Cancellation::cancel); active.clear(); }
     private static JsonObject authenticated(String token) throws IOException {

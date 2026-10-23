@@ -97,16 +97,6 @@ class FileTransferClientTest {
         serve((request, input, output) -> send(output, Type.UPLOAD_COMPLETE, request, completed, new byte[0]));
         assertEquals(completed, client.cancelUpload("session", UUID.randomUUID())); peer.get(5, TimeUnit.SECONDS);
     }
-    @Test void closeBeforeVerificationNeverRenamesPartAndLateCancelKeepsCompletedDownload() throws Exception {
-        byte[] content="completed bytes".getBytes(java.nio.charset.StandardCharsets.UTF_8);var file=metadata(content);Path target=files.resolve("complete.bin");
-        serve((request,input,output) -> {accept(output,request,file,0);send(output,Type.DOWNLOAD_CHUNK,request,Map.of("offset",0),content);send(output,Type.DOWNLOAD_COMPLETE,request,file,new byte[0]);});
-        var cancellation=new FileTransferClient.Cancellation();
-        assertThrows(java.io.IOException.class,() -> client.download("session",file,target,cancellation,p -> {if(p.status().equals("Đang xác minh SHA-256")) cancellation.cancel();}));
-        assertFalse(Files.exists(target));assertTrue(Files.exists(FileTransferClient.partialPath(file,target)));peer.get(5,TimeUnit.SECONDS);close();
-        serve((request,input,output) -> {accept(output,request,file,content.length);send(output,Type.DOWNLOAD_COMPLETE,request,file,new byte[0]);});
-        var completed=new FileTransferClient.Cancellation();client.download("session",file,target,completed,null);completed.cancel();
-        assertArrayEquals(content,Files.readAllBytes(target));peer.get(5,TimeUnit.SECONDS);
-    }
     @Test void serverAuthorizationErrorCodeIsPreserved() throws Exception {
         serve((request, input, output) -> send(output, Type.ERROR, request, Map.of("code", "PERMISSION_DENIED", "message", "Không có quyền."), new byte[0]));
         assertEquals("PERMISSION_DENIED", assertThrows(TransferException.class, () -> client.listFiles("session", 1, 0)).code());

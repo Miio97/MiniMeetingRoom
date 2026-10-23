@@ -30,7 +30,6 @@ public final class LobbyScreen extends BorderPane {
     }
     private final java.util.Map<Long,RoomInfo> catalogRooms=new java.util.LinkedHashMap<>();
     private java.util.Set<Long> cleaningRooms=java.util.Set.of();
-    private java.util.Map<Long,String> cleanupPhases=java.util.Map.of(),renderedPhases=java.util.Map.of();
     private long catalogRevision;
     private void catalogUpdate(client.meeting.MeetingSession.CatalogUpdate update) {
         if(disposed) return;
@@ -38,7 +37,7 @@ public final class LobbyScreen extends BorderPane {
         for(long id:update.evicted()) catalogRooms.remove(id);
         for(long id:update.removed()) catalogRooms.remove(id);
         for(var room:update.rooms()) catalogRooms.put(room.id(),room);
-        cleaningRooms=update.cleaning();cleanupPhases=update.cleanupPhases();catalogRevision=update.revision();
+        cleaningRooms=update.cleaning();catalogRevision=update.revision();
         var combined=new java.util.LinkedHashMap<Long,RoomInfo>();
         if(expandedRooms && renderedRooms!=null) for(var room:renderedRooms) combined.put(room.id(),room);
         combined.putAll(catalogRooms);for(long id:update.removed()) combined.remove(id);
@@ -238,7 +237,7 @@ public final class LobbyScreen extends BorderPane {
         var wanted=new java.util.ArrayList<javafx.scene.Node>();
         for(var room:recent) {
             var node=old.get(room.id());
-            if(node==null || !room.equals(renderedInfo.get(room.id())) || cleaningRooms.contains(room.id())!=renderedCleaning.contains(room.id()) || !java.util.Objects.equals(cleanupPhases.get(room.id()),renderedPhases.get(room.id()))) node=roomRow(room);
+            if(node==null || !room.equals(renderedInfo.get(room.id())) || cleaningRooms.contains(room.id())!=renderedCleaning.contains(room.id())) node=roomRow(room);
             wanted.add(node);
         }
         for(int i=0;i<wanted.size();i++) {
@@ -248,7 +247,6 @@ public final class LobbyScreen extends BorderPane {
         while(rooms.getChildren().size()>wanted.size()) rooms.getChildren().removeLast();
         renderedInfo.clear();for(var room:recent) renderedInfo.put(room.id(),room);renderedCleaning=java.util.Set.copyOf(cleaningRooms);
         renderedRooms=List.copyOf(recent);
-        renderedPhases=cleanupPhases;
         roomStatus.setText(recent.isEmpty()?"Bạn chưa tạo hoặc tham gia phòng nào.":"");
         scheduleCatalogViewport();
     }
@@ -264,8 +262,7 @@ public final class LobbyScreen extends BorderPane {
     }
     private javafx.scene.Node roomRow(RoomInfo room) {
         boolean live = "DANG_HOAT_DONG".equals(room.status()) || "CHO".equals(room.status());
-        boolean verifying="DA_DONG".equals(room.status()) && manager.usesSignalingRooms() && catalogRevision==0 && !Boolean.getBoolean("mmr.test.disableCatalog");
-        boolean canReopen = "DA_DONG".equals(room.status()) && !verifying && !cleaningRooms.contains(room.id()) && manager.authenticatedUser() != null
+        boolean canReopen = "DA_DONG".equals(room.status()) && !cleaningRooms.contains(room.id()) && manager.authenticatedUser() != null
                 && room.hostId() == manager.authenticatedUser().id();
         Label badge = Ui.label(live ? "● Đang diễn ra" : "Đã kết thúc", live ? "room-live" : "room-ended");
         badge.setMinWidth(Region.USE_PREF_SIZE);
@@ -282,7 +279,7 @@ public final class LobbyScreen extends BorderPane {
         text.setMinWidth(0);
         HBox.setHgrow(text, Priority.ALWAYS);
 
-        Button action = Ui.button(verifying?"Đang kiểm tra dữ liệu…":cleaningRooms.contains(room.id()) ? client.meeting.MeetingSession.cleanupLabel(cleanupPhases.get(room.id())) : canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng",
+        Button action = Ui.button(cleaningRooms.contains(room.id()) ? "Đang dọn dữ liệu…" : canReopen ? "Mở lại phòng" : live ? "Nhập PIN" : "Đã đóng",
                 live || canReopen ? "primary" : "secondary", () -> {
             if (canReopen) { reopen(room); return; }
             code.setText(room.code()); pin.clear(); pin.requestFocus();

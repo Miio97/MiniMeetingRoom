@@ -378,21 +378,17 @@ public final class AuthServer implements AutoCloseable {
             var authRooms=new server.rooms.RoomService();
             String legacyInstance=server.config.MeetingSecrets.load().instanceId();authRooms.legacyOwner(legacyInstance);
             var contentCleanup=new server.meeting.ImmediateRoomCleanup(DatabaseConnection::getConnection,
-                    legacyInstance,true,Math.max(1,Math.min(2,(ServerConfig.getInt("db.pool.maxConnections",8)-2)/2)),
-                    (f,b) -> {var service=runningFiles.get();if(service==null) throw new IOException("FILE_STORAGE_UNAVAILABLE");return service.cleanupBatch(f,b);},
-                    id -> runningFiles.get()==null || runningFiles.get().hasPendingRoom(id),
-                    f -> {var service=runningFiles.get();if(service==null) throw new IOException("FILE_STORAGE_UNAVAILABLE");return service.cancelAndDrained(f);},() -> { });
+                    legacyInstance,
+                    id -> {var service=runningFiles.get();if(service!=null) service.cleanupRoom(id);},
+                    id -> runningFiles.get()!=null && runningFiles.get().hasPendingRoom(id),() -> { });
             runningCleanup.set(contentCleanup);authRooms.setReopenGuard(contentCleanup);authRooms.onChanged(() -> contentCleanup.request(0));
-            authRooms.onRoomClosed(contentCleanup::request);
             var legacyRooms=new RoomService();legacyRooms.legacyOwner(legacyInstance);
-            legacyRooms.onRoomClosed(contentCleanup::request);
             AuthServer server = new AuthServer(tls, new InetSocketAddress(bindAddress, port),
                     new ApplicationService(new server.auth.AuthService(),authRooms)::handle, legacyRooms);
             runningServer.set(server);
             startupPhase = "file_listener_bind";
             FileTransferServer files = fileServer(tls, transferConfig,legacyInstance);
             runningFiles.set(files);
-            if(files!=null) files.cleanupTermination(contentCleanup::isTerminated);
             contentCleanup.start();
             server.start();
             if (files != null) {

@@ -70,22 +70,16 @@ public final class MeetingServerMain {
                         var authRooms=new server.rooms.RoomService(true);
                         authRooms.legacyOwner(secrets.instanceId());
                         try (var files = AuthServer.fileServer(tls, transferConfig,secrets.instanceId());
-                                var contentCleanup=new server.meeting.ImmediateRoomCleanup(rooms.connectionProvider(),secrets.instanceId(),true,
-                                Math.max(1,Math.min(2,(ServerConfig.getInt("db.pool.maxConnections",8)-2)/2)),
-                                (f,b) -> {if(filesReference.get()==null && !b.isEmpty()) throw new java.io.IOException("FILE_STORAGE_UNAVAILABLE");return filesReference.get()==null?java.util.List.of():filesReference.get().cleanupBatch(f,b);},
-                                id -> filesReference.get()==null || filesReference.get().hasPendingRoom(id),
-                                f -> {if(filesReference.get()==null) throw new java.io.IOException("FILE_STORAGE_UNAVAILABLE");return filesReference.get().cancelAndDrained(f);},meetingHandler::catalogChanged);
+                                var contentCleanup=new server.meeting.ImmediateRoomCleanup(rooms.connectionProvider(),secrets.instanceId(),
+                                id -> {if(filesReference.get()!=null) filesReference.get().cleanupRoom(id);},
+                                id -> filesReference.get()!=null && filesReference.get().hasPendingRoom(id),meetingHandler::catalogChanged);
                                 AuthServer authServer = new AuthServer(tls,
                                 new InetSocketAddress(ServerConfig.get("auth.bind", "127.0.0.1"), ServerConfig.getInt("auth.port", 8443)),
                                 new ApplicationService(auth, authRooms)::handle, rooms)) {
                             filesReference.set(files);
-                            if(files!=null) files.cleanupTermination(contentCleanup::isTerminated);
                             if (files != null) files.roomSessionGate(rooms::isCurrentRoomSession);
-                            if (files != null) rooms.onLiveRoomClosed(files::liveRoomClosed);
                             roomRepository.setReopenGuard(contentCleanup);authRooms.setReopenGuard(contentCleanup);
-                            authRooms.onRoomClosed(contentCleanup::request);
-                            meetingHandler.cleanupGenerationStatus((id,generation) -> !contentCleanup.isVerified(id,generation));
-                            meetingHandler.cleanupPhase(contentCleanup::phase);
+                            meetingHandler.cleanupStatus(contentCleanup::isPending);
                             rooms.onRoomClosed(contentCleanup::request);authRooms.onChanged(() -> {contentCleanup.request(0);meetingHandler.catalogChanged();});contentCleanup.start();
                             Thread shutdown = new Thread(() -> {
                                 try {

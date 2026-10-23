@@ -45,7 +45,6 @@ public final class AuthClient {
     private final Settings fixedSettings;
     private final SSLContext fixedTls;
     private final AtomicReference<NetworkMonitor> networkMonitor = new AtomicReference<>();
-    private final Map<Long,String> roomIdentities=new java.util.concurrent.ConcurrentHashMap<>();
 
     public NetworkMonitor startNetworkMonitoring() {
         NetworkMonitor next = new NetworkMonitor();
@@ -142,10 +141,7 @@ public final class AuthClient {
     }
 
     public AuthResponse reopenRoom(String token, long roomId) throws IOException {
-        return reopenRoom(token,roomId,roomIdentities.get(roomId));
-    }
-    public AuthResponse reopenRoom(String token,long roomId,String identity) throws IOException {
-        return roomCommand("REOPEN_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0).inMeeting(identity));
+        return roomCommand("REOPEN_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
     }
 
     public AuthResponse listRooms(String token) throws IOException {
@@ -161,16 +157,11 @@ public final class AuthClient {
     }
 
     public AuthResponse leaveRoom(String token, long roomId) throws IOException {
-        return roomCommand("LEAVE_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0).inMeeting(roomIdentities.get(roomId)));
+        return roomCommand("LEAVE_ROOM", token, new RoomRequest(null, null, Long.toString(roomId), 0));
     }
 
     private AuthResponse roomCommand(String action, String token, RoomRequest parameters) throws IOException {
-        var response=send(new AuthRequest(action, null, null, null, null, token, parameters));
-        if(response.success()) {
-            if(response.room()!=null && response.room().roomIdentity()!=null) roomIdentities.put(response.room().id(),response.room().roomIdentity());
-            if(response.rooms()!=null) for(var room:response.rooms()) if(room.roomIdentity()!=null) roomIdentities.put(room.id(),room.roomIdentity());
-        }
-        return response;
+        return send(new AuthRequest(action, null, null, null, null, token, parameters));
     }
 
     private AuthResponse send(AuthRequest request) throws IOException {
