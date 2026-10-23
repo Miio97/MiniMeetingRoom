@@ -142,8 +142,8 @@ public final class CameraControls extends VBox {
     private void controls() {
         permissionGranted.set(initialized && access == CameraConsentStore.Access.ALLOWED && !prompting && !loading);
         boolean active = video.cameraRequestedProperty().get(), pending = video.cameraPendingProperty().get();
-        toggle.setText(prompting ? "Đang xin quyền…" : pending ? "Đang xử lý…" : loading ? "Đang tải…" : active ? "Tắt camera" : "Bật camera");
-        toggle.setDisable(!initialized || prompting || pending || loading && !active && cameras.getItems().isEmpty());
+        toggle.setText(prompting ? "Đang xin quyền…" : loading ? "Đang tải…" : active ? "Tắt camera" : "Bật camera");
+        toggle.setDisable(!initialized || prompting || loading && !active && cameras.getItems().isEmpty());
         cameras.setDisable(pending || prompting || active || access != CameraConsentStore.Access.ALLOWED || loading && cameras.getItems().isEmpty());
     }
     public void dispose() {

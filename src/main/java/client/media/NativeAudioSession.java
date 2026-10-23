@@ -18,6 +18,7 @@ public final class NativeAudioSession implements AutoCloseable {
     private final boolean physicalPlayback;
     private final AudioDevice playbackDevice;
     private boolean playbackStarted;
+    private final boolean physicalCapture;
     public NativeAudioSession(boolean headless, boolean capture, AudioDevice microphone, AudioDevice speaker) {
         AudioDeviceModuleBase adm = headless ? new HeadlessAudioDeviceModule() : new AudioDeviceModule();
         PeerConnectionFactory created = null; AudioTrackSource input = null; AudioTrack local = null;
@@ -48,6 +49,7 @@ public final class NativeAudioSession implements AutoCloseable {
         }
         audio=adm; factory=created; source=input; track=local;
         physicalPlayback = !headless && !capture;
+        physicalCapture = !headless && capture;
         playbackDevice = output;
     }
     public Peer publisher() { return new Peer(track, true, (data, bits, rate, channels, frames) -> { }); }
@@ -77,12 +79,20 @@ public final class NativeAudioSession implements AutoCloseable {
         private volatile AudioTrack remote;
         private volatile RTCPeerConnectionState state = RTCPeerConnectionState.NEW;
         private final boolean sending;
+        private RTCRtpSender sender;
+        private boolean inputPaused;
+        private volatile boolean presentationPaused;
+        public void pausePresentation(boolean paused) {
+            if (presentationPaused != paused) rtpWatchdog.reset(System.nanoTime());
+            presentationPaused = paused;
+        }
+        public boolean presentationPaused() { return presentationPaused; }
         private final AudioRtpWatchdog rtpWatchdog = new AudioRtpWatchdog(System.nanoTime());
         private Peer(AudioTrack track, boolean publisher, AudioTrackSink sink) {
             if (closed.get()) throw new IllegalStateException("VIDEO_OWNER_CLOSED");
 
             this.binding = (data, bits, rate, channels, frames) -> {
-                if (!closing.get() && frames > 0) sink.onData(data, bits, rate, channels, frames);
+                if (!closing.get() && !presentationPaused && frames > 0) sink.onData(data, bits, rate, channels, frames);
             };
             sending = publisher;
             connection = factory.createPeerConnection(new RTCConfiguration(), this);
@@ -95,16 +105,35 @@ public final class NativeAudioSession implements AutoCloseable {
                     encoding.maxBitrate = 64000; init.sendEncodings = List.of(encoding);
                 }
                 RTCRtpTransceiver transceiver = connection.addTransceiver(track, init);
-                try { transceiver.setCodecPreferences(factory.getRtpSenderCapabilities(MediaType.AUDIO).getCodecs().stream()
+                try { if (publisher) sender = transceiver.getSender();
+                    transceiver.setCodecPreferences(factory.getRtpSenderCapabilities(MediaType.AUDIO).getCodecs().stream()
                         .filter(codec -> "opus".equalsIgnoreCase(codec.getName())).toList()); }
                 finally { transceiver.dispose(); }
 
                 peers.add(this);
-            } catch (RuntimeException failure) { connection.close(); throw failure; }
+            } catch (RuntimeException failure) { connection.close(); if (sender != null) sender.dispose(); throw failure; }
         }
         public boolean failed() { return state == RTCPeerConnectionState.FAILED || state == RTCPeerConnectionState.CLOSED; }
         public boolean connected() { return state == RTCPeerConnectionState.CONNECTED; }
+        /** Stop the recording device as well as detaching its RTP sender. */
+        public void pauseInput() {
+            synchronized (statsLifecycle) {
+                if (!sending || closing.get() || inputPaused) return;
+                // StopRecording closes the capture endpoint. Merely muting a track would still record.
+                if (physicalCapture) audio.stopRecording();
+                sender.replaceTrack(null); inputPaused = true;
+            }
+        }
+        public void resumeInput() {
+            synchronized (statsLifecycle) {
+                if (!sending || closing.get() || !inputPaused) throw new IllegalStateException("AUDIO_REUSE_UNAVAILABLE");
+                sender.replaceTrack(track);
+                if (physicalCapture) { audio.initRecording(); audio.startRecording(); }
+                inputPaused = false; rtpWatchdog.reset(System.nanoTime());
+            }
+        }
         public boolean stalled() {
+            if (presentationPaused || inputPaused) return false;
             statsAsync().thenAccept(report -> {
                 if (report == null || closing.get()) return;
                 long packets = 0; boolean found = false;
@@ -191,7 +220,7 @@ public final class NativeAudioSession implements AutoCloseable {
                 AudioTrack received = remote; if (received != null) received.removeSink(binding);
             }
 
-            synchronized (statsLifecycle) { connection.close(); }
+            synchronized (statsLifecycle) { connection.close(); if (sender != null) { sender.dispose(); sender = null; } }
             receivers.forEach(RTCRtpReceiver::dispose); receivers.clear();
             peers.remove(this);
         }
