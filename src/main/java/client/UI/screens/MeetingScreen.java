@@ -7,6 +7,7 @@ import client.UI.mock.MockData;
 import common.room.RoomInfo;
 import common.room.RoomParticipant;
 import javafx.animation.*;
+import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
 import javafx.collections.*;
 import javafx.geometry.Insets;
@@ -99,6 +100,8 @@ public final class MeetingScreen extends BorderPane {
     private AudioControls audioControls;
     private ScreenSourceDialog screenPicker;
     private javafx.scene.image.ImageView screenImage;
+    private CheckBox systemAudioToggle;
+    private final javafx.beans.value.ChangeListener<Boolean> systemAudioListener=(o,b,a) -> {if(systemAudioToggle!=null) systemAudioToggle.setSelected(a);};
     private final javafx.beans.value.ChangeListener<Boolean> shareListener=(o,b,a) -> updateShareButton(a);
     private final javafx.beans.value.ChangeListener<String> audioErrorListener=(o,b,a) -> showMediaError(a);
     private void showMediaError(String message) {if(message!=null && !message.isBlank()) roomError.setText(message);}
@@ -182,6 +185,8 @@ public final class MeetingScreen extends BorderPane {
             audioControls.setManaged(false);audioControls.setVisible(false);bottom.content().getChildren().add(audioControls);
             audioControls.errorProperty().addListener(audioErrorListener); video.screen().statusProperty().addListener(audioErrorListener);
             video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
+            video.screen().systemAudioEnabledProperty().addListener(systemAudioListener);
+            video.screen().systemAudioStatusProperty().addListener(audioErrorListener);
             video.cameraRequestedProperty().addListener(cameraListener);
             video.cameraPendingProperty().addListener(cameraPendingListener);
             controls.camera.disableProperty().bind(mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
@@ -283,17 +288,17 @@ public final class MeetingScreen extends BorderPane {
     }
     private void toggleShare() {
         if(videoRoom) {
-            if(mediaController.screen().requestedProperty().get()) {roomAction(mediaController.screen().toggleInput(() -> {throw new IllegalStateException("SCREEN_CAPTURE_FAILED");}));return;}
+            if(mediaController.screen().requestedProperty().get()) {roomAction(mediaController.screen().stopShare());return;}
             if(screenPicker!=null && screenPicker.isShowing()) return;
             screenPicker=new ScreenSourceDialog(manager.stage(),mediaController.screen(),mediaSession.selfParticipantId());
-            screenPicker.showAndWait().ifPresent(choice -> roomAction(mediaController.screen().toggle(choice)));return;
+            screenPicker.showAndWait().ifPresent(choice -> roomAction(mediaController.screen().publishPreparedScreen()));return;
         }
         sharing = !sharing; controls.share.active(sharing); renderVideos(); }
     private void pin(int index) { pinnedIndex = pinnedIndex == index ? -1 : index; renderVideos(); }
     private void renderVideos() {
         participantCount.setText(people.size() + "/" + manager.room().capacity() + " người");
         if (pinnedIndex >= people.size()) pinnedIndex = -1;
-        String screenOwner=displayedRoom!=null ? displayedRoom.participants().stream().filter(p -> p.mediaState().sharePublishing()).map(common.meeting.ParticipantView::participantId).findFirst().orElse(null) : null;
+        String screenOwner=displayedRoom!=null ? displayedRoom.participants().stream().filter(p -> p.mediaState().sharePublishing() || (p.participantId().equals(mediaSelf) && mediaController.screen().requestedProperty().get())).map(common.meeting.ParticipantView::participantId).findFirst().orElse(null) : null;
         var viewport=videoRoom?client.media.VideoViewport.page(people.size(),pinnedIndex,screenOwner!=null,page):null;
         int pageSize=videoRoom?(screenOwner!=null || pinnedIndex>=0?5:PAGE_SIZE):12;
         int pages = videoRoom?viewport.pages():Math.max(1, (people.size() + pageSize - 1) / pageSize);
@@ -331,6 +336,7 @@ public final class MeetingScreen extends BorderPane {
         activeVideoTiles.clear();
         focusHeaderLabel = null;
         if(screenImage!=null) {screenImage.imageProperty().unbind();screenImage=null;}
+        systemAudioToggle=null;
         tiles.forEach(VideoTile::dispose); tiles.clear(); videoContent.getChildren().clear();
         BorderPane frame = new BorderPane(videoContent); frame.setMinSize(0, 0);
         if (pages > 1) {
@@ -356,10 +362,20 @@ public final class MeetingScreen extends BorderPane {
             HBox badge=Ui.row(8,IconButton.icon("share"),Ui.label(ownerName+" • Đang chia sẻ", "accent-text"),Ui.spacer());
             badge.setAlignment(Pos.CENTER_LEFT);
             badge.setMinHeight(36);
+            if(own) {
+                systemAudioToggle=new CheckBox("Âm thanh máy tính");systemAudioToggle.setId("meeting-system-audio");
+                systemAudioToggle.setSelected(mediaController.screen().systemAudioEnabledProperty().get());
+                systemAudioToggle.setDisable(!mediaController.screen().systemAudioSupported());
+                systemAudioToggle.setTooltip(new Tooltip("Chia sẻ âm thanh các ứng dụng, trừ MiniMeeting. Không thay đổi mic."));
+                CheckBox toggle=systemAudioToggle;
+                toggle.setOnAction(event -> mediaController.screen().setSystemAudioEnabled(toggle.isSelected()).whenComplete((v,failure) -> {
+                    if(failure!=null) Platform.runLater(() -> showMediaError(mediaController.screen().systemAudioStatusProperty().get()));
+                }));
+                badge.getChildren().add(toggle);
+            }
             badge.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
                     .then(new Insets(0, 0, 0, 52))
                     .otherwise(Insets.EMPTY));
-            if(own) badge.getChildren().add(Ui.button("Dừng chia sẻ", "secondary", this::toggleShare));
             VBox large=Ui.column(12,badge,shared);VBox.setVgrow(shared,Priority.ALWAYS);HBox.setHgrow(large,Priority.ALWAYS);large.setMinSize(0, 0);
             videoContent.getChildren().add(new HBox(14,large,strip));
         } else if (sharing && !videoRoom) {
@@ -541,6 +557,8 @@ public final class MeetingScreen extends BorderPane {
             controls.camera.disableProperty().unbind();
             mediaController.audio().requestedProperty().removeListener(micListener); audioControls.errorProperty().removeListener(audioErrorListener); audioControls.dispose();
             mediaController.screen().requestedProperty().removeListener(shareListener); mediaController.screen().statusProperty().removeListener(audioErrorListener);
+            mediaController.screen().systemAudioEnabledProperty().removeListener(systemAudioListener);
+            mediaController.screen().systemAudioStatusProperty().removeListener(audioErrorListener);systemAudioToggle=null;
         }
     }
 }

@@ -64,9 +64,7 @@ public final class MeetingSession implements AutoCloseable {
     private volatile long mediaRevision = -1;
     private volatile String mediaRevisionRoom;
     public CompletableFuture<JsonObject> videoRequest(String type, JsonObject body, String requestId) {
-        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP", "VIDEO_PAUSE", "VIDEO_RESUME",
-                "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "AUDIO_PAUSE", "AUDIO_RESUME",
-                "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STATE", "SCREEN_STOP", "MEDIA_WATCH").contains(type))
+        if (!java.util.Set.of("VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STATE", "VIDEO_STOP", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STATE", "AUDIO_STOP", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_UNSUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE", "SCREEN_AUDIO_UNSUBSCRIBE", "SCREEN_AUDIO_STATE", "SCREEN_AUDIO_STOP", "SCREEN_STATE", "SCREEN_STOP", "VIDEO_PAUSE", "VIDEO_RESUME", "AUDIO_PAUSE", "AUDIO_RESUME", "MEDIA_WATCH").contains(type))
             return CompletableFuture.failedFuture(new SignalException("INVALID_REQUEST"));
         final RoomSnapshot expected = snapshot;
         final SignalingClient transport = client;

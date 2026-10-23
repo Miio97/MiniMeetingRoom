@@ -56,7 +56,7 @@ public final class VideoCoordinator implements AutoCloseable {
     public JsonObject handle(SignalingServer.Connection connection, SignalMessage request) throws Exception {
         MemberAuthorization member = rooms.assertMember(connection.id(), request.roomId());
         Owner owner = new Owner(connection, member); owners.put(connection.id(), owner); grant(owner);
-        String kind = request.type().startsWith("AUDIO_") ? "AUDIO" : request.type().startsWith("SCREEN_") ? "SCREEN" : "VIDEO";
+        String kind = request.type().startsWith("SCREEN_AUDIO_") ? "SCREEN_AUDIO" : request.type().startsWith("AUDIO_") ? "AUDIO" : request.type().startsWith("SCREEN_") ? "SCREEN" : "VIDEO";
         switch (request.type()) {
             case "MEDIA_WATCH" -> {
                 watching.add(connection.id());
@@ -66,10 +66,10 @@ public final class VideoCoordinator implements AutoCloseable {
                 lastPushed.put(connection.id(), snapshotContent(reply));
                 return reply;
             }
-            case "VIDEO_STATE", "AUDIO_STATE", "SCREEN_STATE" -> {
+            case "VIDEO_STATE", "AUDIO_STATE", "SCREEN_STATE", "SCREEN_AUDIO_STATE" -> {
                 JsonObject stateBody = envelope("state", member); stateBody.addProperty("kind", kind);
                 JsonObject state = engine.control(stateBody);
-                for (Owner registered : owners.values()) if (registered.member().roomId().equals(member.roomId())) {
+                for (Owner registered : owners.values()) if (!kind.equals("SCREEN_AUDIO") && registered.member().roomId().equals(member.roomId())) {
                     try {
                         boolean active = state.getAsJsonObject("sources").has(registered.member().participantId());
                         switch(kind) { case "AUDIO" -> rooms.confirmAudio(registered.connection().id(), active); case "SCREEN" -> rooms.confirmShare(registered.connection().id(), active); default -> rooms.confirmVideo(registered.connection().id(), active); }
@@ -84,16 +84,19 @@ public final class VideoCoordinator implements AutoCloseable {
                 if (state.has("pausedSources")) for (var entry : state.getAsJsonObject("pausedSources").entrySet()) {
                     if (!entry.getKey().equals(member.participantId()) && participants.stream().anyMatch(p -> p.participantId().equals(entry.getKey()))) paused.add(entry.getKey(), entry.getValue());
                 }
-                JsonObject result = new JsonObject(); result.add("sources", sources); result.add("pausedSources", paused); return result;
+                JsonObject result = new JsonObject(); result.add("sources", sources); result.add("pausedSources", paused);
+                if(kind.equals("SCREEN") && state.getAsJsonObject("sources").has(member.participantId()))
+                    result.add("publication",state.getAsJsonObject("sources").get(member.participantId()));
+                return result;
             }
-            case "VIDEO_UNSUBSCRIBE", "AUDIO_UNSUBSCRIBE" -> {
+            case "VIDEO_UNSUBSCRIBE", "AUDIO_UNSUBSCRIBE", "SCREEN_UNSUBSCRIBE", "SCREEN_AUDIO_UNSUBSCRIBE" -> {
                 var ids=request.body().getAsJsonArray("transports");
                 if(ids==null || ids.size()>(kind.equals("AUDIO") ? 50 : 6)) throw new SignalException("INVALID_REQUEST");
                 for(var id:ids) if(!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isString() || !id.getAsString().matches("[A-Za-z0-9_-]{1,96}")) throw new SignalException("INVALID_REQUEST");
                 var body=envelope("unsubscribe",member);body.addProperty("kind",kind);body.add("transports",ids.deepCopy());return engine.control(body);
             }
-            case "VIDEO_STOP", "AUDIO_STOP", "SCREEN_STOP" -> {
-                JsonObject stop = envelope("stop", member); stop.addProperty("kind", kind); engine.control(stop); rooms.setMediaRequested(connection.id(), kind, false);
+            case "VIDEO_STOP", "AUDIO_STOP", "SCREEN_STOP", "SCREEN_AUDIO_STOP" -> {
+                JsonObject stop = envelope("stop", member); stop.addProperty("kind", kind); engine.control(stop); if(!kind.equals("SCREEN_AUDIO")) rooms.setMediaRequested(connection.id(), kind, false);
                 JsonObject result = new JsonObject(); result.addProperty("ok", true); return result;
             }
             case "VIDEO_PAUSE", "AUDIO_PAUSE", "VIDEO_RESUME", "AUDIO_RESUME" -> {
@@ -112,7 +115,7 @@ public final class VideoCoordinator implements AutoCloseable {
                 }
                 return reply;
             }
-            case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE" -> {
+            case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE" -> {
                 JsonObject body = envelope(request.type().endsWith("_PUBLISH") ? "publish" : "subscribe", member);
                 body.addProperty("kind", kind); body.addProperty("transport", request.requestId()); body.addProperty("sdp", text(request.body(), "sdp", 110000));
                 if (request.type().endsWith("_SUBSCRIBE")) {
@@ -120,10 +123,13 @@ public final class VideoCoordinator implements AutoCloseable {
                     if (target.equals(member.participantId()) || rooms.getRoom(connection.id(), member.roomId()).participants().stream().noneMatch(p -> p.participantId().equals(target)))
                         throw new SignalException("CROSS_ROOM_FORBIDDEN");
                     body.addProperty("source", target); body.addProperty("publication", text(request.body(), "publication", 96));
+                } else if(kind.equals("SCREEN_AUDIO")) {
+                    if(!member.mediaState().shareRequested()) throw new SignalException("MEDIA_CLOSED");
+                    body.addProperty("publication",text(request.body(),"publication",96));
                 } else rooms.setMediaRequested(connection.id(), kind, true);
                 JsonObject reply;
                 try { reply = engine.control(body); }
-                catch (Exception failure) { if (request.type().endsWith("_PUBLISH")) rooms.setMediaRequested(connection.id(), kind, false); throw failure; }
+                catch (Exception failure) { if (request.type().endsWith("_PUBLISH") && !kind.equals("SCREEN_AUDIO")) rooms.setMediaRequested(connection.id(), kind, false); throw failure; }
                 if (connection.isClosed()) { revoke(connection.id()); throw new SignalException("CONNECTION_CLOSED"); }
                 MemberAuthorization after = rooms.assertMember(connection.id(), member.roomId());
                 if(after.generation() != member.generation() || request.type().endsWith("_PUBLISH") && !requested(after.mediaState(),kind)) {
@@ -269,7 +275,7 @@ public final class VideoCoordinator implements AutoCloseable {
         finally { Diagnostics.current().event("video.revoked", Map.of("total_ms", (System.nanoTime() - start) / 1_000_000.0)); }
     }
     private static boolean requested(MediaState state,String kind) {
-        return switch(kind) { case "AUDIO" -> state.micRequested(); case "SCREEN" -> state.shareRequested(); default -> state.cameraRequested(); };
+        return switch(kind) { case "AUDIO" -> state.micRequested(); case "SCREEN", "SCREEN_AUDIO" -> state.shareRequested(); default -> state.cameraRequested(); };
     }
     private static String text(JsonObject body, String field, int maximum) throws SignalException {
         var value = body.get(field);

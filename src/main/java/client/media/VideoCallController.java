@@ -143,6 +143,8 @@ public final class VideoCallController implements AutoCloseable {
         this.signaling = signaling; this.room = room; this.self = self;
         this.audio = new AudioCallController(signaling,room,self,headless,microphoneConsent);
         this.screen = new ScreenCallController(signaling,room,self,headless);
+        this.screen.systemAudioSpeaker(audio::preferredSpeaker);
+        this.audio.onSpeakerChanged(screen::systemAudioSpeakerChanged);
         this.cameraConsent = Objects.requireNonNull(cameraConsent); this.deviceProvider = Objects.requireNonNull(deviceProvider);
         timer.scheduleWithFixedDelay(() -> {
             if (closed.get() || room.get() == null || !polling.compareAndSet(false, true)) return;

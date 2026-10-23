@@ -25,7 +25,17 @@ public final class ScreenSourceDialog extends Dialog<ScreenVideoInput.Choice> {
         getDialogPane().getButtonTypes().addAll(share,ButtonType.CANCEL);
         ((Button)getDialogPane().lookupButton(ButtonType.CANCEL)).setText("Hủy");
         Button start=(Button)getDialogPane().lookupButton(share);start.setDisable(true);start.setId("screen-source-confirm");
-        getDialogPane().setContent(Ui.column(12,choices,preview,error,Ui.label("Chỉ chia sẻ khi bạn nhấn Chia sẻ. Đóng hoặc thu nhỏ cửa sổ có thể dừng nguồn; chọn lại nguồn sau khi khôi phục.","caption")));
+        CheckBox audio=new CheckBox("Chia sẻ âm thanh máy tính");audio.setId("screen-system-audio");
+        audio.setSelected(screen.systemAudioEnabledProperty().get());audio.setDisable(!screen.systemAudioSupported());
+        javafx.beans.value.ChangeListener<Boolean> audioChanged=(o,b,a) -> audio.setSelected(a);
+        screen.systemAudioEnabledProperty().addListener(audioChanged);
+        audio.setOnAction(event -> screen.setSystemAudioEnabled(audio.isSelected()).whenComplete((v,failure) -> Platform.runLater(() -> {
+            if(isShowing() && failure!=null) error.setText("Không bật được âm thanh máy tính. Hãy thử lại.");
+        })));
+        Label audioHint=Ui.label("Âm thanh từ tất cả ứng dụng, trừ MiniMeeting. Không thay đổi mic. Yêu cầu Windows 11 hoặc Windows 10 build 20348 trở lên.","caption");
+        audioHint.setWrapText(true);audioHint.setMaxWidth(520);
+        getDialogPane().setContent(Ui.column(12,choices,preview,audio,audioHint,
+                error,Ui.label("Chỉ chia sẻ khi bạn nhấn Chia sẻ. Đóng hoặc thu nhỏ cửa sổ có thể dừng nguồn; chọn lại nguồn sau khi khôi phục.","caption")));
         AtomicLong selection=new AtomicLong();
         choices.valueProperty().addListener((observable,before,after) -> {
             long epoch=selection.incrementAndGet();start.setDisable(true);error.setText("");if(after==null) return;
@@ -39,6 +49,7 @@ public final class ScreenSourceDialog extends Dialog<ScreenVideoInput.Choice> {
             else {choices.getItems().setAll(sources);if(sources.isEmpty()) error.setText("Không tìm thấy nguồn chia sẻ. Kiểm tra quyền chụp màn hình của Windows.");}
         }));
         setResultConverter(button -> button==share ? choices.getValue() : null);
-        setOnHidden(event -> {selection.incrementAndGet();preview.imageProperty().unbind();preview.setImage(null);screen.endPreview();});
+        setOnHidden(event -> {selection.incrementAndGet();screen.systemAudioEnabledProperty().removeListener(audioChanged);preview.imageProperty().unbind();preview.setImage(null);
+            if(getResult()==null) {screen.setSystemAudioEnabled(false);screen.endPreview();}});
     }
 }

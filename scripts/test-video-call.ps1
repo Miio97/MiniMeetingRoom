@@ -3,6 +3,6 @@
 Push-Location $projectRoot
 try {
     $taskMaven = Resolve-Maven
-    & $taskMaven -B '-Pvideo-integration' '-Dtest=VideoCallIntegrationTest,AudioCallIntegrationTest,ScreenCallIntegrationTest' test
+    & $taskMaven -B '-Pvideo-integration' '-Dtest=VideoCallIntegrationTest,AudioCallIntegrationTest,ScreenCallIntegrationTest,SystemAudioIntegrationTest' test
     if ($LASTEXITCODE -ne 0) { throw 'Native video integration failed.' }
 } finally { Pop-Location }

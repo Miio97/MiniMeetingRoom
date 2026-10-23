@@ -102,6 +102,35 @@ func TestPublicationPauseResumeSnapshotAndBoundedRetention(t *testing.T) {
 	}
 }
 
+func TestSourceSnapshotIncludesScreenAndSystemAudio(t *testing.T) {
+	e, err := newEngine(testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	lease(t, e, "owner", "room-a")
+	for _, kind := range []string{"SCREEN", "SCREEN_AUDIO"} {
+		pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		peer := &mediaPeer{id: kind, room: "room-a", owner: "owner", kind: kind, generation: 1, publisher: true, pc: pc, ctx: ctx, cancel: cancel}
+		peer.active.Store(true)
+		e.mu.Lock()
+		e.peers[peer.id] = peer
+		e.sourcesChangedLocked()
+		e.mu.Unlock()
+	}
+	snapshot := sourceSnapshot(t, e, 0)
+	room := snapshot["rooms"].(map[string]any)["room-a"].(map[string]any)
+	for _, kind := range []string{"SCREEN", "SCREEN_AUDIO"} {
+		if room["sources"].(map[string]any)[kind].(map[string]any)["owner"] != kind {
+			t.Fatal("screen publication absent from source snapshot", kind)
+		}
+	}
+}
+
 func TestSourceLongPollWakesWithoutHoldingEngineLock(t *testing.T) {
 	e, err := newEngine(testKey)
 	if err != nil {

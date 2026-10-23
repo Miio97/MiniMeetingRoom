@@ -82,7 +82,7 @@ func (d *diagnostics) sample(e *engine) {
 		}
 	}
 	e.mu.Unlock()
-	for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN"} {
+	for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN", "SCREEN_AUDIO"} {
 		e.mu.Lock()
 		packets, size, count := 0, 0, 0
 		for _, peer := range e.peers {

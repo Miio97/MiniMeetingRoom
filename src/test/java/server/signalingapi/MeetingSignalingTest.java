@@ -107,6 +107,16 @@ class MeetingSignalingTest {
         if (fixture != null) fixture.close();
     }
 
+    @Test void screenUnsubscribeIsRoutedThroughTlsAndMeetingHandler() throws Exception {
+        var host=login("screenCleanup",new CopyOnWriteArrayList<>());
+        var room=create(host,3,UUID.randomUUID().toString());join(host,room,"",UUID.randomUUID().toString());
+        var body=new JsonObject();body.add("transports",new com.google.gson.JsonArray());
+        // This fixture intentionally has no media engine. MEDIA_NOT_READY proves the
+        // authenticated action reached the media branch rather than UNKNOWN_OPERATION.
+        code("MEDIA_NOT_READY",() -> request(host,"SCREEN_UNSUBSCRIBE",room.roomId(),body));
+        for(String action:List.of("SCREEN_AUDIO_PUBLISH","SCREEN_AUDIO_SUBSCRIBE","SCREEN_AUDIO_STATE","SCREEN_AUDIO_STOP","SCREEN_AUDIO_UNSUBSCRIBE"))
+            code("MEDIA_NOT_READY",() -> request(host,action,room.roomId(),body));
+    }
     @Test void twoTlsClientsReceiveMembershipStateAndLeave() throws Exception {
         List<SignalMessage> events = new CopyOnWriteArrayList<>();
         SignalingClient host = login("host", events);

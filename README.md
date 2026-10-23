@@ -123,6 +123,8 @@ Các test dùng H2 in-memory, TLS server cục bộ và cửa sổ JavaFX ẩn �
 
 ## Voice chat và chia sẻ màn hình
 
+Khi chọn nguồn chia sẻ, tích **Chia sẻ âm thanh máy tính** để gửi âm thanh ứng dụng cùng màn hình/cửa sổ. Trong lúc chia sẻ có thể bật/tắt **Âm thanh máy tính** ở phía trên; mic vẫn có nút điều khiển riêng. Âm thanh thu từ tất cả ứng dụng ngoài tiến trình MiniMeeting hiện tại, kể cả khi chỉ chọn một cửa sổ. Hỗ trợ Windows 11 hoặc Windows build 20348 trở lên. Cần build lại media engine và khởi động lại cả server/client; không thêm migration. Xem [hướng dẫn và kiểm thử](docs/system-audio-2026-10-23.md).
+
 Trong phòng mới, Bật mic hỏi quyền lần đầu và ghi nhớ trên máy; Tắt mic dừng publication và nguồn thu. Chọn microphone/loa thật trong Cài đặt. Vào phòng chờ không tự mở mic; vào họp cho phép phát âm thanh từ người khác. Kiểm tra Windows Settings → Privacy & security → Microphone nếu thiết bị bị chặn; nên dùng tai nghe.
 
 Nhấn Chia sẻ, chọn màn hình/cửa sổ và kiểm tra preview rồi xác nhận. Camera và screen chạy độc lập. Mỗi phòng chỉ một người chia sẻ; host có thể Dừng mic/Dừng chia sẻ. Không tự bật lại sau mất kết nối. Cấu hình mục tiêu screen mặc định 1280×720, 10 fps, 1.8 Mbit/s; đây không phải số đo đạt được. Xem config/media-client.vmoptions.example và docs/video-call.md.

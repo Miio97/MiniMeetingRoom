@@ -144,7 +144,7 @@ func negotiateClient(t *testing.T, e *engine, pc *webrtc.PeerConnection, request
 	}
 }
 func TestRealPionFanoutPayloadIsolationAndRevoke(t *testing.T) {
-	for _, kind := range []string{"VIDEO", "AUDIO", "SCREEN"} {
+	for _, kind := range []string{"VIDEO", "AUDIO", "SCREEN", "SCREEN_AUDIO"} {
 		t.Run(kind, func(t *testing.T) { realFanout(t, kind) })
 	}
 }
@@ -158,6 +158,11 @@ func realFanout(t *testing.T, kind string) {
 	lease(t, e, "receiver-a", "room-a")
 	lease(t, e, "receiver-b", "room-a")
 	lease(t, e, "foreign", "room-b")
+	extra := 0
+	if kind == "SCREEN_AUDIO" {
+		publishTestKind(t, e, "publisher", "room-a", "SCREEN", "screen-parent", "")
+		extra = 1
+	}
 	pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal("client peer failed")
@@ -175,7 +180,7 @@ func realFanout(t *testing.T, kind string) {
 			}
 		}
 	}()
-	negotiateClient(t, e, pc, controlRequest{Kind: kind, Operation: "publish", Room: "room-a", Participant: "publisher", Generation: 1, Transport: "publication-a"})
+	negotiateClient(t, e, pc, controlRequest{Kind: kind, Operation: "publish", Room: "room-a", Participant: "publisher", Generation: 1, Transport: "publication-a", Publication: "screen-parent"})
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -225,7 +230,7 @@ func realFanout(t *testing.T, kind string) {
 			}
 		})
 		_, err = receiver.AddTransceiverFromKind(func() webrtc.RTPCodecType {
-			if kind == "AUDIO" {
+			if audioKind(kind) {
 				return webrtc.RTPCodecTypeAudio
 			}
 			return webrtc.RTPCodecTypeVideo
@@ -279,7 +284,7 @@ func realFanout(t *testing.T, kind string) {
 		e.mu.Lock()
 		count := len(e.peers)
 		e.mu.Unlock()
-		if count != 3 {
+		if count != 3+extra {
 			t.Fatal("resume recreated transports")
 		}
 	}
@@ -287,10 +292,14 @@ func realFanout(t *testing.T, kind string) {
 	e.mu.Lock()
 	count := len(e.peers)
 	e.mu.Unlock()
-	if count != 2 {
+	if count != 2+extra {
 		t.Fatal("revoke removed unrelated publisher/receiver")
 	}
-	control(t, e, controlRequest{Kind: kind, Operation: "stop", Room: "room-a", Participant: "publisher", Generation: 1})
+	stopKind := kind
+	if kind == "SCREEN_AUDIO" {
+		stopKind = "SCREEN"
+	}
+	control(t, e, controlRequest{Kind: stopKind, Operation: "stop", Room: "room-a", Participant: "publisher", Generation: 1})
 	e.mu.Lock()
 	count = len(e.peers)
 	e.mu.Unlock()
@@ -382,67 +391,47 @@ func TestGlobalBudgetRejectsNewVideoAndReservesVoiceAdmission(t *testing.T) {
 	}
 }
 func TestUnsubscribeIsImmediateIdempotentAndCannotStopAnotherOwnerOrPublisher(t *testing.T) {
-	e, err := newEngine(testKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer e.close()
-	lease(t, e, "owner-a", "room-a")
-	lease(t, e, "owner-b", "room-a")
-	makePeer := func(id, owner string, publisher bool) *mediaPeer {
-		pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		p := &mediaPeer{id: id, owner: owner, room: "room-a", generation: 1, kind: "VIDEO", publisher: publisher, pc: pc, ctx: ctx, cancel: cancel}
-		e.peers[id] = p
-		return p
-	}
-	ours := makePeer("receiver-a", "owner-a", false)
-	other := makePeer("receiver-b", "owner-b", false)
-	publisher := makePeer("publisher-a", "owner-a", true)
-	request := controlRequest{Operation: "unsubscribe", Kind: "VIDEO", Room: "room-a", Participant: "owner-a", Generation: 1, Transports: []string{ours.id, other.id, publisher.id}}
-	for repeat := 0; repeat < 2; repeat++ {
-		status, _ := control(t, e, request)
-		if status != 200 {
-			t.Fatal("unsubscribe failed", status)
-		}
-	}
-	if !ours.closed.Load() || other.closed.Load() || publisher.closed.Load() || len(e.peers) != 2 {
-		t.Fatal("unsubscribe ownership or immediate cleanup failed")
-	}
-}
+	for _, kind := range []string{"AUDIO", "VIDEO", "SCREEN"} {
+		t.Run(kind, func(t *testing.T) {
+			e, err := newEngine(testKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer e.close()
+			lease(t, e, "owner-a", "room-a")
+			lease(t, e, "owner-b", "room-a")
+			makePeer := func(id, owner string, publisher bool) *mediaPeer {
+				pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				p := &mediaPeer{id: id, owner: owner, room: "room-a", generation: 1, kind: kind, publisher: publisher, pc: pc, ctx: ctx, cancel: cancel}
+				e.peers[id] = p
+				return p
+			}
+			ours := makePeer("receiver-a", "owner-a", false)
+			other := makePeer("receiver-b", "owner-b", false)
+			publisher := makePeer("publisher-a", "owner-a", true)
+			request := controlRequest{Operation: "unsubscribe", Kind: kind, Room: "room-a", Participant: "owner-a", Generation: 1, Transports: []string{ours.id, other.id, publisher.id}}
+			if kind != "AUDIO" {
+				oversized := request
+				oversized.Transports = []string{ours.id, "2", "3", "4", "5", "6", "7"}
+				status, _ := control(t, e, oversized)
+				if status != 400 || ours.closed.Load() {
+					t.Fatal("unsubscribe exceeded six transports")
+				}
+			}
+			for repeat := 0; repeat < 2; repeat++ {
+				status, _ := control(t, e, request)
+				if status != 200 {
+					t.Fatal("unsubscribe failed", status)
+				}
+			}
+			if !ours.closed.Load() || other.closed.Load() || publisher.closed.Load() || len(e.peers) != 2 {
+				t.Fatal("unsubscribe ownership or immediate cleanup failed")
+			}
 
-func TestAudioUnsubscribeIsImmediateIdempotentAndCannotStopAnotherOwnerOrPublisher(t *testing.T) {
-	e, err := newEngine(testKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer e.close()
-	lease(t, e, "owner-a", "room-a")
-	lease(t, e, "owner-b", "room-a")
-	makePeer := func(id, owner string, publisher bool) *mediaPeer {
-		pc, err := e.api.NewPeerConnection(webrtc.Configuration{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		p := &mediaPeer{id: id, owner: owner, room: "room-a", generation: 1, kind: "AUDIO", publisher: publisher, pc: pc, ctx: ctx, cancel: cancel}
-		e.peers[id] = p
-		return p
-	}
-	ours := makePeer("receiver-a", "owner-a", false)
-	other := makePeer("receiver-b", "owner-b", false)
-	publisher := makePeer("publisher-a", "owner-a", true)
-	request := controlRequest{Operation: "unsubscribe", Kind: "AUDIO", Room: "room-a", Participant: "owner-a", Generation: 1, Transports: []string{ours.id, other.id, publisher.id}}
-	for repeat := 0; repeat < 2; repeat++ {
-		status, _ := control(t, e, request)
-		if status != 200 {
-			t.Fatal("unsubscribe failed", status)
-		}
-	}
-	if !ours.closed.Load() || other.closed.Load() || publisher.closed.Load() || len(e.peers) != 2 {
-		t.Fatal("unsubscribe ownership or immediate cleanup failed")
+		})
 	}
 }

@@ -49,6 +49,19 @@ final class CameraSwitch implements AutoCloseable {
         }
         advance();
     }
+    /** Explicit off target: repeated stops can never enter the start branch. */
+    synchronized CompletableFuture<Void> stop(boolean actual, Supplier<CompletableFuture<Void>> stop) {
+        if (closed) return CompletableFuture.failedFuture(new IllegalStateException("CONNECTION_CLOSED"));
+        if (!pending) {
+            if (!actual) { wanted = false; applied = false; changed.run(); return CompletableFuture.completedFuture(null); }
+            applied = true; settled = new CompletableFuture<>();
+        }
+        this.stop = stop; wanted = false;
+        boolean launch = !pending; pending = true; changed.run();
+        CompletableFuture<Void> result = settled;
+        if (launch) advance();
+        return result;
+    }
     synchronized void resetOff() { wanted = false; applied = false; changed.run(); }
     @Override public synchronized void close() {
         closed = true; wanted = false; pending = false; changed.run();

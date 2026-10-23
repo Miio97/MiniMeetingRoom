@@ -83,10 +83,10 @@ public final class MeetingHandler implements SignalingServer.Handler, AutoClosea
                     response=catalog.subscribe(connection,body.has("limit")?integer(body,"limit"):20,body.has("watchId")?text(body,"watchId",64):request.requestId(),focus);type="ROOM_CATALOG_SNAPSHOT";
                 }
                 case "ROOM_CATALOG_UNWATCH" -> {catalog.unsubscribe(connection.id());response.addProperty("ok",true);type="ROOM_CATALOG_UNWATCHED";}
-                case "MEDIA_WATCH", "VIDEO_PAUSE", "VIDEO_RESUME", "AUDIO_PAUSE", "AUDIO_RESUME", "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_STOP", "SCREEN_STATE" -> {
+                case "VIDEO_PUBLISH", "VIDEO_SUBSCRIBE", "VIDEO_UNSUBSCRIBE", "VIDEO_STOP", "VIDEO_STATE", "AUDIO_PUBLISH", "AUDIO_SUBSCRIBE", "AUDIO_UNSUBSCRIBE", "AUDIO_STOP", "AUDIO_STATE", "SCREEN_PUBLISH", "SCREEN_SUBSCRIBE", "SCREEN_UNSUBSCRIBE", "SCREEN_AUDIO_PUBLISH", "SCREEN_AUDIO_SUBSCRIBE", "SCREEN_AUDIO_UNSUBSCRIBE", "SCREEN_AUDIO_STATE", "SCREEN_AUDIO_STOP", "SCREEN_STOP", "SCREEN_STATE", "MEDIA_WATCH", "VIDEO_PAUSE", "VIDEO_RESUME", "AUDIO_PAUSE", "AUDIO_RESUME" -> {
                     rooms.assertMember(connection.id(), request.roomId());
                     if (video == null) throw new SignalException("MEDIA_NOT_READY");
-                    response = video.handle(connection, request); type = request.type().substring(0, request.type().indexOf('_')) + "_REPLY";
+                    response = video.handle(connection, request); type = request.type().substring(0, request.type().lastIndexOf('_')) + "_REPLY";
                 }
                 case "CHAT_SEND", "CHAT_HISTORY" -> {return handleAsync(connection,request).toCompletableFuture().get(15,TimeUnit.SECONDS);}
                 case "CHAT_STATUS" -> {return handleAsync(connection,request).toCompletableFuture().getNow(null);}

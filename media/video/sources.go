@@ -56,7 +56,7 @@ func (e *engine) watchSources(w http.ResponseWriter, r *http.Request) {
 }
 
 func sourceKinds() map[string]map[string]string {
-	return map[string]map[string]string{"VIDEO": {}, "AUDIO": {}, "SCREEN": {}}
+	return map[string]map[string]string{"VIDEO": {}, "AUDIO": {}, "SCREEN": {}, "SCREEN_AUDIO": {}}
 }
 
 // Caller holds mu. Closing a channel broadcasts readiness without keeping a
