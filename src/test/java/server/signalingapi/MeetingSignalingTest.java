@@ -142,6 +142,50 @@ class MeetingSignalingTest {
         assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
     }
 
+    @Test void newerLoginTakesOverHostRoomAndOldDeviceCannotControlOrChat() throws Exception {
+        var account = fixture.account("deviceHost", "Host on two devices");
+        var oldEvents = new CopyOnWriteArrayList<SignalMessage>();
+        var oldDevice = connect(account.token(), oldEvents);
+        var room = create(oldDevice, 3, UUID.randomUUID().toString());
+        var initial = JSON.fromJson(join(oldDevice, room, "1234", UUID.randomUUID().toString()).body().get("join"),
+                common.meeting.RoomJoinReply.class);
+        var secondLogin = fixture.client().login("deviceHost", RoomTestFixture.PASSWORD);
+        assertTrue(secondLogin.success());
+        var newDevice = connect(secondLogin.token(), new CopyOnWriteArrayList<>());
+        var replaced = JSON.fromJson(join(newDevice, room, "1234", UUID.randomUUID().toString()).body().get("join"),
+                common.meeting.RoomJoinReply.class);
+        assertEquals(initial.selfParticipantId(), replaced.selfParticipantId());
+        assertEquals(1, replaced.room().participants().size());
+        assertEquals(common.meeting.RoomRole.HOST, replaced.room().participants().getFirst().role());
+        await(() -> oldEvents.stream().anyMatch(event -> event.type().equals("ROOM_LEFT")
+                && event.body().has("reason") && event.body().get("reason").getAsString().equals("DEVICE_REPLACED")));
+        code("NOT_A_MEMBER", () -> get(oldDevice, room.roomId()));
+        var chat = new JsonObject(); chat.addProperty("content", "stale old device");
+        code("NOT_A_MEMBER", () -> request(oldDevice, "CHAT_SEND", room.roomId(), chat));
+        code("DEVICE_REPLACED", () -> join(oldDevice, room, "1234", UUID.randomUUID().toString()));
+        assertEquals("HEARTBEAT_ACK", request(oldDevice, "HEARTBEAT", null, new JsonObject()).type());
+        oldDevice.close();
+        assertEquals(1, get(newDevice, room.roomId()).participants().size());
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NULL"));
+        assertEquals(2, fixture.count("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NULL"));
+    }
+
+    @Test void plainLeaveTransfersHostBeforeTransportCloses() throws Exception {
+        var host = login("closeHost", new CopyOnWriteArrayList<>());
+        var guest = login("closeGuest", new CopyOnWriteArrayList<>());
+        var room = create(host, 3, UUID.randomUUID().toString());
+        join(host, room, "1234", UUID.randomUUID().toString());
+        join(guest, room, "1234", UUID.randomUUID().toString());
+        assertEquals("ROOM_LEFT", request(host, "LEAVE_ROOM", room.roomId(), new JsonObject()).type());
+        var remaining = get(guest, room.roomId());
+        assertEquals(1, remaining.participants().size());
+        assertEquals(common.meeting.RoomRole.HOST, remaining.participants().getFirst().role());
+        assertEquals(1, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Ly_Do_Roi='TU_ROI'"));
+        assertEquals(0, fixture.count("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Ly_Do_Roi='MAT_KET_NOI'"));
+        host.close();
+        assertEquals(remaining.participants(), get(guest, room.roomId()).participants());
+    }
+
     @Test void onlyHostReopensClosedRoomAndOldPreviewCannotJoinNewMeetingRun() throws Exception {
         SignalingClient host = login("host", new CopyOnWriteArrayList<>());
         SignalingClient guest = login("guest", new CopyOnWriteArrayList<>());

@@ -7,6 +7,7 @@ import client.UI.mock.MockData;
 import common.room.RoomInfo;
 import common.room.RoomParticipant;
 import javafx.animation.*;
+import javafx.beans.binding.Bindings;
 import javafx.collections.*;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -17,10 +18,13 @@ import javafx.scene.layout.*;
 import javafx.scene.shape.Rectangle;
 import javafx.util.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Main meeting layout; video rooms borrow the session media owner and keep the file panel. */
 public final class MeetingScreen extends BorderPane {
+    private record VideoLayoutKey(boolean videoRoom, List<String> participantIds, String screenOwner, int pinnedIndex, int page, boolean legacySharing) { }
     private final client.network.NetworkMonitor network;
     private final ChatPanel chatPanel;
     private final ObservableList<common.meeting.Participant> managedPeople = FXCollections.observableArrayList();
@@ -38,6 +42,9 @@ public final class MeetingScreen extends BorderPane {
     private final SceneManager manager;
     private final ObservableList<MockData.Participant> people;
     private final List<VideoTile> tiles = new ArrayList<>();
+    private final Map<String, VideoTile> activeVideoTiles = new LinkedHashMap<>();
+    private VideoLayoutKey activeLayoutKey;
+    private Label focusHeaderLabel;
     private final StackPane canvas = new StackPane();
     private final StackPane videoContent = new StackPane();
     private static final int PAGE_SIZE = 6;
@@ -120,7 +127,7 @@ public final class MeetingScreen extends BorderPane {
         mediaSelf = videoRoom ? mediaSession.selfParticipantId() : null;
         displayedRoom = videoRoom ? mediaSession.snapshot() : null;
         applyParticipants(displayedRoom == null ? manager.roomInfo() : displayedRoom.collaborationRoom()); peakPeople = people.size();
-        Label duration = Ui.label("00:00:00", "meeting-time");
+        Label duration = Ui.label("00:00:00", "meeting-time"); duration.setWrapText(false);
         IconButton copy = new IconButton("copy", "Sao chép mã phòng");
         copy.setOnAction(e -> { ClipboardContent content = new ClipboardContent(); content.putString(manager.room().code()); Clipboard.getSystemClipboard().setContent(content); copy.setIcon("check"); PauseTransition reset = new PauseTransition(Duration.seconds(1.5)); reset.setOnFinished(done -> copy.setIcon("copy")); reset.play(); });
         network = manager.authClient().startNetworkMonitoring();
@@ -134,7 +141,7 @@ public final class MeetingScreen extends BorderPane {
             connectionStatus.managedProperty().bind(connectionStatus.visibleProperty());
             statusLine.getChildren().add(0, connectionStatus);
             adaptiveStatus.setId("adaptive-video-status");
-            adaptiveStatus.textProperty().bind(javafx.beans.binding.Bindings.createStringBinding(
+            adaptiveStatus.textProperty().bind(Bindings.createStringBinding(
                     () -> mediaController.qualityProperty().get().label, mediaController.qualityProperty()));
             adaptiveStatus.visibleProperty().bind(mediaController.qualityProperty().isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.LOW));
             adaptiveStatus.managedProperty().bind(adaptiveStatus.visibleProperty());
@@ -155,9 +162,10 @@ public final class MeetingScreen extends BorderPane {
         HBox panelHeader = Ui.row(8, Ui.label("Trong cuộc họp", "strong"), Ui.spacer(), close); panelHeader.setPadding(new Insets(12, 14, 8, 16)); panel.getChildren().addAll(panelHeader, tabs); panel.getStyleClass().add("meeting-panel");
         panel.setMinWidth(0); panel.setPrefWidth(320); panel.setMaxWidth(320);
         Rectangle clip = new Rectangle(); clip.widthProperty().bind(panel.widthProperty()); clip.heightProperty().bind(panel.heightProperty()); panel.setClip(clip);
-        canvas.setId("meeting-video-area"); canvas.setMinWidth(0); HBox.setHgrow(canvas, Priority.ALWAYS); canvas.setPadding(new Insets(20));
-        StackPane videoArea = new StackPane(canvas); videoArea.setMinWidth(0); HBox.setHgrow(videoArea, Priority.ALWAYS);
-        HBox body = new HBox(videoArea, panel); setCenter(body);
+        videoContent.setMinSize(0, 0);
+        canvas.setId("meeting-video-area"); canvas.setMinSize(0, 0); HBox.setHgrow(canvas, Priority.ALWAYS); canvas.setPadding(new Insets(20));
+        StackPane videoArea = new StackPane(canvas); videoArea.setMinSize(0, 0); HBox.setHgrow(videoArea, Priority.ALWAYS);
+        HBox body = new HBox(videoArea, panel); body.setMinSize(0, 0); setCenter(body);
         controls = new ControlBar(videoRoom ? false : manager.mic(), videoRoom ? manager.sfuSession().video().cameraRequestedProperty().get() : manager.camera(),
                 this::toggleMic, this::toggleCamera, this::toggleShare, () -> togglePanel(1), () -> togglePanel(0),
                 this::deviceSettings, this::leave);
@@ -185,7 +193,7 @@ public final class MeetingScreen extends BorderPane {
         }
         people.addListener((ListChangeListener<MockData.Participant>) change -> {
             peakPeople = Math.max(peakPeople, people.size());
-            renderVideos();
+            if (!videoRoom) renderVideos();
         });
         tabs.getSelectionModel().selectedIndexProperty().addListener((obs, old, value) -> updatePanelButtons()); renderVideos();
         clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> { duration.setText(MockData.duration(elapsed())); refreshNetwork(); })); clock.setCycleCount(Animation.INDEFINITE); clock.play();
@@ -208,7 +216,7 @@ public final class MeetingScreen extends BorderPane {
         if (videoRoom) {
             polling = true;
             manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> {
-                polling = false; if (disposed || leaving) return;
+                polling = false; if (disposed || leaving || response == null || !response.success()) return;
                 managedState = response; updateManagedPeople(response.members());
                 updateManagement(response); participantPanel.status("");
                 updateLock();
@@ -230,7 +238,14 @@ public final class MeetingScreen extends BorderPane {
     }
     private void updateLock() { lockLabel.setText(manager.locked() ? "● Phòng đã khóa" : "● Phòng đang mở"); }
     private long elapsed() { return (System.nanoTime() - startNanos) / 1_000_000_000; }
-    private void toggleMic() { if(videoRoom) { audioControls.toggle(); return; } manager.mic(!manager.mic()); controls.mic(manager.mic()); updateSelf(); }
+    private void toggleMic() {
+        if (videoRoom) {
+            if (reconnecting || disposed || mediaController.audio().pendingProperty().get()) return;
+            audioControls.toggle();
+            return;
+        }
+        manager.mic(!manager.mic()); controls.mic(manager.mic()); updateSelf();
+    }
     private void toggleCamera() {
         if (videoRoom) {
             if (mediaController.cameraPendingProperty().get() || reconnecting || disposed) return;
@@ -276,8 +291,7 @@ public final class MeetingScreen extends BorderPane {
         sharing = !sharing; controls.share.active(sharing); renderVideos(); }
     private void pin(int index) { pinnedIndex = pinnedIndex == index ? -1 : index; renderVideos(); }
     private void renderVideos() {
-        if(screenImage!=null) {screenImage.imageProperty().unbind();screenImage=null;}
-        tiles.forEach(VideoTile::dispose); tiles.clear(); videoContent.getChildren().clear(); participantCount.setText(people.size() + "/" + manager.room().capacity() + " người");
+        participantCount.setText(people.size() + "/" + manager.room().capacity() + " người");
         if (pinnedIndex >= people.size()) pinnedIndex = -1;
         String screenOwner=displayedRoom!=null ? displayedRoom.participants().stream().filter(p -> p.mediaState().sharePublishing()).map(common.meeting.ParticipantView::participantId).findFirst().orElse(null) : null;
         var viewport=videoRoom?client.media.VideoViewport.page(people.size(),pinnedIndex,screenOwner!=null,page):null;
@@ -286,21 +300,45 @@ public final class MeetingScreen extends BorderPane {
         page = Math.max(0, Math.min(page, pages - 1));
         int start = page * pageSize, end = Math.min(start + pageSize, people.size());
         var visibleIndices=videoRoom?viewport.cameras():java.util.stream.IntStream.range(start,end).boxed().toList();
-        BorderPane frame = new BorderPane(videoContent);
+        int focusIndex=videoRoom?viewport.primary():pinnedIndex>=0?pinnedIndex:start;
+        List<common.meeting.ParticipantView> ordered = videoRoom && displayedRoom != null
+                ? displayedRoom.participants().stream().sorted(java.util.Comparator.comparingInt(p -> p.participantId().equals(mediaSelf) ? 0 : 1)).toList()
+                : List.of();
+        if(videoRoom && displayedRoom!=null) {
+            var visible=new java.util.LinkedHashSet<String>();
+            if(screenOwner==null && focusIndex>=0 && focusIndex<ordered.size()) visible.add(ordered.get(focusIndex).participantId());
+            for(int i:visibleIndices) if(i<ordered.size()) visible.add(ordered.get(i).participantId());
+            mediaController.visibleParticipants(visible);
+        }
+        List<String> orderedIds = videoRoom ? ordered.stream().map(common.meeting.ParticipantView::participantId).toList() : List.of();
+        VideoLayoutKey nextKey = new VideoLayoutKey(videoRoom, orderedIds, screenOwner, pinnedIndex, page, sharing);
+        if (videoRoom && nextKey.equals(activeLayoutKey) && !tiles.isEmpty()) {
+            for (int idx = 0; idx < ordered.size(); idx++) {
+                var p = ordered.get(idx);
+                VideoTile existing = activeVideoTiles.get(p.participantId());
+                if (existing != null) {
+                    existing.updateParticipant(p, p.participantId().equals(mediaSelf));
+                    int pinIdx = idx;
+                    existing.pinAction(p.displayName(), pinnedIndex == pinIdx, () -> pin(pinIdx));
+                }
+            }
+            if (focusHeaderLabel != null && focusIndex >= 0 && focusIndex < people.size()) {
+                focusHeaderLabel.setText((pinnedIndex >= 0 ? "Đã ghim · " : "") + people.get(focusIndex).name());
+            }
+            return;
+        }
+        activeLayoutKey = nextKey;
+        activeVideoTiles.clear();
+        focusHeaderLabel = null;
+        if(screenImage!=null) {screenImage.imageProperty().unbind();screenImage=null;}
+        tiles.forEach(VideoTile::dispose); tiles.clear(); videoContent.getChildren().clear();
+        BorderPane frame = new BorderPane(videoContent); frame.setMinSize(0, 0);
         if (pages > 1) {
             Button previous = Ui.button("← Trước", "small-button", () -> { page--; renderVideos(); }); previous.setDisable(page == 0);
             Button next = Ui.button("Sau →", "small-button", () -> { page++; renderVideos(); }); next.setDisable(page == pages - 1);
             HBox pager = Ui.row(12, previous, Ui.label("Trang " + (page + 1) + "/" + pages + " · Người " + (start + 1) + "–" + end, "caption"), next); pager.setAlignment(Pos.CENTER); pager.setPadding(new Insets(12, 0, 0, 0)); frame.setBottom(pager);
         }
         canvas.getChildren().setAll(frame);
-        int focusIndex=videoRoom?viewport.primary():pinnedIndex>=0?pinnedIndex:start;
-        if(videoRoom && displayedRoom!=null) {
-            var ordered=displayedRoom.participants().stream().sorted(java.util.Comparator.comparingInt(p -> p.participantId().equals(mediaSelf)?0:1)).toList();
-            var visible=new java.util.LinkedHashSet<String>();
-            if(screenOwner==null && focusIndex>=0 && focusIndex<ordered.size()) visible.add(ordered.get(focusIndex).participantId());
-            for(int i:visibleIndices) if(i<ordered.size()) visible.add(ordered.get(i).participantId());
-            mediaController.visibleParticipants(visible);
-        }
         if(videoRoom && screenOwner!=null) {
             VBox thumbnails=new VBox(10);thumbnails.setPrefWidth(164);thumbnails.setMinWidth(130);
             for(int i:visibleIndices) {VideoTile tile=tile(i);tile.setPrefHeight(108);tile.setMinHeight(108);tile.setMaxHeight(108);thumbnails.getChildren().add(tile);}
@@ -311,12 +349,13 @@ public final class MeetingScreen extends BorderPane {
             if(own) shared.getChildren().add(Ui.label("Bạn đang chia sẻ màn hình", "subtitle"));
             else {
                 screenImage=new javafx.scene.image.ImageView();screenImage.setId("meeting-screen-image");screenImage.setPreserveRatio(true);
-                screenImage.fitWidthProperty().bind(shared.widthProperty().subtract(16));screenImage.fitHeightProperty().bind(shared.heightProperty().subtract(16));
+                screenImage.fitWidthProperty().bind(Bindings.max(1, shared.widthProperty().subtract(16)));
+                screenImage.fitHeightProperty().bind(Bindings.max(1, shared.heightProperty().subtract(16)));
                 screenImage.imageProperty().bind(mediaController.screen().frames(screenOwner).imageProperty());shared.getChildren().add(screenImage);
             }
             HBox badge=Ui.row(8,IconButton.icon("share"),Ui.label(ownerName+" • Đang chia sẻ", "accent-text"),Ui.spacer());
             if(own) badge.getChildren().add(Ui.button("Dừng chia sẻ", "secondary", this::toggleShare));
-            VBox large=Ui.column(12,badge,shared);VBox.setVgrow(shared,Priority.ALWAYS);HBox.setHgrow(large,Priority.ALWAYS);large.setMinWidth(0);
+            VBox large=Ui.column(12,badge,shared);VBox.setVgrow(shared,Priority.ALWAYS);HBox.setHgrow(large,Priority.ALWAYS);large.setMinSize(0, 0);
             videoContent.getChildren().add(new HBox(14,large,strip));
         } else if (sharing && !videoRoom) {
             VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164); thumbnails.setMinWidth(130);
@@ -324,14 +363,15 @@ public final class MeetingScreen extends BorderPane {
             ScrollPane strip = Ui.scroll(thumbnails); strip.setPrefWidth(180); strip.setMinWidth(145);
             VBox slide = Ui.column(20, Ui.label("MINI MEETING ROOM", "eyebrow"), Ui.label("Cùng xây dựng\nnhững ý tưởng tốt hơn.", "share-title"), Ui.label("01  /  Tổng quan sản phẩm", "brand-subtitle"), Ui.row(12, shareCard("Kết nối", "Nhóm nhỏ, tập trung"), shareCard("Cộng tác", "Chia sẻ tức thì")));
             slide.setAlignment(Pos.CENTER_LEFT); slide.getStyleClass().add("shared-slide");
-            VBox large = Ui.column(14, Ui.row(8, IconButton.icon("share"), Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text")), slide); VBox.setVgrow(slide, Priority.ALWAYS); HBox.setHgrow(large, Priority.ALWAYS); large.setMinWidth(0);
+            VBox large = Ui.column(14, Ui.row(8, IconButton.icon("share"), Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text")), slide); VBox.setVgrow(slide, Priority.ALWAYS); HBox.setHgrow(large, Priority.ALWAYS); large.setMinSize(0, 0);
             HBox layout = new HBox(14, large, strip); videoContent.getChildren().add(layout);
         } else if (pinnedIndex >= 0 || videoRoom && !people.isEmpty()) {
             VideoTile focused = tile(focusIndex);
             BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused)); VBox.setVgrow(focus, Priority.ALWAYS);
             Button back = Ui.button("Trở về lưới", "secondary", () -> { pinnedIndex = -1; renderVideos(); });
-            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), Ui.label((pinnedIndex>=0?"Đã ghim · ":"") + people.get(focusIndex).name(), "strong"), Ui.spacer(), back), focus);
-            main.setMinWidth(0); HBox.setHgrow(main, Priority.ALWAYS);
+            focusHeaderLabel = Ui.label((pinnedIndex>=0?"Đã ghim · ":"") + people.get(focusIndex).name(), "strong");
+            VBox main = Ui.column(12, Ui.row(8, IconButton.icon("pin"), focusHeaderLabel, Ui.spacer(), back), focus);
+            main.setMinSize(0, 0); HBox.setHgrow(main, Priority.ALWAYS);
             if (people.size() > 1) {
                 VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164);
                 int shown=0;
@@ -354,7 +394,10 @@ public final class MeetingScreen extends BorderPane {
                     .sorted(java.util.Comparator.comparingInt(p -> p.participantId().equals(mediaSelf) ? 0 : 1)).toList().get(i);
             VideoTile tile = new VideoTile(participant, participant.participantId().equals(mediaSelf),
                     mediaController.frames(participant.participantId()).imageProperty());
-            tile.pinAction(participant.displayName(), pinnedIndex == i, () -> pin(i)); tiles.add(tile); return tile;
+            tile.pinAction(participant.displayName(), pinnedIndex == i, () -> pin(i));
+            tiles.add(tile);
+            activeVideoTiles.put(participant.participantId(), tile);
+            return tile;
         }
         MockData.Participant p = people.get(i);
         boolean self = participantSnapshot.get(i).userId() == manager.authenticatedUser().id();
@@ -472,7 +515,8 @@ public final class MeetingScreen extends BorderPane {
         if(screenPicker!=null) screenPicker.close();
         if(screenImage!=null) screenImage.imageProperty().unbind();
         if (cameraSettings != null) { cameraSettings.close(); cameraSettings = null; }
-        disposed = true; filePanel.close(); clock.stop(); roomPoll.stop(); if (panelAnimation != null) panelAnimation.stop(); tiles.forEach(VideoTile::dispose);
+        disposed = true; filePanel.close(); clock.stop(); roomPoll.stop(); if (panelAnimation != null) panelAnimation.stop();
+        tiles.forEach(VideoTile::dispose); activeVideoTiles.clear();
         networkSignal.dispose();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.

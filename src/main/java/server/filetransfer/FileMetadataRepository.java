@@ -43,6 +43,11 @@ public final class FileMetadataRepository {
     private final SecureRandom random = new SecureRandom();
     private String legacyOwner;
     public void legacyOwner(String instance) {legacyOwner=Objects.requireNonNull(instance);}
+    @FunctionalInterface public interface RoomSessionGate {
+        boolean permits(long roomId, long userId, String tokenHash);
+    }
+    private volatile RoomSessionGate roomSessionGate;
+    public void roomSessionGate(RoomSessionGate gate) { roomSessionGate = Objects.requireNonNull(gate); }
 
     public FileMetadataRepository() { this(DatabaseConnection::getConnection); }
 
@@ -70,6 +75,27 @@ public final class FileMetadataRepository {
     public void authorize(long userId, long roomId) throws SQLException, TransferException {
         try (Connection connection = connections.getConnection()) { authorize(connection, userId, roomId); }
     }
+    /** Signaling room access belongs to the active device, even when another login token remains valid. */
+    public void authorizeSession(String token, long userId, long roomId) throws SQLException, TransferException {
+        try (Connection connection = connections.getConnection()) {
+            authorize(connection, userId, roomId);
+            requireRoomSession(connection, token, userId, roomId);
+        }
+    }
+    private void requireRoomSession(Connection connection, String token, long userId, long roomId)
+            throws SQLException, TransferException {
+        RoomSessionGate gate = roomSessionGate;
+        if (gate == null) return;
+        try (var query = connection.prepareStatement("SELECT Server_Epoch FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
+            query.setLong(1, roomId);
+            try (var rows = query.executeQuery()) {
+                if (rows.next() && !"legacy".equals(rows.getString(1))
+                        && (token == null || !gate.permits(roomId, userId, server.auth.AuthService.tokenHash(token)))) {
+                    throw new TransferException("DEVICE_REPLACED", "Tài khoản đã chuyển phòng họp sang thiết bị khác.");
+                }
+            }
+        }
+    }
     public String membershipGeneration(long userId,long roomId) throws SQLException,TransferException {
         try(var connection=connections.getConnection()) {authorize(connection,userId,roomId);return membershipGeneration(connection,userId,roomId);}
     }
@@ -84,6 +110,7 @@ public final class FileMetadataRepository {
             try {
                 if(token!=null && sessions.authenticate(connection,token,true)!=user) throw new TransferException("INVALID_SESSION","Phiên đăng nhập không hợp lệ.");
                 requireOpenRoom(lockRoom(connection,room));authorize(connection,user,room);
+                requireRoomSession(connection, token, user, room);
                 if(opaque!=null && !opaque.isBlank()) try(var query=connection.prepareStatement("SELECT Room_Opaque_ID FROM MMR_Phong_Van_Hanh WHERE Ma_Phong=?")) {
                     query.setLong(1,room);try(var rows=query.executeQuery()) {if(!rows.next() || !opaque.equals(rows.getString(1))) throw new TransferException("STALE_TRANSFER","Phòng đã được mở lại.");}
                 }
@@ -144,6 +171,9 @@ public final class FileMetadataRepository {
     }
 
     public RoomInfo joinRoom(long userId, String code, String pin) throws SQLException, TransferException {
+        return joinRoom(userId, code, pin, null);
+    }
+    public RoomInfo joinRoom(long userId, String code, String pin, String token) throws SQLException, TransferException {
         String canonicalCode = code == null ? "" : code.strip().toUpperCase(Locale.ROOT);
         if (!canonicalCode.matches("[A-Z0-9][A-Z0-9-]{2,19}") || pin != null && pin.length() > 128) {
             throw invalid("Mã phòng hoặc PIN không hợp lệ.");
@@ -154,6 +184,7 @@ public final class FileMetadataRepository {
                 requireActiveUser(connection, userId);
                 RoomRow room = lockRoom(connection, canonicalCode);
                 requireOpenRoom(room);
+                requireRoomSession(connection, token, userId, room.info().id());
                 if (!hasMembership(connection, userId, room.info().id())) {
                     if (room.locked()) throw new TransferException("ROOM_LOCKED", "Phòng đã khóa.");
                     if (room.pinHash() != null && !passwords.verify(pin, room.pinHash())) {
@@ -184,11 +215,15 @@ public final class FileMetadataRepository {
     }
 
     public void leaveRoom(long userId, long roomId) throws SQLException, TransferException {
+        leaveRoom(userId, roomId, null);
+    }
+    public void leaveRoom(long userId, long roomId, String token) throws SQLException, TransferException {
         if (userId <= 0 || roomId <= 0) throw invalid("Phòng không hợp lệ.");
         try (Connection connection = connections.getConnection()) {
             beginMutation(connection);
             try {
                 lockRoom(connection, roomId); // Same lock as join/complete: leaving revokes future commits.
+                requireRoomSession(connection, token, userId, roomId);
                 try (PreparedStatement statement = connection.prepareStatement("""
                         UPDATE Thanh_Vien_Phong SET Roi_Phong_Luc = ?, Ly_Do_Roi = 'TU_ROI'
                         WHERE Ma_Phong = ? AND Ma_Nguoi_Dung = ? AND Roi_Phong_Luc IS NULL
@@ -355,6 +390,7 @@ public final class FileMetadataRepository {
                 if(token!=null && sessions.authenticate(connection,token,true)!=userId) throw new TransferException("INVALID_SESSION","Phiên đăng nhập không hợp lệ.");
                 requireOpenRoom(lockRoom(connection, roomId));
                 authorize(connection, userId, roomId);
+                requireRoomSession(connection, token, userId, roomId);
                 if(generation!=null && !generation.equals(membershipGeneration(connection,userId,roomId))) throw new TransferException("STALE_TRANSFER","Lượt truyền thuộc lần tham gia phòng cũ.");
                 StoredFile existing = findFile(connection, "f.Transfer_Id = ?", transferId.toString());
                 if (existing != null) {

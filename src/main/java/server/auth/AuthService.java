@@ -93,6 +93,7 @@ public final class AuthService {
                 case "RESET_PASSWORD" -> emailOtp == null ? otpUnavailable()
                         : emailOtp.resetPassword(request.email(), request.otp(), request.password());
                 case "LOGIN" -> login(request);
+                case "RESUME_SESSION" -> resumeSession(request);
                 case "LOGOUT" -> logout(request.token());
                 case "UPDATE_PROFILE" -> updateProfile(request);
                 case "CHANGE_PASSWORD" -> changePassword(request);
@@ -169,12 +170,19 @@ public final class AuthService {
                 String token = randomToken();
                 Instant now = clock.instant();
                 Instant expiry = now.plus(sessionLifetime);
+                String clientInfo = normalizeClientInfo(request.clientInfo());
+                boolean deviceColumn = clientInfo != null && hasClientInfoColumn(connection);
+                List<String> revoked = deviceColumn
+                        ? revokeDeviceSessions(connection, account.user().id(), clientInfo, now) : List.of();
                 try (PreparedStatement statement = connection.prepareStatement(
-                        "INSERT INTO Phien_Dang_Nhap (Ma_Nguoi_Dung, Token_Bam, Ngay_Tao, Het_Han_Luc) VALUES (?, ?, ?, ?)")) {
+                        deviceColumn
+                        ? "INSERT INTO Phien_Dang_Nhap (Ma_Nguoi_Dung, Token_Bam, Ngay_Tao, Het_Han_Luc, Thong_Tin_Client) VALUES (?, ?, ?, ?, ?)"
+                        : "INSERT INTO Phien_Dang_Nhap (Ma_Nguoi_Dung, Token_Bam, Ngay_Tao, Het_Han_Luc) VALUES (?, ?, ?, ?)")) {
                     statement.setLong(1, account.user().id());
                     statement.setString(2, tokenHash(token));
                     statement.setTimestamp(3, Timestamp.from(now), utc());
                     statement.setTimestamp(4, Timestamp.from(expiry), utc());
+                    if (deviceColumn) statement.setString(5, clientInfo);
                     statement.executeUpdate();
                 }
                 try (PreparedStatement statement = connection.prepareStatement(
@@ -185,10 +193,94 @@ public final class AuthService {
                 }
                 AuthUser user = verifiedUser(connection, account.user());
                 connection.commit();
+                notifyRevocations(revoked);
                 return AuthResponse.ok("Đăng nhập thành công.", user, token, expiry.toString());
             } catch (SQLException | RuntimeException exception) {
                 rollback(connection, exception);
                 throw exception;
+            }
+        }
+    }
+
+    static String normalizeClientInfo(String raw) {
+        if (raw == null) return null;
+        String value = raw.codePoints().filter(c -> !Character.isISOControl(c))
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString().strip();
+        if (value.isEmpty()) return null;
+        int end = Math.min(255, value.length());
+        if (end < value.length() && Character.isHighSurrogate(value.charAt(end - 1))) end--;
+        return value.substring(0, end);
+    }
+
+    /** Read result metadata once per operation; no schema mutations or vendor-specific SQL. */
+    private static boolean hasClientInfoColumn(Connection connection) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM Phien_Dang_Nhap WHERE 1=0");
+                ResultSet rows = statement.executeQuery()) {
+            var metadata = rows.getMetaData();
+            for (int i = 1; i <= metadata.getColumnCount(); i++) {
+                if ("Thong_Tin_Client".equalsIgnoreCase(metadata.getColumnName(i))) return true;
+            }
+            return false;
+        }
+    }
+
+    /** Login already holds the account lock, including when no session exists yet. */
+    private static List<String> revokeDeviceSessions(Connection connection, long userId, String clientInfo, Instant now) throws SQLException {
+        List<String> hashes = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT Token_Bam FROM Phien_Dang_Nhap WHERE Ma_Nguoi_Dung=? AND Thong_Tin_Client=?
+                AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>? FOR UPDATE
+                """)) {
+            statement.setLong(1, userId); statement.setString(2, clientInfo); statement.setTimestamp(3, Timestamp.from(now), utc());
+            try (ResultSet rows = statement.executeQuery()) { while (rows.next()) hashes.add(rows.getString(1)); }
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE Phien_Dang_Nhap SET Thu_Hoi_Luc=? WHERE Ma_Nguoi_Dung=? AND Thong_Tin_Client=?
+                AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>?
+                """)) {
+            statement.setTimestamp(1, Timestamp.from(now), utc()); statement.setLong(2, userId);
+            statement.setString(3, clientInfo); statement.setTimestamp(4, Timestamp.from(now), utc()); statement.executeUpdate();
+        }
+        return hashes;
+    }
+
+    private AuthResponse resumeSession(AuthRequest request) throws SQLException {
+        String token = request.token();
+        if (token == null || token.isBlank() || token.length() > 256) return expiredSession();
+        try (Connection connection = connections.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            connection.setAutoCommit(false);
+            try {
+                // Reuse the account-before-session lock order of password/profile changes.
+                Account account = lockAuthenticatedAccount(connection, token);
+                if (account == null) { connection.rollback(); return expiredSession(); }
+                boolean deviceColumn = hasClientInfoColumn(connection);
+                Instant expiry;
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT Het_Han_Luc, Token_Bam" + (deviceColumn ? ", Thong_Tin_Client" : "")
+                        + " FROM Phien_Dang_Nhap WHERE Token_Bam=? AND Thu_Hoi_Luc IS NULL AND Het_Han_Luc>? FOR UPDATE")) {
+                    statement.setString(1, tokenHash(token)); statement.setTimestamp(2, Timestamp.from(clock.instant()), utc());
+                    try (ResultSet rows = statement.executeQuery()) {
+                        if (!rows.next() || !tokenHash(token).equals(rows.getString("Token_Bam"))) {
+                            connection.rollback(); return expiredSession();
+                        }
+                        String storedClientInfo = deviceColumn ? rows.getString("Thong_Tin_Client") : null;
+                        if (storedClientInfo != null && !Objects.equals(storedClientInfo, normalizeClientInfo(request.clientInfo()))) {
+                            connection.rollback(); return expiredSession();
+                        }
+                        expiry = rows.getTimestamp("Het_Han_Luc", utc()).toInstant();
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE Nguoi_Dung SET Lan_Dang_Nhap_Cuoi=? WHERE Ma_Nguoi_Dung=?")) {
+                    statement.setTimestamp(1, Timestamp.from(clock.instant()), utc()); statement.setLong(2, account.user().id());
+                    statement.executeUpdate();
+                }
+                AuthUser user = verifiedUser(connection, account.user());
+                connection.commit();
+                return AuthResponse.ok("Đã khôi phục phiên đăng nhập.", user, token, expiry.toString());
+            } catch (SQLException | RuntimeException failure) {
+                rollback(connection, failure); throw failure;
             }
         }
     }
@@ -501,7 +593,7 @@ public final class AuthService {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
-    static String tokenHash(String token) {
+    public static String tokenHash(String token) {
         try {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(
                     MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8)));

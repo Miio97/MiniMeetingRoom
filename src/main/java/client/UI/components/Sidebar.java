@@ -53,12 +53,16 @@ public final class Sidebar extends VBox {
     private void confirmLogout(SceneManager manager) {
         Alert dialog = new Alert(Alert.AlertType.CONFIRMATION);
         dialog.initOwner(manager.stage()); dialog.setTitle("Đăng xuất"); dialog.setHeaderText(null);
-        dialog.setContentText("Bạn có chắc muốn đăng xuất?");
+        dialog.setContentText("Chuyển tài khoản để giữ phiên trên thiết bị, hoặc đăng xuất để thu hồi phiên hiện tại.");
         ButtonType cancel = new ButtonType("Hủy", ButtonBar.ButtonData.CANCEL_CLOSE);
         ButtonType logout = new ButtonType("Đăng xuất", ButtonBar.ButtonData.OK_DONE);
-        dialog.getButtonTypes().setAll(cancel, logout); Ui.style(dialog);
-        ((ButtonBar) dialog.getDialogPane().lookup(".button-bar")).setButtonOrder("C+O");
+        ButtonType switchAccount = new ButtonType("Chuyển tài khoản", ButtonBar.ButtonData.OTHER);
+        dialog.getButtonTypes().setAll(cancel, switchAccount, logout); Ui.style(dialog);
+        ((ButtonBar) dialog.getDialogPane().lookup(".button-bar")).setButtonOrder("C+UO");
         dialog.getDialogPane().lookupButton(logout).getStyleClass().add("danger");
-        dialog.showAndWait().filter(logout::equals).ifPresent(result -> manager.logout());
+        dialog.showAndWait().ifPresent(result -> {
+            if (result.equals(logout)) manager.logout();
+            else if (result.equals(switchAccount)) manager.switchAccount();
+        });
     }
 }

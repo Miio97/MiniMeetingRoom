@@ -139,6 +139,7 @@ public final class RoomRepository {
         }
         return transaction(connection -> {
             lockSession(connection, principal, now);
+            requireCurrentJoinSession(connection, principal, now);
             Receipt receipt = receipt(connection, principal, requestId, "CREATE_ROOM", bodyHash, now);
             if (receipt != null) return new CreateResult(loadRoom(connection, receipt.roomId()), true);
             if (!admissionAllowed) throw new RoomException("SERVER_CAPACITY");
@@ -167,6 +168,7 @@ public final class RoomRepository {
             java.util.function.LongPredicate historyReady, Instant now) throws SQLException {
         return transaction(connection -> {
             lockSession(connection, principal, now);
+            requireCurrentJoinSession(connection, principal, now);
             Receipt receipt = receipt(connection, principal, requestId, "REOPEN_ROOM", bodyHash, now);
             if (receipt != null) {
                 StoredRoom previous = loadRoom(connection, receipt.roomId());
@@ -232,6 +234,7 @@ public final class RoomRepository {
         }
         return transaction(connection -> {
             lockSession(connection, principal, now);
+            requireCurrentJoinSession(connection, principal, now);
             Receipt receipt = receipt(connection, principal, requestId, "JOIN_ROOM", bodyHash, now);
             if (receipt != null) {
                 StoredRoom existing = loadRoom(connection, receipt.roomId());
@@ -271,6 +274,51 @@ public final class RoomRepository {
             completeReceipt(connection, principal, requestId, "JOIN_ROOM", bodyHash, roomId, membership, participantId, now);
             return new JoinResult(room.withStatus(RoomStatus.ACTIVE), membership, participantId, false, true);
         });
+    }
+
+    void validateJoinSession(SessionPrincipal principal, Instant now) throws SQLException {
+        transaction(connection -> { lockSession(connection, principal, now); requireCurrentJoinSession(connection, principal, now); return null; });
+    }
+
+    /** Move an admitted account to its newer login without ending its durable room visit. */
+    JoinResult replaceDevice(SessionPrincipal principal, String requestId, byte[] bodyHash, long roomId,
+            String expectedOpaqueId, long membershipId, String participantId, String instanceId,
+            String epoch, Instant now) throws SQLException {
+        return transaction(connection -> {
+            lockSession(connection, principal, now);
+            requireCurrentJoinSession(connection, principal, now);
+            Receipt previous = receipt(connection, principal, requestId, "JOIN_ROOM", bodyHash, now);
+            if (previous != null) {
+                if (previous.roomId() != roomId || previous.membershipId() != membershipId
+                        || !participantId.equals(previous.participantId())) throw new RoomException("REQUEST_ALREADY_ENDED");
+                return new JoinResult(loadRoom(connection, roomId), membershipId, participantId, true,
+                        membershipActive(connection, membershipId));
+            }
+            StoredRoom room = loadRoomForUpdate(connection, roomId);
+            if (room == null || !instanceId.equals(room.instanceId()) || !epoch.equals(room.epoch())) throw new RoomException("ROOM_NOT_FOUND");
+            if (!expectedOpaqueId.equals(room.roomId())) throw new RoomException("STALE_ROOM");
+            if (room.status() == RoomStatus.CLOSED) throw new RoomException("ROOM_CLOSED");
+            try (PreparedStatement query = connection.prepareStatement(
+                    "SELECT Ma_Nguoi_Dung, Ma_Phong, Roi_Phong_Luc FROM Thanh_Vien_Phong WHERE Ma_Thanh_Vien_Phong=? FOR UPDATE")) {
+                query.setLong(1, membershipId);
+                try (ResultSet rows = query.executeQuery()) {
+                    if (!rows.next() || rows.getLong(1) != principal.userId() || rows.getLong(2) != roomId
+                            || rows.getTimestamp(3, utc()) != null) throw new RoomException("REQUEST_ALREADY_ENDED");
+                }
+            }
+            completeReceipt(connection, principal, requestId, "JOIN_ROOM", bodyHash, roomId, membershipId, participantId, now);
+            return new JoinResult(room, membershipId, participantId, false, true);
+        });
+    }
+
+    /** Successful newer joins fence old room credentials, including after the new device leaves. */
+    private static void requireCurrentJoinSession(Connection connection, SessionPrincipal principal, Instant now) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT r.Ma_Phien FROM MMR_Yeu_Cau_Phong r JOIN Phien_Dang_Nhap s ON s.Ma_Phien=r.Ma_Phien "
+                        + "WHERE s.Ma_Nguoi_Dung=? AND r.Ma_Phien>? AND r.Operation='JOIN_ROOM' AND r.Result_Code='OK' AND r.Het_Han_Luc>?")) {
+            query.setLong(1, principal.userId()); query.setLong(2, principal.sessionId()); timestamp(query, 3, now);
+            try (ResultSet rows = query.executeQuery()) { if (rows.next()) throw new RoomException("DEVICE_REPLACED"); }
+        }
     }
 
     void leave(long membershipId, Instant now, String reason) throws SQLException {

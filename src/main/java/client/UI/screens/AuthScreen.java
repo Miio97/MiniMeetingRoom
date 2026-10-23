@@ -36,6 +36,7 @@ public final class AuthScreen extends HBox {
     public AuthScreen(SceneManager manager) {
         getStyleClass().add("auth-screen");
         this.manager = manager;
+        status.setId("auth-status"); status.setWrapText(true);
         VBox brand = new VBox(24); brand.getStyleClass().add("branding"); brand.setPadding(new Insets(48, 40, 40, 40));
         brand.setPrefWidth(430); brand.setMinWidth(430);
         brand.getChildren().addAll(Ui.row(12, IconButton.icon("camera"), Ui.label("mini meeting", "brand-name")), Ui.spacer(),
@@ -58,6 +59,7 @@ public final class AuthScreen extends HBox {
         if (pending || disposed) return;
         pendingEmail = ""; pendingUsername = ""; pendingRegistrationChallenge = "";
         beginStep(registering ? Step.REGISTER : Step.LOGIN);
+        if (!registering) addSavedAccounts();
         addInput("Tên đăng nhập", registering ? "Không có khoảng trắng; phân biệt hoa/thường" : "Nhập đúng chữ hoa/thường", false, "auth-username");
         if (registering) {
             addInput("Tên hiển thị", "Ví dụ: Minh Anh", false, "auth-display-name");
@@ -70,6 +72,48 @@ public final class AuthScreen extends HBox {
             Button forgot = Ui.button("Quên mật khẩu?", "small-button", this::showResetEmail);
             forgot.setId("auth-forgot-password"); form.getChildren().add(forgot);
         }
+    }
+
+    private void addSavedAccounts() {
+        var saved = manager.savedSessions();
+        if (saved.isEmpty()) return;
+        VBox accounts = new VBox(6); accounts.setId("auth-saved-accounts");
+        accounts.getChildren().add(Ui.label("Tài khoản đã lưu trên thiết bị này", "field-label"));
+        for (var session : saved) {
+            Button resume = Ui.button(session.displayName() + " (@" + session.username() + ")", "secondary",
+                    () -> resumeSavedSession(session));
+            resume.setId("auth-resume-" + session.userId()); resume.setGraphic(Ui.avatar(session.displayName(), 30));
+            resume.setMinWidth(0); resume.setMaxWidth(Double.MAX_VALUE); HBox.setHgrow(resume, Priority.ALWAYS);
+            Button remove = Ui.button("✕", "small-button", () -> request(() -> {
+                try { return manager.authClient().logout(session.token()); }
+                catch (java.io.IOException offline) {
+                    return AuthResponse.error("SERVER_UNAVAILABLE", "Đã gỡ khỏi thiết bị. Chưa thể thu hồi phiên trên máy chủ do mất kết nối.");
+                } finally { manager.removeSavedToken(session.token()); }
+            }, response -> { switchForm(false); if (!response.success()) showStatus(response.message(), false); }));
+            remove.setId("auth-remove-" + session.userId()); remove.setAccessibleText("Gỡ tài khoản " + session.username());
+            remove.setTooltip(new Tooltip("Gỡ tài khoản khỏi thiết bị này"));
+            accounts.getChildren().add(Ui.row(6, resume, remove));
+        }
+        form.getChildren().add(accounts);
+    }
+
+    public void resumeSavedSession(client.auth.DeviceSessionStore.SavedSession saved) {
+        if (pending || disposed) return;
+        hideStatus(); long current = generation; setPending(true);
+        manager.resumeSavedSession(saved, response -> {
+            if (disposed || current != generation) return;
+            setPending(false);
+            if (response.success()) { clearSecrets(); manager.acceptSession(response); manager.lobby(); }
+            else {
+                if ("SESSION_EXPIRED".equals(response.code())) {
+                    manager.removeSavedToken(saved.token()); switchForm(false);
+                }
+                showStatus(response.message(), false);
+            }
+        }, failure -> {
+            if (disposed || current != generation) return;
+            setPending(false); showStatus(SceneManager.connectionError(failure), false);
+        });
     }
 
     private void beginStep(Step next) {
@@ -136,7 +180,7 @@ public final class AuthScreen extends HBox {
         }
         if (!valid) return;
         request(() -> registering ? manager.authClient().register(username, displayName, email, password)
-                : manager.authClient().login(username, password), response -> {
+                : manager.authClient().login(username, password, manager.clientInfo()), response -> {
             if (!response.success()) { showStatus(response.message(), false); return; }
             clearSecrets();
             if (registering) {

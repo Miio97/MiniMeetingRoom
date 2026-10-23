@@ -38,6 +38,9 @@ public final class MeetingSession implements AutoCloseable {
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(32), Thread.ofPlatform().daemon().name("meeting-client-owner").factory());
     private final AtomicBoolean closed = new AtomicBoolean(), refreshing = new AtomicBoolean(), fxScheduled = new AtomicBoolean();
+    private final AtomicBoolean applicationLeaving = new AtomicBoolean(), roomTerminated = new AtomicBoolean();
+    private CompletableFuture<Void> applicationLeave;
+    private volatile boolean admissionPending;
     private final ScheduledExecutorService recoveryTimer = Executors.newSingleThreadScheduledExecutor(
             Thread.ofPlatform().daemon().name("meeting-recovery").factory());
     private final Object recoveryLock = new Object();
@@ -133,7 +136,7 @@ public final class MeetingSession implements AutoCloseable {
         for(var watch:catalogListeners) watch.listener.accept(update);
     }
     private void retryCatalog() {
-        if(closed.get() || catalogListeners.isEmpty() || !catalogRetry.compareAndSet(false,true)) return;
+        if(closed.get() || applicationLeaving.get() || catalogListeners.isEmpty() || !catalogRetry.compareAndSet(false,true)) return;
         try {recoveryTimer.schedule(() -> {catalogRetry.set(false);if(!closed.get() && recovery==null && !catalogListeners.isEmpty()) refreshCatalog();},2,TimeUnit.SECONDS);}
         catch(RejectedExecutionException stopped) {catalogRetry.set(false);}
     }
@@ -227,6 +230,7 @@ public final class MeetingSession implements AutoCloseable {
     }
     private RoomSnapshot acceptJoin(RoomJoinReply joined) {
         self = joined.selfParticipantId(); snapshot = joined.room(); joinedAt = System.nanoTime(); joinIntent = null; reopenIntent = null; pin = "";
+        admissionPending = false; roomTerminated.set(false);
         publish(State.CONNECTED, "Thành viên đã đồng bộ; âm thanh và hình ảnh chưa kết nối."); return snapshot;
     }
     private CompletableFuture<RoomSnapshot> awaitAdmission(CompletableFuture<RoomSnapshot> attempt) {
@@ -234,7 +238,8 @@ public final class MeetingSession implements AutoCloseable {
             if (failure == null) return CompletableFuture.completedFuture(value);
             Throwable cause = failure;
             while ((cause instanceof CompletionException || cause instanceof ExecutionException) && cause.getCause() != null) cause = cause.getCause();
-            if (cause instanceof SignalException signal && "APPROVAL_PENDING".equals(signal.code()) && !closed.get()) {
+            if (cause instanceof SignalException signal && "APPROVAL_PENDING".equals(signal.code())) admissionPending = true;
+            if (cause instanceof SignalException signal && "APPROVAL_PENDING".equals(signal.code()) && !closed.get() && !applicationLeaving.get()) {
                 publish(State.CONNECTED, "Đang chờ chủ phòng duyệt. Bạn có thể hủy yêu cầu.");
                 return CompletableFuture.runAsync(() -> { }, CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS))
                         .thenCompose(ignored -> awaitAdmission(submit(() -> acceptJoin(decode(command("ADMISSION_STATUS",
@@ -352,6 +357,38 @@ public final class MeetingSession implements AutoCloseable {
             closeTransport();publish(State.READY,"Đã rời phòng.");clearChat();return null;
         });
     }
+    /** Wait for an intentional leave before releasing signaling; the server chooses a host atomically. */
+    public synchronized CompletableFuture<Void> leaveForApplicationClose() {
+        if (applicationLeave != null) return applicationLeave;
+        if (closed.get()) return CompletableFuture.completedFuture(null);
+        applicationLeaving.set(true);
+        final Recovery interruptedRecovery;
+        synchronized (recoveryLock) { interruptedRecovery = recovery; recovery = null; }
+        applicationLeave = this.<Void>submit(() -> {
+            try {
+                RoomSnapshot active = snapshot;
+                if (active != null) {
+                    SignalingClient transport = client;
+                    if (interruptedRecovery != null || transport == null || transport.state() != SignalingClient.State.CONNECTED) {
+                        closeTransport(); connectTransport(false);
+                        JsonObject resume = new JsonObject(); resume.addProperty("participantId", self);
+                        client.request("RESUME_ROOM", active.roomId(), resume).get(10, TimeUnit.SECONDS);
+                    }
+                    // Empty body requests the authority's automatic succession, including when only the host remains.
+                    client.request("LEAVE_ROOM", active.roomId(), new JsonObject()).get(10, TimeUnit.SECONDS);
+                } else if (admissionPending && preview != null && client != null && client.state() == SignalingClient.State.CONNECTED) {
+                    client.request("LEAVE_ROOM", preview.roomId(), new JsonObject()).get(10, TimeUnit.SECONDS);
+                }
+                return null;
+            } finally {
+                recovery = null; snapshot = null; self = null; pin = ""; createIntent = null;
+                joinIntent = null; reopenIntent = null; joinedAt = 0; admissionPending = false;
+                closeVideo(); closeTransport(); publish(State.READY, "Đã rời phòng."); clearChat();
+            }
+        }, true).orTimeout(10, TimeUnit.SECONDS);
+        applicationLeave.whenComplete((ignored, failure) -> { if (failure != null) closeTransport(); });
+        return applicationLeave;
+    }
     private RoomSnapshot requireRoom() throws SignalException { if (snapshot == null) throw new SignalException("ROOM_REQUIRED"); return snapshot; }
     private void connect() throws Exception {
         if (recovery != null) throw new SignalException("CONNECTION_RESTORING");
@@ -382,7 +419,7 @@ public final class MeetingSession implements AutoCloseable {
     private void beginRecovery() {
         Recovery pending;
         synchronized (recoveryLock) {
-            if (closed.get() || recovery != null || snapshot == null || self == null) return;
+            if (closed.get() || applicationLeaving.get() || roomTerminated.get() || recovery != null || snapshot == null || self == null) return;
             pending = new Recovery(snapshot.roomId(), self, System.nanoTime() + recoveryGrace.toNanos());
             recovery = pending;
             if (video != null) video.controlConnected(false);
@@ -393,7 +430,7 @@ public final class MeetingSession implements AutoCloseable {
         }
     }
     private void retryRecovery(Recovery pending) {
-        if (recovery != pending || closed.get()) return;
+        if (recovery != pending || closed.get() || applicationLeaving.get() || roomTerminated.get()) return;
         submit(() -> {
             if (recovery != pending) return null;
             if (System.nanoTime() - pending.deadline() >= 0) {
@@ -428,7 +465,7 @@ public final class MeetingSession implements AutoCloseable {
             return null;
         }).whenComplete((ignored, failure) -> {
             synchronized (recoveryLock) {
-                if (recovery == pending && !closed.get()) recoveryTimer.schedule(() -> retryRecovery(pending), 2, TimeUnit.SECONDS);
+                if (recovery == pending && !closed.get() && !applicationLeaving.get() && !roomTerminated.get()) recoveryTimer.schedule(() -> retryRecovery(pending), 2, TimeUnit.SECONDS);
             }
         });
     }
@@ -473,6 +510,19 @@ public final class MeetingSession implements AutoCloseable {
         RoomSnapshot active = snapshot;
         String expectedRoom = active != null ? active.roomId() : preview == null ? null : preview.roomId();
         if (!Objects.equals(expectedRoom, message.roomId())) return;
+        if ("ROOM_LEFT".equals(message.type()) && message.body().has("reason")
+                && "DEVICE_REPLACED".equals(message.body().get("reason").getAsString())) {
+            roomTerminated.set(true);
+            synchronized (recoveryLock) { recovery = null; }
+            closeTransport();
+            submit(() -> {
+                closeVideo(); snapshot = null; self = null; pin = ""; joinIntent = null; reopenIntent = null;
+                admissionPending = false;
+                publish(State.READY, "Tài khoản đã vào phòng trên thiết bị khác. Thiết bị này đã rời phòng.");
+                clearChat(); return null;
+            });
+            return;
+        }
         if ("ROOM_CLOSED".equals(message.type()) || "ROOM_LEFT".equals(message.type())) {
             submit(() -> {
                 RoomSnapshot current = snapshot;
@@ -541,13 +591,14 @@ public final class MeetingSession implements AutoCloseable {
             if (failure == null && refreshAgain.get() && !closed.get()) refreshEvents();
         });
     }
-    private <T> CompletableFuture<T> submit(Callable<T> task) {
+    private <T> CompletableFuture<T> submit(Callable<T> task) { return submit(task, false); }
+    private <T> CompletableFuture<T> submit(Callable<T> task, boolean departure) {
         CompletableFuture<T> future = new CompletableFuture<>();
-        if (closed.get()) { future.completeExceptionally(new SignalException("CONNECTION_CLOSED")); return future; }
+        if (closed.get() || applicationLeaving.get() && !departure) { future.completeExceptionally(new SignalException("CONNECTION_CLOSED")); return future; }
         jobs.add(future);
         try { worker.execute(() -> {
             try {
-                if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
+                if (closed.get() || applicationLeaving.get() && !departure) throw new SignalException("CONNECTION_CLOSED");
                 T value = task.call();
                 if (closed.get()) throw new SignalException("CONNECTION_CLOSED");
                 future.complete(value);

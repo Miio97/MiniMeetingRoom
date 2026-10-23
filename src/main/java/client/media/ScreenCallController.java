@@ -30,6 +30,8 @@ public final class ScreenCallController implements AutoCloseable {
     private final CameraSwitch sharing=new CameraSwitch(this::changed);
     private final CompletableFuture<Void> closeComplete=new CompletableFuture<>();
     private volatile boolean active,entered;
+    private long publishedAt;
+    private boolean shareRequestConfirmed;
     private final AtomicLong previewEpoch=new AtomicLong();
     private NativeVideoSession nativeSession;
     private volatile NativeVideoSession.Peer publisher;
@@ -119,21 +121,26 @@ public final class ScreenCallController implements AutoCloseable {
             while(frames(self.get()).receivedFrames()<=before) {wanted();if(System.nanoTime()>deadline) throw new SignalException("SCREEN_NO_FRAMES");Thread.sleep(30);}
             JsonObject body=new JsonObject();body.addProperty("sdp",publisher.offer());wanted();attempted=true;
             publisher.answer(command("SCREEN_PUBLISH",body).get("sdp").getAsString());wanted();
+            publishedAt = System.nanoTime(); shareRequestConfirmed = false;
             publisher.pauseTransmission(networkPaused); appliedNetworkPause = networkPaused; active=true;
             lastFrameCount=frames(self.get()).receivedFrames();lastProgress=System.nanoTime();changed();show("");
         } catch(Exception | LinkageError failure) {stop(attempted);if(!(failure instanceof CancellationException)) failed(failure);throw failure;}
     }
     private void stop(boolean notify) throws Exception {stopLocal();if(notify && room.get()!=null) command("SCREEN_STOP",new JsonObject());}
     private void stopLocal() {
-        active=false;VideoInput current=input;input=null;
+        active=false;publishedAt=0;shareRequestConfirmed=false;VideoInput current=input;input=null;
         try {if(current!=null) current.close();}
         finally {if(preview!=null) {preview.close();preview=null;}if(publisher!=null) {publisher.close();publisher=null;}changed();}
     }
     private void synchronize() throws Exception {
         if (!controlConnected) return;
         RoomSnapshot snapshot=room.get();if(snapshot==null) {disconnect();return;}
-        if(publisher!=null && (publisher.failed() || snapshot.participants().stream().filter(p -> p.participantId().equals(self.get())).noneMatch(p -> p.mediaState().shareRequested()))) {
-            sharing.resetOff();stop(true);
+        boolean shareRequested = snapshot.participants().stream().anyMatch(p -> p.participantId().equals(self.get()) && p.mediaState().shareRequested());
+        if(publisher!=null) {
+            shareRequestConfirmed |= shareRequested;
+            if(publisher.failed() || VideoCallController.shouldStopPublication(shareRequested, shareRequestConfirmed, System.nanoTime() - publishedAt)) {
+                sharing.resetOff();stop(true);
+            }
         }
         if(active) {
             if(input instanceof ScreenVideoInput desktop && System.nanoTime()-lastSourceCheck>TimeUnit.SECONDS.toNanos(3)) {
@@ -173,7 +180,7 @@ public final class ScreenCallController implements AutoCloseable {
     private void disconnect() {sharing.resetOff();stopLocal();subscriptions.values().forEach(s -> s.peer().close());subscriptions.clear();}
     private void show(String message) {
         latestStatus.set(message);if(!statusScheduled.compareAndSet(false,true)) return;
-        Platform.runLater(() -> {String value=latestStatus.getAndSet(null);statusScheduled.set(false);if(!closed.get()) status.set(value);if(latestStatus.get()!=null) show(latestStatus.get());});
+        Platform.runLater(() -> {String value=latestStatus.getAndSet(null);statusScheduled.set(false);if(!closed.get() && value != null && !Objects.equals(status.get(), value)) status.set(value);if(latestStatus.get()!=null) show(latestStatus.get());});
     }
     private void failed(Throwable failure) {
         common.diagnostics.Diagnostics.current().failure("video.client.operation.failed",failure,Map.of("kind","SCREEN","phase","screen","code",CameraErrors.screenCode(failure)));

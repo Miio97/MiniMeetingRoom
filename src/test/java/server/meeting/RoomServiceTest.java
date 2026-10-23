@@ -446,6 +446,123 @@ class RoomServiceTest {
         assertEquals(host.selfParticipantId(), service.getRoom("host-new", room.roomId()).hostParticipantId());
         error("NOT_A_MEMBER", () -> service.getRoom("host-old", room.roomId()));
     }
+
+    @Test void newerDeviceTakesSameSeatAndStopsOldDeviceWithoutChangingHostOrHistory() throws Exception {
+        var room = create(1, "create-device-room1", 2, false);
+        var host = join(1, "host", "join-device-host01", room);
+        var original = join(2, "guest-old", "join-device-guest1", room);
+        service.confirmAudio("guest-old", true); service.confirmVideo("guest-old", true);
+        service.setLocked("host", true);
+        var newer = newLogin(2, 12);
+        events.clear();
+        var replacement = service.join(newer, "guest-new", 1, "join-device-guest2", room.joinCode(), "1234", true, true);
+        assertEquals(original.selfParticipantId(), replacement.selfParticipantId());
+        assertEquals(host.selfParticipantId(), replacement.room().hostParticipantId());
+        assertEquals(2, service.participantCount()); assertEquals(2, count("Thanh_Vien_Phong"));
+        assertEquals(2, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NULL"));
+        assertEquals(0, countWhere("Phien_Dang_Nhap", "Thu_Hoi_Luc IS NOT NULL"));
+        var media = service.assertMember("guest-new", room.roomId()).mediaState();
+        assertTrue(media.micRequested()); assertTrue(media.cameraRequested());
+        assertFalse(media.audioPublishing()); assertFalse(media.videoPublishing()); assertFalse(media.sharePublishing());
+        assertTrue(events.stream().anyMatch(event -> event.recipientConnectionId().equals("guest-old")
+                && event.type().equals("ROOM_LEFT") && "DEVICE_REPLACED".equals(((java.util.Map<?, ?>)event.body()).get("reason"))));
+        assertFalse(events.stream().anyMatch(event -> event.type().equals("ROOM_CLOSED") || event.type().equals("PARTICIPANT_LEFT")));
+        error("NOT_A_MEMBER", () -> service.getRoom("guest-old", room.roomId()));
+        error("NOT_A_MEMBER", () -> service.resume(principal(2), "guest-old-resume", 2, room.roomId(), original.selfParticipantId()));
+        service.suspend("guest-old"); service.leave("guest-old", "TU_ROI"); service.revokeSession(principal(2).tokenHash());
+        assertEquals(2, service.participantCount());
+        assertTrue(service.isCurrentRoomSession(room.collaborationRoom().id(), 2, newer.tokenHash()));
+        assertFalse(service.isCurrentRoomSession(room.collaborationRoom().id(), 2, principal(2).tokenHash()));
+        var replay = service.join(newer, "guest-new", 1, "join-device-guest2", room.joinCode(), "1234", true, true);
+        assertEquals(replacement.selfParticipantId(), replay.selfParticipantId());
+        service.setLocked("host", false); service.leave("guest-new", "TU_ROI");
+        error("DEVICE_REPLACED", () -> join(2, "guest-old-again", "join-device-stale1", room));
+        assertEquals(1, service.participantCount());
+    }
+
+    @Test void loneHostCanMoveToNewerDeviceWithoutClosingRoomOrTransferringHost() throws Exception {
+        var room = create(1, "create-device-host1", 2, false);
+        var original = join(1, "host-old", "join-device-host01", room);
+        service.suspend("host-old");
+        var newer = newLogin(1, 11); events.clear();
+        var moved = service.join(newer, "host-new", 1, "join-device-host02", room.joinCode(), "", false, false);
+        assertEquals(original.selfParticipantId(), moved.selfParticipantId());
+        assertEquals(moved.selfParticipantId(), moved.room().hostParticipantId());
+        assertEquals(RoomRole.HOST, moved.room().participants().getFirst().role());
+        assertEquals(1, service.roomCount()); assertEquals(1, service.participantCount());
+        assertEquals("DANG_HOAT_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        assertEquals(1, count("Thanh_Vien_Phong"));
+        assertFalse(events.stream().anyMatch(event -> event.type().equals("ROOM_CLOSED")));
+        error("DEVICE_REPLACED", () -> create(1, "create-device-stale1", 2, false));
+        assertEquals(1, service.roomCount()); assertEquals(1, count("Phong_Hop"));
+        service.suspend("host-old"); clock.value = NOW.plusSeconds(121); service.maintenanceTick();
+        assertEquals(original.selfParticipantId(), service.getRoom("host-new", room.roomId()).hostParticipantId());
+        service.leave("host-new", "TU_ROI");
+        error("DEVICE_REPLACED", () -> service.reopen(principal(1), "reopen-device-stale1", room.joinCode()));
+        assertEquals(0, service.roomCount()); assertEquals("DA_DONG", scalar("SELECT Trang_Thai FROM Phong_Hop"));
+        var reopened = service.reopen(newer, "reopen-device-host1", room.joinCode());
+        error("DEVICE_REPLACED", () -> join(1, "host-stale", "join-device-host03", reopened));
+        service.join(newer, "host-new-again", 1, "join-device-host04", reopened.joinCode(), "", false, false);
+    }
+
+    @Test void failedPinInvalidSessionAndSameSessionCannotDisplaceAnAdmittedDevice() throws Exception {
+        var room = create(1, "create-device-safe1", 3, false);
+        join(1, "host", "join-device-host01", room);
+        var original = join(2, "guest-old", "join-device-guest1", room);
+        var newer = newLogin(2, 12); events.clear();
+        error("WRONG_PIN", () -> service.join(newer, "guest-new", 1, "join-device-guest2", room.joinCode(), "9999", true, true));
+        var forged = new SessionPrincipal(12, 2, "User 2", NOW.plus(Duration.ofDays(1)), hashFor(22));
+        error("SESSION_INVALID", () -> service.join(forged, "guest-new", 1, "join-device-guest2", room.joinCode(), "1234", true, true));
+        error("ALREADY_JOINED", () -> join(2, "guest-same", "join-device-guest3", room));
+        assertEquals(original.selfParticipantId(), service.assertMember("guest-old", room.roomId()).participantId());
+        assertEquals(2, service.participantCount()); assertEquals(2, count("Thanh_Vien_Phong"));
+        assertTrue(events.isEmpty());
+    }
+    @Test void committedHostTransferUpdatesReplacementDevicesInsteadOfDetachedMembers() throws Exception {
+        CountDownLatch committed = new CountDownLatch(1), complete = new CountDownLatch(1);
+        AtomicBoolean pauseTransfer = new AtomicBoolean(true);
+        repository = new RoomRepository(() -> {
+            Connection delegate = DriverManager.getConnection(url); AtomicBoolean writesHost = new AtomicBoolean();
+            return (Connection)java.lang.reflect.Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
+                    (proxy, method, arguments) -> {
+                        if (method.getName().equals("prepareStatement") && arguments != null && arguments.length > 0
+                                && arguments[0] instanceof String sql && sql.startsWith("UPDATE Phong_Hop SET Ma_Chu_Phong=")) writesHost.set(true);
+                        final Object result;
+                        try { result = method.invoke(delegate, arguments); }
+                        catch (java.lang.reflect.InvocationTargetException failure) { throw failure.getCause(); }
+                        if (method.getName().equals("commit") && writesHost.get() && pauseTransfer.compareAndSet(true, false)) {
+                            committed.countDown();
+                            try { if (!complete.await(10, TimeUnit.SECONDS)) throw new SQLException("Host transfer test timed out"); }
+                            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new SQLException(interrupted); }
+                        }
+                        return result;
+                    });
+        });
+        service = newService("instance-transfer-race", events::add); service.start();
+        var room = create(1, "create-transfer-race", 3, false);
+        var originalHost = join(1, "host-old", "join-transfer-host1", room);
+        var originalTarget = join(2, "guest-old", "join-transfer-guest1", room);
+        try (var worker = Executors.newSingleThreadExecutor()) {
+            var departing = worker.submit(() -> { service.leaveByChoice("host-old", room.roomId(), originalTarget.selfParticipantId(), false); return true; });
+            try {
+                assertTrue(committed.await(5, TimeUnit.SECONDS));
+                var newHost = newLogin(1, 11); var newTarget = newLogin(2, 12);
+                service.join(newHost, "host-new", 1, "join-transfer-host2", room.joinCode(), "1234", false, false);
+                service.join(newTarget, "guest-new", 1, "join-transfer-guest2", room.joinCode(), "1234", false, false);
+                complete.countDown(); assertTrue(departing.get(5, TimeUnit.SECONDS));
+                var state = service.getRoom("host-new", room.roomId());
+                assertEquals(originalTarget.selfParticipantId(), state.hostParticipantId());
+                assertEquals(1, state.participants().stream().filter(member -> member.role() == RoomRole.HOST).count());
+                assertEquals(RoomRole.MEMBER, service.assertMember("host-new", room.roomId()).role());
+                assertEquals(RoomRole.HOST, service.assertMember("guest-new", room.roomId()).role());
+                assertEquals(originalHost.selfParticipantId(), service.participantId("host-new"));
+                assertEquals(2, service.participantCount()); assertEquals(2, count("Thanh_Vien_Phong"));
+                assertEquals(2, countWhere("Thanh_Vien_Phong", "Roi_Phong_Luc IS NULL"));
+                assertEquals(1, countWhere("Thanh_Vien_Phong", "Vai_Tro='CHU_PHONG' AND Roi_Phong_Luc IS NULL"));
+                assertEquals("2", scalar("SELECT Ma_Chu_Phong FROM Phong_Hop"));
+            } finally { complete.countDown(); }
+        }
+    }
     @Test void reconnectDeadlineIsTwoMinutesAndRepeatedDisconnectsCannotExtendIt() throws Exception {
         RoomSnapshot room = create(1, "create-recovery-0001", 2, false);
         var host = join(1, "host", "join-recovery-host1", room);
@@ -530,6 +647,11 @@ class RoomServiceTest {
         RoomService created = new RoomService(repository, clock, instance, KEY, 10, consumer); owned.add(created); return created;
     }
     private SessionPrincipal principal(int user) { return new SessionPrincipal(user, user, "User " + user, NOW.plus(Duration.ofDays(1)), hashFor(user)); }
+    private SessionPrincipal newLogin(int user, int session) throws SQLException {
+        execute("INSERT INTO Phien_Dang_Nhap VALUES (" + session + ", " + user + ", '" + hashFor(session)
+                + "', TIMESTAMP '2026-10-15 06:00:00', NULL)");
+        return new SessionPrincipal(session, user, "User " + user, NOW.plus(Duration.ofDays(1)), hashFor(session));
+    }
     private static String hashFor(int user) {
         byte[] bytes = new byte[32]; bytes[31] = (byte) user;
         return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);

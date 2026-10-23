@@ -165,6 +165,68 @@ class LegacyRoomServiceTest {
             sql.execute("ALTER TABLE Thanh_Vien_Phong DROP CONSTRAINT Test_No_Leave");
         }
     }
+    @Test void newerLoginTakesAnOccupiedSeatWithNewTicketAndOldDeviceLosesRoomAndChatAccess() throws Exception {
+        var a = create(2); var old = join(guest, a);
+        rooms.handle(RoomRequest.media(guest.token(), a.room().id(), old.ticket(), true, true));
+        rooms.handle(RoomRequest.settings(host.token(), a.room().id(), a.ticket(), true, true));
+        var newer = login("guest");
+        var moved = join(newer, a); assertTrue(moved.success());
+        assertNotEquals(old.ticket(), moved.ticket()); assertEquals(2, moved.members().size());
+        var self = moved.members().stream().filter(member -> member.userId() == guest.user().id()).findFirst().orElseThrow();
+        assertFalse(self.microphone()); assertFalse(self.camera());
+        assertEquals("DEVICE_REPLACED", command(guest, old, "ROOM_POLL", 0).code());
+        assertEquals("DEVICE_REPLACED", command(guest, moved, "ROOM_LEAVE", 0).code());
+        assertEquals("DEVICE_REPLACED", join(guest, a).code());
+        var denied = assertThrows(common.chat.ChatException.class,
+                () -> rooms.chat(guest.token(), a.room().id(), moved.ticket(), (connection, member) -> true));
+        assertEquals("NOT_IN_ROOM", denied.code());
+        assertEquals(Boolean.TRUE, rooms.chat(newer.token(), a.room().id(), moved.ticket(), (connection, member) -> true));
+        assertTrue(rooms.isCurrentRoomSession(a.room().id(), guest.user().id(), tokenHash(newer.token())));
+        assertFalse(rooms.isCurrentRoomSession(a.room().id(), guest.user().id(), tokenHash(guest.token())));
+        assertEquals(2, scalar("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        assertEquals(0, scalar("SELECT COUNT(*) FROM Thanh_Vien_Phong WHERE Roi_Phong_Luc IS NOT NULL"));
+        assertEquals(0, scalar("SELECT COUNT(*) FROM Phien_Dang_Nhap WHERE Thu_Hoi_Luc IS NOT NULL"));
+        command(newer, moved, "ROOM_LEAVE", 0);
+        rooms.handle(RoomRequest.settings(host.token(), a.room().id(), a.ticket(), false, null));
+        assertEquals("DEVICE_REPLACED", join(guest, a).code());
+    }
+    @Test void hostHandoffPreservesHostMembershipAndBadPinCannotRemoveOldHost() throws Exception {
+        var original = create(2); var newer = login("duc");
+        assertEquals("WRONG_PIN", rooms.handle(RoomRequest.join(newer.token(), original.room().code(), "9999")).code());
+        assertTrue(command(host, original, "ROOM_POLL", 0).success());
+        var moved = join(newer, original);
+        assertTrue(moved.success()); assertTrue(moved.members().getFirst().host());
+        assertNotEquals(original.ticket(), moved.ticket());
+        assertEquals(1, scalar("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+        assertEquals(host.user().id(), scalar("SELECT Ma_Chu_Phong FROM Phong_Hop"));
+        assertEquals("DEVICE_REPLACED", command(host, original, "ROOM_CLOSE", 0).code());
+        assertTrue(command(newer, moved, "ROOM_POLL", 0).success());
+    }
+    @Test void newerPendingDeviceReplacesOnlyItsOwnWaitingTicket() throws Exception {
+        var a = create(3);
+        rooms.handle(RoomRequest.settings(host.token(), a.room().id(), a.ticket(), null, true));
+        var waiting = join(guest, a); var newer = login("guest"); var moved = join(newer, a);
+        assertTrue(moved.pending()); assertNotEquals(waiting.ticket(), moved.ticket());
+        assertEquals(1, command(host, a, "ROOM_POLL", 0).waiting().size());
+        assertEquals("DEVICE_REPLACED", command(guest, moved, "ROOM_LEAVE", 0).code());
+        assertEquals("DEVICE_REPLACED", command(guest, waiting, "ROOM_POLL", 0).code());
+        assertTrue(command(host, a, "ROOM_PENDING_APPROVE", guest.user().id()).success());
+        assertFalse(command(newer, moved, "ROOM_POLL", 0).pending());
+        assertEquals(2, scalar("SELECT COUNT(*) FROM Thanh_Vien_Phong"));
+    }
+    private AuthResponse login(String username) throws Exception {
+        var response = auth.handle(new AuthRequest("LOGIN", username, "Password123!", null, null, null));
+        assertTrue(response.success()); return response;
+    }
+    private long scalar(String query) throws SQLException {
+        try (var connection = connection(); var statement = connection.createStatement(); var rows = statement.executeQuery(query)) {
+            assertTrue(rows.next()); return rows.getLong(1);
+        }
+    }
+    private static String tokenHash(String token) throws Exception {
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(token.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
     private static final class TestClock extends Clock {
         private Instant instant = Instant.parse("2026-10-14T10:00:00Z");
         void advance(long seconds) { instant = instant.plusSeconds(seconds); }

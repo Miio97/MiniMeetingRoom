@@ -64,12 +64,13 @@ public final class FileTransferService {
                     string(request.header(), "name", 100), optional(request.header(), "pin", 128),
                     Math.toIntExact(number(request.header(), "capacity"))));
             case ROOM_JOIN -> send(output, Type.ROOM_RESULT, request, repository.joinRoom(user,
-                    string(request.header(), "code", 20), optional(request.header(), "pin", 128)));
+                    string(request.header(), "code", 20), optional(request.header(), "pin", 128), token));
             case ROOM_LEAVE -> {
-                repository.leaveRoom(user, number(request.header(), "roomId"));
+                repository.leaveRoom(user, number(request.header(), "roomId"), token);
                 send(output, Type.ROOM_RESULT, request, Map.of());
             }
             case FILE_LIST -> {
+                repository.authorizeSession(token, user, number(request.header(), "roomId"));
                 long after = number(request.header(), "afterId");
                 if (after < 0) throw failure("INVALID_REQUEST", "Mốc danh sách không hợp lệ.");
                 JsonObject header = new JsonObject(); JsonArray files = new JsonArray(); header.add("files", files);
@@ -85,12 +86,12 @@ public final class FileTransferService {
                 FileMetadata done = repository.findByTransfer(request.transferId());
                 if (done != null) {
                     if (done.userId() != user) throw failure("PERMISSION_DENIED", "Không có quyền với lượt truyền này.");
-                    repository.authorize(user, done.roomId());
+                    repository.authorizeSession(token, user, done.roomId());
                     reconcileOne(request.transferId(), user);
                     send(output, Type.UPLOAD_COMPLETE, request, done); return;
                 }
                 var session = storage.get(request.transferId(), user);
-                repository.authorize(user, session.roomId());
+                repository.authorizeSession(token, user, session.roomId());
                 if (!session.lock().tryLock()) throw failure("TRANSFER_BUSY", "Lượt truyền đang hoạt động.");
                 try {
                     if (request.type() == Type.TRANSFER_CANCEL) {
@@ -108,7 +109,7 @@ public final class FileTransferService {
     private void upload(Frame request, long user, String token, DataInputStream input,
             DataOutputStream output, Runnable activity) throws IOException, SQLException {
         long room = number(request.header(), "roomId");
-        repository.authorize(user, room);
+        repository.authorizeSession(token, user, room);
         String name = string(request.header(), "originalName", 255);
         String mime = optional(request.header(), "mimeType", 100);
         if (mime.isBlank()) mime = "application/octet-stream";
@@ -188,6 +189,7 @@ public final class FileTransferService {
     private void download(Frame request, long user, String token, DataOutputStream output, Runnable activity)
             throws IOException, SQLException {
         FileMetadata file = repository.find(user, number(request.header(), "fileId"));
+        repository.authorizeSession(token, user, file.roomId());
         if (file.checksum() == null || !file.checksum().matches("[0-9a-f]{64}"))
             throw failure("STORAGE_ERROR", "Tệp cũ chưa có SHA-256 hợp lệ. Cần tải lên lại.");
         long offset = number(request.header(), "offset");
@@ -234,7 +236,7 @@ public final class FileTransferService {
 
     private void reauthorize(String token, long user, long room) throws SQLException, TransferException {
         if (repository.authenticate(token) != user) throw failure("INVALID_SESSION", "Phiên đăng nhập không hợp lệ.");
-        repository.authorize(user, room);
+        repository.authorizeSession(token, user, room);
     }
     /** Recover a committed file whose acknowledgement/manifest cleanup was interrupted. */
     public void reconcile() throws SQLException, IOException {

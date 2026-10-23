@@ -76,7 +76,9 @@ public final class MeetingServerMain {
                                 AuthServer authServer = new AuthServer(tls,
                                 new InetSocketAddress(ServerConfig.get("auth.bind", "127.0.0.1"), ServerConfig.getInt("auth.port", 8443)),
                                 new ApplicationService(auth, authRooms)::handle, rooms)) {
-                            filesReference.set(files);roomRepository.setReopenGuard(contentCleanup);authRooms.setReopenGuard(contentCleanup);
+                            filesReference.set(files);
+                            if (files != null) files.roomSessionGate(rooms::isCurrentRoomSession);
+                            roomRepository.setReopenGuard(contentCleanup);authRooms.setReopenGuard(contentCleanup);
                             meetingHandler.cleanupStatus(contentCleanup::isPending);
                             rooms.onRoomClosed(contentCleanup::request);authRooms.onChanged(() -> {contentCleanup.request(0);meetingHandler.catalogChanged();});contentCleanup.start();
                             Thread shutdown = new Thread(() -> {

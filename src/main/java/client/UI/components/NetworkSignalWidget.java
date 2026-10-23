@@ -12,6 +12,7 @@ import javafx.stage.Window;
 import javafx.util.Duration;
 
 import java.util.Locale;
+import java.util.Objects;
 
 /**
  * Compact 3-bar network signal widget for the meeting bottom toolbar.
@@ -44,6 +45,7 @@ public final class NetworkSignalWidget extends Button {
 
     private NetworkStatsCalculator.CalculatedSample currentSample;
     private String currentQuality;
+    private String appliedStyleQuality = "__UNSET__";
     private boolean isFallback;
 
     public NetworkSignalWidget() {
@@ -143,6 +145,8 @@ public final class NetworkSignalWidget extends Button {
     }
 
     private void updateBarsAndQuality(String quality) {
+        if (Objects.equals(quality, appliedStyleQuality)) return;
+        appliedStyleQuality = quality;
         qualityBadge.getStyleClass().removeAll("stat-good", "stat-fair", "stat-poor", "caption");
         getStyleClass().removeAll("quality-good", "quality-fair", "quality-poor", "quality-none");
 
@@ -177,35 +181,37 @@ public final class NetworkSignalWidget extends Button {
         }
     }
 
+    private static void setLabelText(Label label, String text) {
+        if (!Objects.equals(label.getText(), text)) label.setText(text);
+    }
+
     private void updateValues(NetworkStatsCalculator.CalculatedSample s) {
-        rttValue.setText(s == null || s.rttMs() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", s.rttMs()));
-        lossValue.setText(s == null || s.lossPct() == null ? "--" : String.format(Locale.ROOT, "%.1f%%", s.lossPct()));
-        jitterValue.setText(s == null || s.jitterMs() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", s.jitterMs()));
-        bitrateValue.setText(s == null || s.bitrateKbps() == null ? "--" : s.bitrateKbps() + " kbps");
-        if(s!=null && s.receiveBitrateKbps()!=null) bitrateValue.setText("↑ " + (s.bitrateKbps()==null?"--":s.bitrateKbps()) + " · ↓ " + s.receiveBitrateKbps() + " kbps");
-        fpsValue.setText(s == null || s.fps() == null ? "--" : String.valueOf(s.fps()));
-        resolutionValue.setText(s == null || s.width() == null || s.height() == null ? "--" : s.width() + "x" + s.height());
+        setLabelText(rttValue, s == null || s.rttMs() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", s.rttMs()));
+        setLabelText(lossValue, s == null || s.lossPct() == null ? "--" : String.format(Locale.ROOT, "%.1f%%", s.lossPct()));
+        setLabelText(jitterValue, s == null || s.jitterMs() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", s.jitterMs()));
+        String br = s == null || s.bitrateKbps() == null ? "--" : s.bitrateKbps() + " kbps";
+        if (s != null && s.receiveBitrateKbps() != null) br = "↑ " + (s.bitrateKbps() == null ? "--" : s.bitrateKbps()) + " · ↓ " + s.receiveBitrateKbps() + " kbps";
+        setLabelText(bitrateValue, br);
+        setLabelText(fpsValue, s == null || s.fps() == null ? "--" : String.valueOf(s.fps()));
+        setLabelText(resolutionValue, s == null || s.width() == null || s.height() == null ? "--" : s.width() + "x" + s.height());
         if (s != null && !s.isEmpty()) {
-            sourceLabel.setText("Kênh truyền: WebRTC Media");
-            sourceLabel.setVisible(true);
-            sourceLabel.setManaged(true);
+            setLabelText(sourceLabel, "Kênh truyền: WebRTC Media");
+            if (!sourceLabel.isVisible()) { sourceLabel.setVisible(true); sourceLabel.setManaged(true); }
         } else {
-            sourceLabel.setText("");
-            sourceLabel.setVisible(false);
-            sourceLabel.setManaged(false);
+            setLabelText(sourceLabel, "");
+            if (sourceLabel.isVisible()) { sourceLabel.setVisible(false); sourceLabel.setManaged(false); }
         }
     }
 
     private void updateFallbackValues(client.network.NetworkMonitor.Snapshot fb) {
-        rttValue.setText(fb == null || fb.rttMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", fb.rttMillis()));
-        lossValue.setText("--");
-        jitterValue.setText(fb == null || fb.jitterMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", fb.jitterMillis()));
-        bitrateValue.setText("--");
-        fpsValue.setText("--");
-        resolutionValue.setText("--");
-        sourceLabel.setText("Kênh truyền: Máy chủ (Camera tắt)");
-        sourceLabel.setVisible(true);
-        sourceLabel.setManaged(true);
+        setLabelText(rttValue, fb == null || fb.rttMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", fb.rttMillis()));
+        setLabelText(lossValue, "--");
+        setLabelText(jitterValue, fb == null || fb.jitterMillis() == null ? "--" : String.format(Locale.ROOT, "%.1f ms", fb.jitterMillis()));
+        setLabelText(bitrateValue, "--");
+        setLabelText(fpsValue, "--");
+        setLabelText(resolutionValue, "--");
+        setLabelText(sourceLabel, "Kênh truyền: Máy chủ (Camera tắt)");
+        if (!sourceLabel.isVisible()) { sourceLabel.setVisible(true); sourceLabel.setManaged(true); }
     }
 
     private void updateTooltipAndText() {
@@ -217,8 +223,10 @@ public final class NetworkSignalWidget extends Button {
                 + "Bitrate (kbps): " + bitrateValue.getText() + "\n"
                 + "FPS: " + fpsValue.getText() + "\n"
                 + "Độ phân giải: " + resolutionValue.getText();
-        tooltip.setText(tip);
-        setAccessibleText(tip);
+        if (!Objects.equals(tooltip.getText(), tip)) {
+            tooltip.setText(tip);
+            setAccessibleText(tip);
+        }
     }
 
     public void togglePopover() {

@@ -95,6 +95,18 @@ class RoomAdmissionTest {
         code("ROOM_NOT_ACTIVE", () -> rooms.admissionStatus(principal(guest), "guest", 1, room.roomId()));
         assertEquals(1, database.count("SELECT COUNT(*) FROM Phong_Hop WHERE Trang_Thai='DA_DONG'"));
     }
+    @Test void pendingCancellationIsBoundToItsSessionConnectionAndGeneration() throws Exception {
+        code("APPROVAL_PENDING", () -> join(guest, "guest"));
+        assertFalse(rooms.cancelAdmission(principal(third), "guest", 1, room.roomId()));
+        assertFalse(rooms.cancelAdmission(principal(guest), "another", 1, room.roomId()));
+        assertFalse(rooms.cancelAdmission(principal(guest), "guest", 2, room.roomId()));
+        assertEquals(1, pending().waiting().size());
+        assertTrue(rooms.cancelAdmission(principal(guest), "guest", 1, room.roomId()));
+        assertFalse(rooms.cancelAdmission(principal(guest), "guest", 1, room.roomId()));
+        assertTrue(pending().waiting().isEmpty());
+        code("ADMISSION_EXPIRED", () -> rooms.admissionStatus(principal(guest), "guest", 1, room.roomId()));
+        assertEquals(1, rooms.participantCount());
+    }
     private static final class TestClock extends Clock {
         Instant now = Instant.now(); public ZoneId getZone() { return ZoneOffset.UTC; }
         public Clock withZone(ZoneId zone) { return this; } public Instant instant() { return now; }

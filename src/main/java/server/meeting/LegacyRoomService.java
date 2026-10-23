@@ -38,6 +38,7 @@ public final class LegacyRoomService implements AutoCloseable {
             if (room.closed) throw new ChatException("ROOM_CLOSED", "Chủ phòng đã đóng phòng.");
             Member member = room.members.get(user.id());
             if (member == null || ticket == null || !ticket.equals(member.ticket)
+                    || !sameSession(member.user, user)
                     || member.lastSeen.isBefore(now().minusSeconds(10))) {
                 throw new ChatException("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc chưa được duyệt.");
             }
@@ -68,6 +69,7 @@ public final class LegacyRoomService implements AutoCloseable {
         String name = request.name() == null ? "" : request.name().strip();
         if (name.isBlank() || name.length() > 100 || request.pin() == null || !request.pin().matches("\\d{4,6}")
                 || request.capacity() < 2 || request.capacity() > 50) return error("VALIDATION_ERROR", "Nhập tên phòng, PIN 4–6 số và sức chứa 2–50 người.");
+        if (!latestRoomLogin(connection, user)) return replacedDevice();
         if (present(user.id())) return error("ALREADY_IN_ROOM", "Tài khoản đang ở trong một phòng khác.");
         Room room = new Room(); room.name = name; room.code = "MMR-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase(Locale.ROOT);
         room.pin = pins.hash(request.pin()); room.capacity = request.capacity(); room.host = user.id();
@@ -85,7 +87,21 @@ public final class LegacyRoomService implements AutoCloseable {
         if (room == null) return error("ROOM_NOT_FOUND", "Không tìm thấy phòng.");
         if (room.closed) return error("ROOM_CLOSED", "Phòng đã đóng.");
         if (!pins.verify(request.pin(), room.pin)) return error("WRONG_PIN", "PIN không đúng.");
-        if (room.waiting.containsKey(user.id())) return view(room, user.id(), true);
+        if (!latestRoomLogin(connection, user)) return replacedDevice();
+        Member existing = room.members.get(user.id());
+        if (existing != null) {
+            if (user.sessionId() <= existing.user.sessionId()) return user.sessionId() < existing.user.sessionId()
+                    ? replacedDevice() : error("ALREADY_IN_ROOM", "Tài khoản đã tham gia phòng trên thiết bị này.");
+            Member replacement = new Member(user, UUID.randomUUID().toString(), now());
+            replacement.membership = existing.membership;
+            room.members.put(user.id(), replacement); return view(room, user.id(), false);
+        }
+        Member waiting = room.waiting.get(user.id());
+        if (waiting != null) {
+            if (user.sessionId() < waiting.user.sessionId()) return replacedDevice();
+            if (!sameSession(waiting.user, user)) room.waiting.put(user.id(), new Member(user, UUID.randomUUID().toString(), now()));
+            return view(room, user.id(), true);
+        }
         if (present(user.id())) return error("ALREADY_IN_ROOM", "Tài khoản đã tham gia hoặc đang chờ ở phòng khác.");
         if (room.locked && room.host != user.id()) return error("ROOM_LOCKED", "Phòng đang khóa.");
         if (room.members.size() >= room.capacity) return error("ROOM_FULL", "Phòng đã đủ người.");
@@ -102,12 +118,13 @@ public final class LegacyRoomService implements AutoCloseable {
         if (room.closed) return error("ROOM_CLOSED", "Chủ phòng đã đóng phòng.");
         Member member = room.members.get(user.id());
         Member waiter = room.waiting.get(user.id());
-        if (member == null && waiter != null && Objects.equals(waiter.ticket, request.ticket())) {
+        if (member != null && !sameSession(member.user, user) || waiter != null && !sameSession(waiter.user, user)) return replacedDevice();
+        if (member == null && waiter != null && Objects.equals(waiter.ticket, request.ticket()) && sameSession(waiter.user, user)) {
             waiter.lastSeen = now();
             if ("ROOM_LEAVE".equals(request.action())) { room.waiting.remove(user.id()); return new RoomResponse(true, "OK", "", null, null, null, null, false); }
             if ("ROOM_POLL".equals(request.action())) return view(room, user.id(), true);
         }
-        if (member == null || !Objects.equals(member.ticket, request.ticket())) return error("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc đã bị mời ra.");
+        if (member == null || !Objects.equals(member.ticket, request.ticket()) || !sameSession(member.user, user)) return error("NOT_IN_ROOM", "Bạn không còn trong phòng hoặc đã bị mời ra.");
         member.lastSeen = now();
         switch (request.action()) {
             case "ROOM_POLL": return view(room, user.id(), false);
@@ -212,10 +229,24 @@ public final class LegacyRoomService implements AutoCloseable {
         return authenticateHash(connection, hash(token));
     }
     private User authenticateHash(Connection connection, String tokenHash) throws SQLException {
-        try (PreparedStatement sql = connection.prepareStatement("SELECT u.Ma_Nguoi_Dung, u.Ten_Hien_Thi FROM Phien_Dang_Nhap p JOIN Nguoi_Dung u ON u.Ma_Nguoi_Dung = p.Ma_Nguoi_Dung WHERE p.Token_Bam = ? AND p.Thu_Hoi_Luc IS NULL AND p.Het_Han_Luc > ? AND u.Trang_Thai = 'HOAT_DONG'")) {
+        try (PreparedStatement sql = connection.prepareStatement("SELECT u.Ma_Nguoi_Dung, u.Ten_Hien_Thi, p.Ma_Phien FROM Phien_Dang_Nhap p JOIN Nguoi_Dung u ON u.Ma_Nguoi_Dung = p.Ma_Nguoi_Dung WHERE p.Token_Bam = ? AND p.Thu_Hoi_Luc IS NULL AND p.Het_Han_Luc > ? AND u.Trang_Thai = 'HOAT_DONG'")) {
             sql.setString(1, tokenHash); sql.setTimestamp(2, Timestamp.from(now()), Calendar.getInstance(TimeZone.getTimeZone("UTC")));
-            try (ResultSet result = sql.executeQuery()) { return result.next() ? new User(result.getLong(1), result.getString(2), tokenHash) : null; }
+            try (ResultSet result = sql.executeQuery()) { return result.next() ? new User(result.getLong(1), result.getString(2), tokenHash, result.getLong(3)) : null; }
         }
+    }
+    private boolean latestRoomLogin(Connection connection, User user) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("SELECT Ma_Phien FROM Phien_Dang_Nhap WHERE Ma_Nguoi_Dung=? AND Ma_Phien>? AND Het_Han_Luc>?")) {
+            query.setLong(1, user.id()); query.setLong(2, user.sessionId());
+            query.setTimestamp(3, Timestamp.from(now()), Calendar.getInstance(TimeZone.getTimeZone("UTC")));
+            try (ResultSet rows = query.executeQuery()) { return !rows.next(); }
+        }
+    }
+    private static boolean sameSession(User left, User right) { return left.sessionId() == right.sessionId() && left.sessionHash().equals(right.sessionHash()); }
+    private static RoomResponse replacedDevice() { return error("DEVICE_REPLACED", "Tài khoản đã tham gia phòng trên thiết bị khác. Hãy đăng nhập lại nếu muốn chuyển về thiết bị này."); }
+    public synchronized boolean isCurrentRoomSession(long roomId, long userId, String tokenHash) {
+        Room room = rooms.get(roomId); Member member = room == null ? null : room.members.get(userId);
+        return room != null && !room.closed && member != null && member.user.sessionHash().equals(tokenHash)
+                && !member.lastSeen.isBefore(now().minusSeconds(10));
     }
     private RoomResponse view(Room room, long user, boolean pending) {
         Member self = pending ? room.waiting.get(user) : room.members.get(user);
@@ -235,7 +266,7 @@ public final class LegacyRoomService implements AutoCloseable {
         try (Connection connection = connections.getConnection()) { for (Room room : rooms.values()) for (long user : List.copyOf(room.members.keySet())) depart(connection, room, user, "MAT_KET_NOI"); }
         rooms.clear();
     }
-    private record User(long id, String name, String sessionHash) { }
+    private record User(long id, String name, String sessionHash, long sessionId) { }
     private static final class Member {
         final User user; final String ticket; long membership; Instant lastSeen; boolean microphone, camera;
         Member(User user, String ticket, Instant time) { this.user = user; this.ticket = ticket; lastSeen = time; }

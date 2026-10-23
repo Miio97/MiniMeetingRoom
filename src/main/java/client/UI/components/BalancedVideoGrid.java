@@ -10,9 +10,12 @@ public final class BalancedVideoGrid extends Pane {
     public BalancedVideoGrid(List<VideoTile> tiles) {
         getChildren().setAll(tiles); setMinSize(0, 0);
     }
+    @Override protected double computePrefWidth(double height) { return 320; }
+    @Override protected double computePrefHeight(double width) { return 180; }
     @Override protected void layoutChildren() {
         int count = getChildren().size(); if (count == 0) return;
         double width = getWidth(), height = getHeight();
+        if (width <= 0 || height <= 0) return;
         int bestRows = 1; double bestWidth = 0;
         for (int rows = 1; rows <= count; rows++) {
             int columns = (count + rows - 1) / rows;

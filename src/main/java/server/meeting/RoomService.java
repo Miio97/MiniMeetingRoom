@@ -105,6 +105,7 @@ public final class RoomService implements AutoCloseable {
         String name = params.name() == null ? "" : params.name().strip();
         if (name.isEmpty() || name.length() > 100 || params.capacity() < 2 || params.capacity() > maxParticipants) throw new RoomException("INVALID_ROOM");
         validatePin(params.pin());
+        repository.validateJoinSession(principal, clock.instant());
         byte[] hash = fingerprint("CREATE_ROOM", name, params.pin(), params.capacity(), params.locked());
         String pinHash = emptyPin(params.pin()) ? null : pins.hash(params.pin());
         openingLock.readLock().lock();boolean reserved=false;
@@ -142,6 +143,7 @@ public final class RoomService implements AutoCloseable {
     public RoomSnapshot reopen(SessionPrincipal principal, String requestId, String joinCode) throws SQLException {
         checkPrincipal(principal); requestId(requestId);
         String identifier = roomIdentifier(joinCode);
+        repository.validateJoinSession(principal, clock.instant());
         byte[] hash = fingerprint("REOPEN_ROOM", identifier);
         openingLock.readLock().lock();boolean reserved=false;
         try {
@@ -166,34 +168,38 @@ public final class RoomService implements AutoCloseable {
         checkPrincipal(principal); requestId(requestId); connectionId(connectionId);
         if (generation < 1) throw new RoomException("INVALID_GENERATION");
         RoomRepository.StoredRoom stored = find(joinCode); verifyPin(principal, stored, pin);
+        repository.validateJoinSession(principal, clock.instant());
         byte[] hash = fingerprint("JOIN_ROOM", stored.roomId(), stored.joinCode(), pin, mic, camera);
         RoomJoinReply reply;
-        synchronized (lock) {
+        try { synchronized (lock) {
             available(); eventBudget();
             if (expectedRoomId != null && !expectedRoomId.equals(stored.roomId())) throw new RoomException("STALE_ROOM");
             Member current = connections.get(connectionId);
             if (current != null && (!current.roomId.equals(stored.roomId()) || current.generation != generation
                     || current.principal.sessionId() != principal.sessionId())) throw new RoomException("ALREADY_IN_ROOM");
-            if (current == null && connections.size() >= MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
             LiveRoom room = requireRoom(stored.roomId());
             pruneWaiting(room);
+            Member replaced = current == null ? replaceableMember(principal, connectionId, stored.roomId()) : null;
+            if (current == null && replaced == null && connections.size() >= MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
             if (current == null) {
-                for (Member admitted : connections.values()) if (admitted.principal.userId() == principal.userId())
-                    throw new RoomException(admitted.roomId.equals(stored.roomId()) ? "ALREADY_JOINED" : "ALREADY_IN_ROOM");
                 for (LiveRoom other : rooms.values()) {
                     pruneWaiting(other);
                     Waiting waiting = other.waiting.get(principal.userId());
-                    if (waiting != null && (!other.stored.roomId().equals(stored.roomId()) || !waiting.connectionId.equals(connectionId)))
-                        throw new RoomException("ALREADY_IN_ROOM");
+                    if (waiting != null && (!other.stored.roomId().equals(stored.roomId()) || !waiting.connectionId.equals(connectionId))) {
+                        if (!other.stored.roomId().equals(stored.roomId()) || principal.sessionId() <= waiting.principal.sessionId())
+                            throw new RoomException(principal.sessionId() < waiting.principal.sessionId() ? "DEVICE_REPLACED" : "ALREADY_IN_ROOM");
+                    }
                 }
             }
-            if (current == null && room.approval && room.stored.hostId() != principal.userId()) {
+            if (current == null && replaced == null && room.approval && room.stored.hostId() != principal.userId()) {
                 if (room.stored.status() == RoomStatus.READY) throw new RoomException("ROOM_NOT_STARTED");
                 if (room.stored.locked()) throw new RoomException("ROOM_LOCKED");
                 if (room.members.size() >= room.stored.capacity()) throw new RoomException("ROOM_FULL");
                 Waiting waiting = room.waiting.get(principal.userId());
                 if (waiting == null || !waiting.principal.tokenHash().equals(principal.tokenHash())) {
-                    if (room.waiting.size() >= 20) throw new RoomException("QUEUE_FULL");
+                    if (waiting == null && room.waiting.size() >= 20) throw new RoomException("QUEUE_FULL");
+                    if (waiting != null) enqueue(List.of(new RoomEvent(waiting.connectionId, "ROOM_LEFT", room.stored.roomId(), room.revision,
+                            Map.of("reason", "DEVICE_REPLACED"))));
                     waiting = new Waiting(principal, connectionId, generation, requestId, hash, mic, camera, clock.instant()); room.waiting.put(principal.userId(), waiting);
                 }
                 if (waiting.rejected) { room.waiting.remove(principal.userId()); throw new RoomException("ADMISSION_REJECTED"); }
@@ -201,7 +207,8 @@ public final class RoomService implements AutoCloseable {
             }
         }
         reply = admit(stored.roomId(), principal, connectionId, generation, requestId, hash, mic, camera);
-        drainEvents(); return reply;
+        return reply;
+        } finally { drainEvents(); }
     }
 
     /** Only the connection/session whose PIN was already validated may poll this admission. */
@@ -228,23 +235,38 @@ public final class RoomService implements AutoCloseable {
 
     private RoomJoinReply admit(String roomId, SessionPrincipal principal, String connectionId, long generation,
                                  String requestId, byte[] hash, boolean mic, boolean camera) throws SQLException {
-        final LiveRoom room;final RoomRepository.StoredRoom stored;
+        final LiveRoom room;final RoomRepository.StoredRoom stored;final Member replaced;
         synchronized(lock) {
             available();room=requireRoom(roomId);stored=room.stored;
             if(room.exit!=null) throw new RoomException("SERVER_BUSY");
             if(joiningUsers.contains(principal.userId())) throw new RoomException("SERVER_BUSY");
             if(pendingHistory.size()>=MAX_ROOMS+MAX_LIVE_CONNECTIONS && connections.get(connectionId)==null) throw new RoomException("HISTORY_UNAVAILABLE");
-            if(connections.get(connectionId)==null && connections.size()+joiningUsers.size()>=MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
-            for(Member other:connections.values()) if(other.principal.userId()==principal.userId() && !other.connectionId.equals(connectionId)) throw new RoomException("ALREADY_IN_ROOM");
+            replaced=replaceableMember(principal,connectionId,roomId);
+            if(replaced==null && connections.get(connectionId)==null && connections.size()+joiningUsers.size()>=MAX_LIVE_CONNECTIONS) throw new RoomException("SERVER_CAPACITY");
             joiningUsers.add(principal.userId());
         }
         RoomRepository.JoinResult result=null;boolean installed=false;
         try {
-            result = repository.join(principal, requestId, hash, stored.id(), stored.roomId(), opaque("p_"), instanceId, epoch, clock.instant());
+            result = replaced == null
+                    ? repository.join(principal, requestId, hash, stored.id(), stored.roomId(), opaque("p_"), instanceId, epoch, clock.instant())
+                    : repository.replaceDevice(principal, requestId, hash, stored.id(), stored.roomId(), replaced.membershipId,
+                            replaced.participantId, instanceId, epoch, clock.instant());
             synchronized(lock) {
             if(closed || rooms.get(roomId)!=room || room.exit!=null) throw new RoomException("REQUEST_ALREADY_ENDED");
             Member current=connections.get(connectionId);
             if (!result.active() || result.room().status() == RoomStatus.CLOSED) throw new RoomException("REQUEST_ALREADY_ENDED");
+            if (replaced != null) {
+                if (connections.get(replaced.connectionId) != replaced || room.members.get(replaced.participantId) != replaced
+                        || current != null) throw new RoomException("REQUEST_ALREADY_ENDED");
+                Member replacement = new Member(connectionId, generation, principal, roomId, replaced.membershipId,
+                        replaced.participantId, replaced.role, new MediaState(mic, camera, false, false, false, false));
+                connections.remove(replaced.connectionId);
+                room.members.put(replacement.participantId, replacement); connections.put(connectionId, replacement);
+                room.waiting.remove(principal.userId()); room.revision++; installed = true;
+                enqueue(List.of(event(replaced, "ROOM_LEFT", room, Map.of("reason", "DEVICE_REPLACED"))));
+                broadcast(room, "PARTICIPANT_STATE", Map.of("participantId", replacement.participantId, "mediaState", replacement.media));
+                return new RoomJoinReply(replacement.participantId, snapshot(room));
+            }
             if (result.replay()) {
                 if (current == null || !current.participantId.equals(result.participantId())) throw new RoomException("ALREADY_JOINED");
                 return new RoomJoinReply(current.participantId, snapshot(room));
@@ -265,9 +287,48 @@ public final class RoomService implements AutoCloseable {
             }
         } finally {
             synchronized(lock) {joiningUsers.remove(principal.userId());}
-            if(result!=null && !result.replay() && !installed) {
+            if(replaced==null && result!=null && !result.replay() && !installed) {
                 persist(new PendingHistory(false,result.membershipId(),null,clock.instant(),"MAT_KET_NOI"));flushHistory();
             }
+        }
+    }
+
+    private Member replaceableMember(SessionPrincipal principal, String connectionId, String roomId) {
+        for (Member existing : connections.values()) {
+            if (existing.principal.userId() != principal.userId() || existing.connectionId.equals(connectionId)) continue;
+            if (principal.sessionId() < existing.principal.sessionId()) throw new RoomException("DEVICE_REPLACED");
+            if (!existing.roomId.equals(roomId)) throw new RoomException("ALREADY_IN_ROOM");
+            if (principal.sessionId() == existing.principal.sessionId()) throw new RoomException("ALREADY_JOINED");
+            return existing;
+        }
+        return null;
+    }
+
+    /** Cancel only the waiting request owned by this authenticated transport. */
+    public boolean cancelAdmission(SessionPrincipal principal, String connectionId, long generation, String roomId) {
+        checkPrincipal(principal);
+        synchronized (lock) {
+            LiveRoom room = rooms.get(roomId);
+            if (room == null) return false;
+            Waiting waiting = room.waiting.get(principal.userId());
+            if (waiting == null || !waiting.connectionId.equals(connectionId) || waiting.generation != generation
+                    || waiting.principal.sessionId() != principal.sessionId() || !waiting.principal.tokenHash().equals(principal.tokenHash())) return false;
+            room.waiting.remove(principal.userId()); return true;
+        }
+    }
+
+    /** File requests must belong to the device which currently owns the admitted account. */
+    public boolean isCurrentRoomSession(long roomDatabaseId, long userId, String tokenHash) {
+        if (legacy != null) return legacy.isCurrentRoomSession(roomDatabaseId, userId, tokenHash);
+        synchronized (lock) {
+            if (!started || closed) return false;
+            for (Member member : connections.values()) {
+                LiveRoom room = rooms.get(member.roomId);
+                if (room != null && room.stored.id() == roomDatabaseId && member.principal.userId() == userId
+                        && member.principal.tokenHash().equals(tokenHash) && member.reconnectUntil == null
+                        && member.principal.expiresAt().isAfter(clock.instant())) return true;
+            }
+            return false;
         }
     }
 
@@ -603,11 +664,15 @@ public final class RoomService implements AutoCloseable {
         repository.transferHost(room.stored.id(),self.roomId,self.principal.userId(),target.principal.userId(),self.principal,target.principal,clock.instant());
         synchronized(lock) {
             if(rooms.get(self.roomId)!=room) throw new RoomException("ROOM_CLOSED");
-            if(room.members.get(target.participantId)!=target || self.role!=RoomRole.HOST) {
+            // A device handoff replaces Member objects while preserving the logical visit.
+            Member currentSelf=room.members.get(self.participantId),currentTarget=room.members.get(target.participantId);
+            if(currentSelf==null || currentSelf.membershipId!=self.membershipId || currentSelf.role!=RoomRole.HOST
+                    || currentTarget==null || currentTarget.membershipId!=target.membershipId) {
                 pendingTransfers.put(room.stored.id(),new PendingTransfer(self.roomId,target.principal.userId(),room.stored.hostId()));
                 throw new RoomException("PARTICIPANT_NOT_FOUND");
             }
-            self.role=RoomRole.MEMBER;target.role=RoomRole.HOST;room.stored=room.stored.withHost(target.principal.userId());
+            for(Member member:room.members.values()) member.role=member==currentTarget ? RoomRole.HOST : RoomRole.MEMBER;
+            room.stored=room.stored.withHost(currentTarget.principal.userId());
             room.revision++;broadcast(room,"ROOM_STATE",Map.of());
         }
         drainEvents();

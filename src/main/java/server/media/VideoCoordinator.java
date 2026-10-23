@@ -16,6 +16,7 @@ public final class VideoCoordinator implements AutoCloseable {
     private final RoomService rooms;
     private final VideoEngineClient engine;
     private final ConcurrentHashMap<String, Owner> owners = new ConcurrentHashMap<>();
+    private final Object[] permissionLocks = java.util.stream.IntStream.range(0, 64).mapToObj(ignored -> new Object()).toArray();
     private final java.util.Set<String> renewing = ConcurrentHashMap.newKeySet();
     private final ThreadPoolExecutor controls;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -31,6 +32,12 @@ public final class VideoCoordinator implements AutoCloseable {
         body.addProperty("participant", member.participantId()); body.addProperty("generation", member.generation()); return body;
     }
     private void grant(Owner owner) throws Exception {
+        synchronized (permissionLock(owner.member())) { grantLocked(owner); }
+    }
+    private Object permissionLock(MemberAuthorization member) {
+        return permissionLocks[Math.floorMod(member.participantId().hashCode(), permissionLocks.length)];
+    }
+    private void grantLocked(Owner owner) throws Exception {
         if (closed.get() || owner.connection().isClosed()) throw new SignalException("CONNECTION_CLOSED");
         MemberAuthorization live = rooms.assertMember(owner.connection().id(), owner.member().roomId());
         long ttl = Math.min(15000, java.time.Duration.between(java.time.Instant.now(), owner.connection().principal().expiresAt()).toMillis());
@@ -105,6 +112,12 @@ public final class VideoCoordinator implements AutoCloseable {
         if (!java.util.Set.of("ROOM_LEFT", "ROOM_CLOSED", "PUBLISH_STOPPED").contains(event.type())) return;
         Owner ended = owners.get(event.recipientConnectionId());
         if (!event.type().equals("PUBLISH_STOPPED") && (ended == null || !ended.member().roomId().equals(event.roomId()))) return;
+        if (event.type().equals("ROOM_LEFT") && event.body() instanceof Map<?, ?> body
+                && "DEVICE_REPLACED".equals(body.get("reason"))) {
+            // The replacement keeps the participant ID. Retire the old generation before its JOIN reply.
+            revoke(ended);
+            return;
+        }
         try { controls.execute(() -> {
             if (event.type().equals("PUBLISH_STOPPED")) {
                 if (event.body() instanceof Map<?, ?> body && body.get("kind") instanceof String kind && java.util.Set.of("VIDEO", "AUDIO", "SCREEN").contains(kind) && body.get("participantId") instanceof String participant)
@@ -127,6 +140,9 @@ public final class VideoCoordinator implements AutoCloseable {
     }
     private void revoke(Owner owner) {
         if (owner == null) return;
+        synchronized (permissionLock(owner.member())) { revokeLocked(owner); }
+    }
+    private void revokeLocked(Owner owner) {
         // Delayed cleanup belongs to this membership, even when the connection has joined another room run.
         owners.remove(owner.connection().id(), owner);
         long start = System.nanoTime();
