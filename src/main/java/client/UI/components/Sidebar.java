@@ -1,14 +1,15 @@
 package client.UI.components;
 
 import client.UI.SceneManager;
+
 import javafx.animation.Interpolator;
 import javafx.animation.KeyFrame;
 import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
 import javafx.beans.binding.Bindings;
+import javafx.geometry.HPos;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
-import javafx.geometry.HPos;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.util.Duration;
@@ -51,7 +52,9 @@ public final class Sidebar extends VBox {
 
         collapseButton = new IconButton("chevron-left", "Thu gọn thanh điều hướng");
         collapseButton.setId("sidebar-collapse-button");
-        collapseButton.setStyle("-fx-background-color: transparent; -fx-border-width: 0; -fx-background-radius: 8; -fx-cursor: hand;");
+        collapseButton.setStyle(
+                "-fx-background-color: transparent; -fx-border-width: 0; -fx-background-radius: 8;"
+                        + " -fx-cursor: hand;");
         collapseButton.setMinSize(28, 28);
         collapseButton.setMaxSize(28, 28);
         collapseButton.setPadding(new Insets(2));
@@ -74,7 +77,8 @@ public final class Sidebar extends VBox {
 
         // Nút điều hướng (Sảnh chính và Cài đặt)
         Button lobbyNav = nav("Sảnh chính", "home", selected.equals("lobby"), manager::lobby);
-        Button settingsNav = nav("Cài đặt", "settings", selected.equals("settings"), manager::settings);
+        Button settingsNav =
+                nav("Cài đặt", "settings", selected.equals("settings"), manager::settings);
 
         getChildren().addAll(brandRow, sectionLabel, lobbyNav, settingsNav, Ui.spacer());
 
@@ -91,7 +95,9 @@ public final class Sidebar extends VBox {
         profile.setAlignment(Pos.CENTER_LEFT);
         profile.setMinWidth(0);
         GridPane.setHgrow(profile, Priority.ALWAYS);
-        Tooltip.install(profile.getChildren().getFirst(), new Tooltip(manager.user() + " (" + manager.username() + ")"));
+        Tooltip.install(
+                profile.getChildren().getFirst(),
+                new Tooltip(manager.user() + " (" + manager.username() + ")"));
 
         exit = Ui.button("", "logout-button", () -> confirmLogout(manager));
         exit.setAccessibleText("Đăng xuất");
@@ -102,7 +108,12 @@ public final class Sidebar extends VBox {
         exit.setGraphic(logoutIcon);
         exit.disableProperty().bind(manager.logoutPendingProperty());
         Tooltip logoutHint = new Tooltip();
-        logoutHint.textProperty().bind(Bindings.when(manager.logoutPendingProperty()).then("Đang đăng xuất…").otherwise("Đăng xuất"));
+        logoutHint
+                .textProperty()
+                .bind(
+                        Bindings.when(manager.logoutPendingProperty())
+                                .then("Đang đăng xuất…")
+                                .otherwise("Đăng xuất"));
         exit.setTooltip(logoutHint);
 
         user.setHgap(6);
@@ -120,9 +131,11 @@ public final class Sidebar extends VBox {
 
     private Button nav(String title, String icon, boolean active, Runnable action) {
         Button button = Ui.button(title, "workspace-nav", action);
-        button.getStyleClass().setAll(active
-                ? new String[] {"button", "workspace-nav", "workspace-nav-active"}
-                : new String[] {"button", "workspace-nav"});
+        button.getStyleClass()
+                .setAll(
+                        active
+                                ? new String[] {"button", "workspace-nav", "workspace-nav-active"}
+                                : new String[] {"button", "workspace-nav"});
         button.setGraphic(Icons.icon(icon, 18));
         button.setGraphicTextGap(12);
         button.setMaxWidth(Double.MAX_VALUE);
@@ -149,15 +162,28 @@ public final class Sidebar extends VBox {
         double targetWidth = collapse ? COLLAPSED_WIDTH : EXPANDED_WIDTH;
 
         if (animate) {
-            widthAnimation = new Timeline(new KeyFrame(Duration.millis(180),
-                new KeyValue(prefWidthProperty(), targetWidth, Interpolator.EASE_BOTH),
-                new KeyValue(minWidthProperty(), targetWidth, Interpolator.EASE_BOTH),
-                new KeyValue(maxWidthProperty(), targetWidth, Interpolator.EASE_BOTH)
-            ));
+            widthAnimation =
+                    new Timeline(
+                            new KeyFrame(
+                                    Duration.millis(180),
+                                    new KeyValue(
+                                            prefWidthProperty(),
+                                            targetWidth,
+                                            Interpolator.EASE_BOTH),
+                                    new KeyValue(
+                                            minWidthProperty(),
+                                            targetWidth,
+                                            Interpolator.EASE_BOTH),
+                                    new KeyValue(
+                                            maxWidthProperty(),
+                                            targetWidth,
+                                            Interpolator.EASE_BOTH)));
             widthAnimation.setOnFinished(e -> updateCollapsedLayout(collapse));
             widthAnimation.play();
         } else {
-            setPrefWidth(targetWidth); setMinWidth(targetWidth); setMaxWidth(targetWidth);
+            setPrefWidth(targetWidth);
+            setMinWidth(targetWidth);
+            setMaxWidth(targetWidth);
             updateCollapsedLayout(collapse);
         }
         updateCollapseControl();
@@ -178,14 +204,19 @@ public final class Sidebar extends VBox {
             user.setAlignment(Pos.CENTER);
             user.setPadding(new Insets(1, 0, 1, 0));
             user.setStyle("-fx-background-color: transparent;");
-            user.setMinHeight(76); user.setMaxHeight(76);
+            user.setMinHeight(76);
+            user.setMaxHeight(76);
             profile.setAlignment(Pos.CENTER);
             GridPane.setConstraints(exit, 0, 1);
             for (Button btn : navButtons) {
                 btn.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
-                btn.setMinWidth(44); btn.setPrefWidth(44); btn.setMaxWidth(44);
+                btn.setMinWidth(44);
+                btn.setPrefWidth(44);
+                btn.setMaxWidth(44);
                 btn.setAlignment(Pos.CENTER);
-                btn.setStyle("-fx-padding: 0; -fx-alignment: center; -fx-border-width: 0; -fx-background-radius: 10; -fx-border-radius: 10;");
+                btn.setStyle(
+                        "-fx-padding: 0; -fx-alignment: center; -fx-border-width: 0;"
+                                + " -fx-background-radius: 10; -fx-border-radius: 10;");
             }
         }
     }
@@ -201,7 +232,8 @@ public final class Sidebar extends VBox {
             user.setAlignment(Pos.CENTER_LEFT);
             user.setPadding(new Insets(8, 10, 8, 10));
             user.setStyle("");
-            user.setMinHeight(54); user.setMaxHeight(54);
+            user.setMinHeight(54);
+            user.setMaxHeight(54);
             profile.setAlignment(Pos.CENTER_LEFT);
             GridPane.setConstraints(exit, 1, 0);
             brandLabel.setVisible(true);
@@ -212,7 +244,9 @@ public final class Sidebar extends VBox {
             profileText.setManaged(true);
             for (Button btn : navButtons) {
                 btn.setContentDisplay(ContentDisplay.LEFT);
-                btn.setMinWidth(0); btn.setPrefWidth(USE_COMPUTED_SIZE); btn.setMaxWidth(Double.MAX_VALUE);
+                btn.setMinWidth(0);
+                btn.setPrefWidth(USE_COMPUTED_SIZE);
+                btn.setMaxWidth(Double.MAX_VALUE);
                 btn.setAlignment(Pos.CENTER_LEFT);
                 btn.setStyle("");
             }

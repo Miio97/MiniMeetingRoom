@@ -11,11 +11,18 @@ public final class RoomException extends IOException {
         this.code = code;
     }
 
-    public String code() { return code; }
+    public String code() {
+        return code;
+    }
 
     public boolean admissionEnded() {
         return switch (code) {
-            case "SESSION_INVALID", "NOT_IN_ROOM", "ROOM_CLOSED", "ROOM_NOT_FOUND", "DEVICE_REPLACED" -> true;
+            case "SESSION_INVALID",
+                            "NOT_IN_ROOM",
+                            "ROOM_CLOSED",
+                            "ROOM_NOT_FOUND",
+                            "DEVICE_REPLACED" ->
+                    true;
             default -> false;
         };
     }

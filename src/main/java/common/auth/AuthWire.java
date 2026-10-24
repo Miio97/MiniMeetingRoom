@@ -5,6 +5,7 @@ import com.google.gson.JsonParseException;
 import com.google.gson.Strictness;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -20,7 +21,7 @@ public final class AuthWire {
     public static final int MAX_FRAME_BYTES = 256 * 1024;
     private static final Gson JSON = new Gson();
 
-    private AuthWire() { }
+    private AuthWire() {}
 
     public static void write(DataOutputStream output, Object message) throws IOException {
         byte[] bytes = JSON.toJson(message).getBytes(StandardCharsets.UTF_8);
@@ -40,10 +41,13 @@ public final class AuthWire {
         byte[] bytes = new byte[length];
         input.readFully(bytes);
         try {
-            String text = StandardCharsets.UTF_8.newDecoder()
-                    .onMalformedInput(CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(CodingErrorAction.REPORT)
-                    .decode(ByteBuffer.wrap(bytes)).toString();
+            String text =
+                    StandardCharsets.UTF_8
+                            .newDecoder()
+                            .onMalformedInput(CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(CodingErrorAction.REPORT)
+                            .decode(ByteBuffer.wrap(bytes))
+                            .toString();
             JsonReader reader = new JsonReader(new StringReader(text));
             reader.setStrictness(Strictness.STRICT);
             T message = JSON.fromJson(reader, type);

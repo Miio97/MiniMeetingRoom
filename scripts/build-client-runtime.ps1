@@ -16,10 +16,8 @@ if (-not $taskRuntimePath.StartsWith($taskTargetRoot + [IO.Path]::DirectorySepar
 if (Test-Path -LiteralPath $taskRuntimePath) { throw 'Runtime output already exists; use a new output directory.' }
 $taskJlink = Join-Path $JavaHome 'bin/jlink.exe'
 if (-not (Test-Path -LiteralPath $taskJlink)) { throw 'JavaHome must point to a full JDK with jlink.' }
-# java.se does not include com.sun.management.OperatingSystemMXBean.
-# jdk.management is required by Diagnostics during MainApp.init; jdk.jfr is
-# also required by the runtime dependency graph (HikariCP/JDBC).
-$taskModules = 'java.se,jdk.management,jdk.jfr,jdk.crypto.ec,jdk.unsupported,jdk.unsupported.desktop,jdk.jsobject,jdk.zipfs'
+# Keep the modules required by JavaFX, WebRTC, TLS and HikariCP/JDBC.
+$taskModules = 'java.se,jdk.jfr,jdk.crypto.ec,jdk.unsupported,jdk.unsupported.desktop,jdk.jsobject,jdk.zipfs'
 & $taskJlink --add-modules $taskModules --strip-debug --no-header-files --no-man-pages --compress=zip-6 --output $taskRuntimePath
 if ($LASTEXITCODE -ne 0) { throw 'Client runtime build failed.' }
 & (Join-Path $taskRuntimePath 'bin/java.exe') --list-modules

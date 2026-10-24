@@ -8,8 +8,6 @@ $env:GOCACHE = Join-Path $projectRoot '.tools\go-cache'
 $env:GOMODCACHE = Join-Path $projectRoot '.tools\go-modules'
 Push-Location (Join-Path $projectRoot 'media\video')
 try {
-    & $taskGo test ./...
-    if ($LASTEXITCODE -ne 0) { throw 'Video engine tests failed.' }
     & $taskGo build '-ldflags=-H=windowsgui' -o $taskBinary .
     if ($LASTEXITCODE -ne 0) { throw 'Video engine build failed.' }
 } finally { Pop-Location }

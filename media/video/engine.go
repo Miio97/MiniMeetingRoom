@@ -84,9 +84,7 @@ type mediaLease struct {
 	expiry     time.Time
 	version    uint64
 }
-type kindCounters struct{ ingress, forwarded, ingressBytes, forwardedBytes, drops, writeErrors, pli atomic.Uint64 }
 type engine struct {
-	byKind         map[string]*kindCounters
 	mu             sync.Mutex
 	api            *webrtc.API
 	secret         [32]byte
@@ -185,7 +183,7 @@ func newEngine(secret string) (*engine, error) {
 		return nil, err
 	}
 	return &engine{
-		byKind:         map[string]*kindCounters{"AUDIO": {}, "VIDEO": {}, "SCREEN": {}, "SCREEN_AUDIO": {}},
+
 		api:            webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(settings)),
 		secret:         sha256.Sum256([]byte(secret)),
 		instance:       hex.EncodeToString(instanceBytes),
@@ -677,14 +675,14 @@ func (e *engine) readTrack(source *mediaPeer, track *webrtc.TrackRemote) {
 			continue
 		}
 		e.ingress.Add(1)
-		e.byKind[source.kind].ingress.Add(1)
+
 		e.ingressBytes.Add(uint64(len(packet.Payload)))
-		e.byKind[source.kind].ingressBytes.Add(uint64(len(packet.Payload)))
+
 		for _, peer := range receivers {
 			copy := codecPacket(packet)
 			if !peer.queue.offer(copy, time.Now()) {
 				e.drops.Add(1)
-				e.byKind[source.kind].drops.Add(1)
+
 				e.keyframe(source)
 			}
 		}
@@ -701,7 +699,7 @@ func (e *engine) forward(peer *mediaPeer) {
 		}
 		if time.Since(item.queuedAt) > queueMaxAge {
 			e.drops.Add(1)
-			e.byKind[peer.kind].drops.Add(1)
+
 			e.keyframe(peer.upstream)
 			continue
 		}
@@ -717,17 +715,17 @@ func (e *engine) forward(peer *mediaPeer) {
 		}
 		if peer.pc.ConnectionState() != webrtc.PeerConnectionStateConnected {
 			e.drops.Add(1)
-			e.byKind[peer.kind].drops.Add(1)
+
 			continue
 		}
 		if peer.local.WriteRTP(item.packet) != nil {
 			e.writeErrors.Add(1)
-			e.byKind[peer.kind].writeErrors.Add(1)
+
 		} else {
 			e.forwarded.Add(1)
-			e.byKind[peer.kind].forwarded.Add(1)
+
 			e.forwardedBytes.Add(uint64(len(item.packet.Payload)))
-			e.byKind[peer.kind].forwardedBytes.Add(uint64(len(item.packet.Payload)))
+
 		}
 	}
 }
@@ -756,7 +754,7 @@ func (e *engine) sendKeyframes(source *mediaPeer) {
 				return
 			}
 			e.pli.Add(1)
-			e.byKind[source.kind].pli.Add(1)
+
 			_ = source.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: source.ssrc.Load()}})
 		}
 	}
