@@ -4,6 +4,7 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
+
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 
@@ -18,7 +19,12 @@ public final class PasswordHasher {
     public String hash(String password) {
         byte[] salt = new byte[SALT_BYTES];
         random.nextBytes(salt);
-        return PREFIX + "$" + ITERATIONS + "$" + encode(salt) + "$"
+        return PREFIX
+                + "$"
+                + ITERATIONS
+                + "$"
+                + encode(salt)
+                + "$"
                 + encode(derive(password, salt, ITERATIONS));
     }
 
@@ -53,7 +59,9 @@ public final class PasswordHasher {
     private static byte[] derive(String password, byte[] salt, int iterations) {
         PBEKeySpec key = new PBEKeySpec(password.toCharArray(), salt, iterations, KEY_BITS);
         try {
-            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(key).getEncoded();
+            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                    .generateSecret(key)
+                    .getEncoded();
         } catch (GeneralSecurityException exception) {
             throw new IllegalStateException("Password hashing is unavailable", exception);
         } finally {

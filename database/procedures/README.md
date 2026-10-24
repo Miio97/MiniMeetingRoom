@@ -1,6 +1,6 @@
 # Stored procedure cho create / join / exit phòng
 
-Bộ SQL chuẩn bị ngày 23/10/2026, đối chiếu `RoomRepository`, `RoomService`, `SessionValidator`, schema và migration runtime hiện tại. Java server hiện đã tích hợp create/join/exit; xem `docs/room-stored-procedure-integration.md` để chạy bản mới. Cài routine không tự cập nhật một tiến trình Java đang chạy. Không có tỷ lệ tăng tốc được cam kết, chưa có benchmark MySQL/Railway cho bộ routine này.
+Bộ SQL chuẩn bị ngày 23/10/2026, đối chiếu `RoomRepository`, `RoomService`, `SessionValidator`, schema và migration runtime hiện tại. Java server hiện đã tích hợp create/join/exit; xem `docs/database.md` để chạy bản mới. Cài routine không tự cập nhật một tiến trình Java đang chạy. Không có tỷ lệ tăng tốc được cam kết, chưa có benchmark MySQL/Railway cho bộ routine này.
 
 ## File đưa lên database
 

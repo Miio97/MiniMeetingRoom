@@ -2,26 +2,46 @@ package client.UI.components;
 
 import javafx.scene.Node;
 import javafx.scene.layout.Pane;
+
 import java.util.List;
 
 /** Chọn số hàng theo diện tích tile 16:9; chia đều người và căn giữa từng hàng. */
 public final class BalancedVideoGrid extends Pane {
     private static final double GAP = 14, RATIO = 16.0 / 9;
+
     public BalancedVideoGrid(List<VideoTile> tiles) {
-        getChildren().setAll(tiles); setMinSize(0, 0);
+        getChildren().setAll(tiles);
+        setMinSize(0, 0);
     }
-    @Override protected double computePrefWidth(double height) { return 320; }
-    @Override protected double computePrefHeight(double width) { return 180; }
-    @Override protected void layoutChildren() {
-        int count = getChildren().size(); if (count == 0) return;
+
+    @Override
+    protected double computePrefWidth(double height) {
+        return 320;
+    }
+
+    @Override
+    protected double computePrefHeight(double width) {
+        return 180;
+    }
+
+    @Override
+    protected void layoutChildren() {
+        int count = getChildren().size();
+        if (count == 0) return;
         double width = getWidth(), height = getHeight();
         if (width <= 0 || height <= 0) return;
-        int bestRows = 1; double bestWidth = 0;
+        int bestRows = 1;
+        double bestWidth = 0;
         for (int rows = 1; rows <= count; rows++) {
             int columns = (count + rows - 1) / rows;
-            double tileWidth = Math.min((width - GAP * (columns - 1)) / columns,
-                (height - GAP * (rows - 1)) / rows * RATIO);
-            if (tileWidth > bestWidth) { bestWidth = tileWidth; bestRows = rows; }
+            double tileWidth =
+                    Math.min(
+                            (width - GAP * (columns - 1)) / columns,
+                            (height - GAP * (rows - 1)) / rows * RATIO);
+            if (tileWidth > bestWidth) {
+                bestWidth = tileWidth;
+                bestRows = rows;
+            }
         }
         double tileWidth = Math.max(0, bestWidth), tileHeight = tileWidth / RATIO;
         double y = (height - bestRows * tileHeight - (bestRows - 1) * GAP) / 2;
@@ -32,7 +52,8 @@ public final class BalancedVideoGrid extends Pane {
             double x = (width - columns * tileWidth - (columns - 1) * GAP) / 2;
             for (int column = 0; column < columns; column++) {
                 Node tile = getChildren().get(index++);
-                tile.resizeRelocate(x, y, tileWidth, tileHeight); x += tileWidth + GAP;
+                tile.resizeRelocate(x, y, tileWidth, tileHeight);
+                x += tileWidth + GAP;
             }
             y += tileHeight + GAP;
         }

@@ -1,15 +1,16 @@
 package server.database;
 
+import server.config.ServerConfig;
+
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Properties;
-import server.config.ServerConfig;
 
 /** Server-side JDBC connections. Credentials belong in ignored local configuration. */
 public final class DatabaseConnection {
     private static JdbcPool pool;
-    private DatabaseConnection() {
-    }
+
+    private DatabaseConnection() {}
 
     public static Connection getConnection() throws SQLException {
         return pool().getConnection();
@@ -27,8 +28,12 @@ public final class DatabaseConnection {
         options.setProperty("connectionTimeZone", "UTC");
         options.setProperty("forceConnectionTimeZoneToSession", "true");
         try {
-            pool = new JdbcPool(url, options, ServerConfig.getInt("db.pool.maxConnections", 8),
-                    ServerConfig.getInt("db.pool.waitMillis", 5000));
+            pool =
+                    new JdbcPool(
+                            url,
+                            options,
+                            ServerConfig.getInt("db.pool.maxConnections", 8),
+                            ServerConfig.getInt("db.pool.waitMillis", 5000));
             return pool;
         } catch (RuntimeException failure) {
             // Never expose a driver's URL/credentials through a startup exception or console stack.
@@ -37,6 +42,9 @@ public final class DatabaseConnection {
     }
 
     public static synchronized void close() {
-        if (pool != null) { pool.close(); pool = null; }
+        if (pool != null) {
+            pool.close();
+            pool = null;
+        }
     }
 }

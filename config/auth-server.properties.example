@@ -33,8 +33,7 @@ file.transfer.socket-timeout-ms=30000
 file.transfer.storage-path=storage
 file.transfer.resume-enabled=true
 file.transfer.expiry-hours=24
-# Delete room files 20 minutes after DA_DONG. Reopening clears the old deadline.
-# 0 disables retention. This setting takes precedence over legacy retention-days.
-file.transfer.retention-minutes=20
+# Closed rooms are cleaned immediately by ImmediateRoomCleanup.
+# Reopening is blocked until both managed files and metadata are clean.
 # Includes metadata polling; increase for many clients behind one NAT address.
 file.transfer.connections-per-ip-minute=600

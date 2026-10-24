@@ -1,4 +1,8 @@
-param([string]$JavaHome = 'C:/Program Files/Java/jdk-22')
+param(
+    [string]$JavaHome = 'C:/Program Files/Java/jdk-22',
+    [ValidateSet('Client','Server')][string[]]$Roles = @('Client'),
+    [switch]$Offline
+)
 . (Join-Path $PSScriptRoot 'common.ps1')
 $taskStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $taskOutput = Join-Path $projectRoot "target/portable-$taskStamp"
@@ -8,11 +12,13 @@ $taskMaven = Resolve-Maven
 New-Item -ItemType Directory -Path $taskOutput | Out-Null
 Push-Location -LiteralPath $projectRoot
 try {
-    & $taskMaven -B '-DskipTests' package dependency:copy-dependencies '-DincludeScope=runtime' "-DoutputDirectory=$taskDependencies"
+    $taskBuildArguments = @('-B', '-DskipTests', 'package', 'dependency:copy-dependencies', '-DincludeScope=runtime', "-DoutputDirectory=$taskDependencies")
+    if ($Offline) { $taskBuildArguments = @('-o') + $taskBuildArguments }
+    & $taskMaven @taskBuildArguments
     if ($LASTEXITCODE -ne 0) { throw 'Java packaging failed.' }
     & (Join-Path $PSScriptRoot 'build-client-runtime.ps1') -JavaHome $JavaHome -OutputPath $taskRuntime
-    & (Join-Path $PSScriptRoot 'build-video-engine.ps1')
-    foreach ($taskRole in @('Client', 'Server')) {
+    if ($Roles -contains 'Server') { & (Join-Path $PSScriptRoot 'build-video-engine.ps1') }
+    foreach ($taskRole in $Roles) {
         $taskPackage = Join-Path $taskOutput "MiniMeetingRoom-$taskRole-Windows-x64"
         foreach ($taskFolder in @('app', 'lib', 'javafx', 'config')) {
             New-Item -ItemType Directory -Path (Join-Path $taskPackage $taskFolder) -Force | Out-Null
@@ -28,30 +34,41 @@ try {
 @echo off
 setlocal
 cd /d "%~dp0"
-if not defined MMR_DIAGNOSTICS_RUN_ID set "MMR_DIAGNOSTICS_RUN_ID=portable-test"
 "runtime\bin\java.exe" --module-path "javafx" --add-modules javafx.controls -cp "app\MiniMeetingRoom.jar;lib\*" $taskMainClass
 set "MMR_EXIT=%ERRORLEVEL%"
 echo.
-echo Application exited with code %MMR_EXIT%. Diagnostics: logs\diagnostics
+echo Application exited with code %MMR_EXIT%.
 pause
 exit /b %MMR_EXIT%
 "@
-        [IO.File]::WriteAllText((Join-Path $taskPackage "Start-$taskRole.cmd"), $taskLauncher.Replace("`n", "`r`n"))
+        [IO.File]::WriteAllText((Join-Path $taskPackage "Start-$taskRole.cmd"), $taskLauncher.Replace("`r", "").Replace("`n", "`r`n"))
         if ($taskRole -eq 'Client') {
             Copy-Item -LiteralPath (Join-Path $projectRoot 'config/auth-client.properties') -Destination (Join-Path $taskPackage 'config/auth-client.properties')
-            Copy-Item -LiteralPath (Join-Path $projectRoot 'config/auth-server.cer') -Destination (Join-Path $taskPackage 'config/auth-server.cer')
-            $taskReadme = @'
+            $taskClientText = [IO.File]::ReadAllText((Join-Path $taskPackage 'config/auth-client.properties'))
+            $taskCertificateSetting = [regex]::Match($taskClientText, '(?m)^\s*auth\.certificate\s*=\s*([^\r\n]+)')
+            if (-not $taskCertificateSetting.Success) { throw 'Client configuration must name its public certificate.' }
+            $taskCertificateRelative = $taskCertificateSetting.Groups[1].Value.Trim().Replace('\','/')
+            if ($taskCertificateRelative -notmatch '^config/[A-Za-z0-9_.-]+\.cer$') { throw 'Client certificate must be a public .cer directly inside config.' }
+            $taskCertificateSource = Join-Path $projectRoot $taskCertificateRelative
+            if (-not (Test-Path -LiteralPath $taskCertificateSource)) { throw 'Configured client certificate does not exist.' }
+            Copy-Item -LiteralPath $taskCertificateSource -Destination (Join-Path $taskPackage $taskCertificateRelative)
+            $taskHostMatch = [regex]::Match($taskClientText, '(?m)^\s*auth\.host\s*=\s*([^\r\n]+)')
+            $taskServerHost = $taskHostMatch.Groups[1].Value.Trim()
+            $taskReadme = @"
 MINIMEETINGROOM - CLIENT WINDOWS x64
-Giai nen toan bo ZIP truoc khi chay Start-Client.cmd. Khong can cai Java/Maven.
-Server hien tai: 10.231.125.153. Cac may can ket noi duoc mang LAN/ZeroTier cua server.
+Giai nen TOAN BO ZIP vao thu muc co quyen ghi, sau do nhay dup Start-Client.cmd.
+Khong can cai Java, Maven, Go hoac NetBeans. Khong chay truc tiep ben trong ZIP.
+Server hien tai: $taskServerHost (auth 8443, signaling 8444, truyen tep 9001).
+May server phai chay; cac may client can tham gia cung mang Radmin VPN voi server.
+Chi may server chay server.Main. May nay chi chay Start-Client.cmd.
 Neu doi server: sua auth.host, signaling.host, file.transfer.host trong config/auth-client.properties.
-Chung chi config/auth-server.cer phai dung voi server va dia chi truy cap; khong tat kiem tra TLS.
-Chi may server can chay Start-Server.cmd. May client chi chay Start-Client.cmd.
-Thu: 2 tai khoan vao cung phong, gui chat hai chieu, thu reconnect va dong/mo lai phong.
-Chat van ban luu RAM, toi da 500 tin/phong; dong phong hoac restart server se mat lich su.
-Diagnostics duoc luu trong thu muc logs. Co the gui file log cua tung may de phan tich.
-Ban nay gom thay doi chat RAM da kiem thu, chua ap dung cac de xuat toi uu bo sung.
-'@
+Chung chi $taskCertificateRelative phai dung voi server va IP; khong tat kiem tra TLS.
+Thu dang nhap, vao cung phong, chat, gui tep, bat/tat camera va mic, chia se man hinh.
+Quyen camera/mic theo tung tai khoan Windows; Windows van quyet dinh quyen truy cap thiet bi.
+Khong co tai khoan dang nhap san hoac cau hinh database trong goi nay.
+Khong gui du lieu phien dang nhap cho nguoi khac.
+Giu nguyen cac thu muc app, lib, javafx, runtime, config khi chep sang may khac.
+"@
         } else {
             New-Item -ItemType Directory -Path (Join-Path $taskPackage '.tools/bin'), (Join-Path $taskPackage 'media/video') -Force | Out-Null
             Copy-Item -LiteralPath (Join-Path $projectRoot '.tools/bin/mmr-video.exe') -Destination (Join-Path $taskPackage '.tools/bin/mmr-video.exe')
@@ -77,6 +94,7 @@ Khong can cai Java, Maven, Go. Start-Server.cmd se tu khoi dong SFU da bien dich
 '@
         }
         [IO.File]::WriteAllText((Join-Path $taskPackage 'HUONG-DAN.txt'), $taskReadme, [Text.UTF8Encoding]::new($false))
+        if (Get-ChildItem -LiteralPath (Join-Path $taskPackage 'config') -File | Where-Object { $_.Name -match '(?i)private|\.p12$|\.jks$|^auth-server\.properties$' }) { throw 'Private server configuration in distribution.' }
         Compress-Archive -LiteralPath $taskPackage -DestinationPath "$taskPackage.zip" -CompressionLevel Optimal
         Get-FileHash -LiteralPath "$taskPackage.zip" -Algorithm SHA256 | Format-List
     }

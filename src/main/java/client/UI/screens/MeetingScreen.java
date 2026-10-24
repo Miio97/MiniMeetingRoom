@@ -3,9 +3,12 @@ package client.UI.screens;
 import client.UI.SceneManager;
 import client.UI.components.*;
 import client.UI.dialogs.*;
-import client.UI.mock.MockData;
+import client.UI.model.MeetingUiModels;
+import client.UI.util.DisplayFormat;
+
 import common.room.RoomInfo;
 import common.room.RoomParticipant;
+
 import javafx.animation.*;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
@@ -18,6 +21,7 @@ import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.*;
 import javafx.scene.shape.Rectangle;
 import javafx.util.Duration;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,23 +29,35 @@ import java.util.Map;
 
 /** Main meeting layout; video rooms borrow the session media owner and keep the file panel. */
 public final class MeetingScreen extends BorderPane {
-    private record VideoLayoutKey(boolean videoRoom, List<String> participantIds, String screenOwner, int pinnedIndex, int page, boolean legacySharing) { }
+    private record VideoLayoutKey(
+            boolean videoRoom,
+            List<String> participantIds,
+            String screenOwner,
+            int pinnedIndex,
+            int page,
+            boolean legacySharing) {}
+
     private final client.network.NetworkMonitor network;
     private final ChatPanel chatPanel;
-    private final ObservableList<common.meeting.Participant> managedPeople = FXCollections.observableArrayList();
+    private final ObservableList<common.meeting.Participant> managedPeople =
+            FXCollections.observableArrayList();
     private ParticipantPanel participantPanel;
     private final AdmissionPanel admissions = new AdmissionPanel();
     private common.meeting.RoomResponse managedState;
-    public client.network.NetworkMonitor networkMonitor() { return network; }
+
+    public client.network.NetworkMonitor networkMonitor() {
+        return network;
+    }
+
     public void refreshNetwork() {
         if (disposed) return;
-        client.media.NetworkStatsCalculator.CalculatedSample sample = (videoRoom && mediaController != null)
-                ? mediaController.latestStats()
-                : null;
+        client.media.NetworkStatsCalculator.CalculatedSample sample =
+                (videoRoom && mediaController != null) ? mediaController.latestStats() : null;
         networkSignal.update(sample, network != null ? network.snapshot() : null);
     }
+
     private final SceneManager manager;
-    private final ObservableList<MockData.Participant> people;
+    private final ObservableList<MeetingUiModels.Participant> people;
     private final List<VideoTile> tiles = new ArrayList<>();
     private final Map<String, VideoTile> activeVideoTiles = new LinkedHashMap<>();
     private VideoLayoutKey activeLayoutKey;
@@ -65,23 +81,28 @@ public final class MeetingScreen extends BorderPane {
     private final Label adaptiveStatus = Ui.label("", "caption");
     private final Label connectionStatus = Ui.label("", "caption");
     private boolean reconnecting;
-    private final javafx.beans.value.ChangeListener<client.meeting.MeetingSession.State> connectionListener =
-            (observable, before, after) -> connectionState(after);
+    private final javafx.beans.value.ChangeListener<client.meeting.MeetingSession.State>
+            connectionListener = (observable, before, after) -> connectionState(after);
+
     private void connectionState(client.meeting.MeetingSession.State state) {
         if (disposed) return;
         boolean waiting = state == client.meeting.MeetingSession.State.RECONNECTING;
-        controls.mic.setDisable(waiting); controls.share.setDisable(waiting);
+        controls.mic.setDisable(waiting);
+        controls.share.setDisable(waiting);
         tabs.setDisable(waiting);
         if (waiting && !reconnecting) {
             if (cameraSettings != null) cameraSettings.close();
             if (screenPicker != null) screenPicker.close();
             pauseFileTransfers();
-        } else if (!waiting && reconnecting && state == client.meeting.MeetingSession.State.CONNECTED) {
+        } else if (!waiting
+                && reconnecting
+                && state == client.meeting.MeetingSession.State.CONNECTED) {
             restoreFileTransfers();
             roomError.setText("Đã kết nối lại. Bạn có thể bật lại camera và mic.");
         }
         reconnecting = waiting;
     }
+
     private List<RoomParticipant> participantSnapshot = List.of();
     private boolean disposed, polling, leaving, managementPending;
     private boolean sharing, panelOpen = true;
@@ -95,228 +116,518 @@ public final class MeetingScreen extends BorderPane {
     // One FX-owned room snapshot for all participant counts, tiles and sharing UI.
     private common.meeting.RoomSnapshot displayedRoom;
     private final NetworkSignalWidget networkSignal;
-    public NetworkSignalWidget networkSignal() { return networkSignal; }
+
+    public NetworkSignalWidget networkSignal() {
+        return networkSignal;
+    }
+
     private CameraSettingsDialog cameraSettings;
     private AudioControls audioControls;
     private ScreenSourceDialog screenPicker;
     private javafx.scene.image.ImageView screenImage;
     private CheckBox systemAudioToggle;
-    private final javafx.beans.value.ChangeListener<Boolean> systemAudioListener=(o,b,a) -> {if(systemAudioToggle!=null) systemAudioToggle.setSelected(a);};
-    private final javafx.beans.value.ChangeListener<Boolean> shareListener=(o,b,a) -> updateShareButton(a);
-    private final javafx.beans.value.ChangeListener<String> audioErrorListener=(o,b,a) -> showMediaError(a);
-    private void showMediaError(String message) {if(message!=null && !message.isBlank()) roomError.setText(message);}
-    private void updateShareButton(boolean active) {controls.share.active(active);renderVideos();}
-    private final javafx.beans.value.ChangeListener<Boolean> micListener = (o,b,a) -> updateMicButton(a);
+    private final javafx.beans.value.ChangeListener<Boolean> systemAudioListener =
+            (o, b, a) -> {
+                if (systemAudioToggle != null) systemAudioToggle.setSelected(a);
+            };
+    private final javafx.beans.value.ChangeListener<Boolean> shareListener =
+            (o, b, a) -> updateShareButton(a);
+    private final javafx.beans.value.ChangeListener<String> audioErrorListener =
+            (o, b, a) -> showMediaError(a);
+
+    private void showMediaError(String message) {
+        if (message != null && !message.isBlank()) roomError.setText(message);
+    }
+
+    private void updateShareButton(boolean active) {
+        controls.share.active(active);
+        renderVideos();
+    }
+
+    private final javafx.beans.value.ChangeListener<Boolean> micListener =
+            (o, b, a) -> updateMicButton(a);
     private java.util.concurrent.CompletableFuture<Void> cameraOperation;
     private String cameraError = "";
-    private final javafx.beans.value.ChangeListener<Boolean> cameraPendingListener = (obs, before, pending) -> cameraPending(pending);
+    private final javafx.beans.value.ChangeListener<Boolean> cameraPendingListener =
+            (obs, before, pending) -> cameraPending(pending);
+
     private void cameraPending(boolean pending) {
-        if (!disposed && (pending || mediaController.cameraRequestedProperty().get())) clearCameraError();
+        if (!disposed && (pending || mediaController.cameraRequestedProperty().get()))
+            clearCameraError();
     }
+
     private void clearCameraError() {
-        if (!cameraError.isEmpty() && roomError.getText().equals(cameraError)) roomError.setText("");
+        if (!cameraError.isEmpty() && roomError.getText().equals(cameraError))
+            roomError.setText("");
         cameraError = "";
     }
-    private final javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> videoRoomListener = (observable, before, after) -> {
-        if (disposed || after == null) return;
-        displayedRoom = after;
-        applyParticipants(after.collaborationRoom()); updateLock(); renderNativeParticipants(); renderVideos();
-    };
-    private final javafx.beans.value.ChangeListener<Boolean> cameraListener = (observable, before, after) -> updateCameraButton(after);
-    private void updateMicButton(boolean active) { controls.mic(active); }
-    private void updateCameraButton(boolean active) { controls.camera(active); }
+
+    private final javafx.beans.value.ChangeListener<common.meeting.RoomSnapshot> videoRoomListener =
+            (observable, before, after) -> {
+                if (disposed || after == null) return;
+                displayedRoom = after;
+                applyParticipants(after.collaborationRoom());
+                updateLock();
+                renderNativeParticipants();
+                renderVideos();
+            };
+    private final javafx.beans.value.ChangeListener<Boolean> cameraListener =
+            (observable, before, after) -> updateCameraButton(after);
+
+    private void updateMicButton(boolean active) {
+        controls.mic(active);
+    }
+
+    private void updateCameraButton(boolean active) {
+        controls.camera(active);
+    }
+
     public MeetingScreen(SceneManager manager) {
-        this.manager = manager; videoRoom = manager.hasVideoRoom(); people = FXCollections.observableArrayList();
-        mediaSession = videoRoom ? manager.sfuSession() : null; mediaController = videoRoom ? mediaSession.video() : null;
+        this.manager = manager;
+        videoRoom = manager.hasVideoRoom();
+        people = FXCollections.observableArrayList();
+        mediaSession = videoRoom ? manager.sfuSession() : null;
+        mediaController = videoRoom ? mediaSession.video() : null;
         mediaSelf = videoRoom ? mediaSession.selfParticipantId() : null;
         displayedRoom = videoRoom ? mediaSession.snapshot() : null;
-        applyParticipants(displayedRoom == null ? manager.roomInfo() : displayedRoom.collaborationRoom()); peakPeople = people.size();
-        Label duration = Ui.label("00:00:00", "meeting-time"); duration.setWrapText(false);
+        applyParticipants(
+                displayedRoom == null ? manager.roomInfo() : displayedRoom.collaborationRoom());
+        peakPeople = people.size();
+        Label duration = Ui.label("00:00:00", "meeting-time");
+        duration.setWrapText(false);
         IconButton copy = new IconButton("copy", "Sao chép mã phòng");
-        copy.setOnAction(e -> { ClipboardContent content = new ClipboardContent(); content.putString(manager.room().code()); Clipboard.getSystemClipboard().setContent(content); copy.setIcon("check"); PauseTransition reset = new PauseTransition(Duration.seconds(1.5)); reset.setOnFinished(done -> copy.setIcon("copy")); reset.play(); });
+        copy.setOnAction(
+                e -> {
+                    ClipboardContent content = new ClipboardContent();
+                    content.putString(manager.room().code());
+                    Clipboard.getSystemClipboard().setContent(content);
+                    copy.setIcon("check");
+                    PauseTransition reset = new PauseTransition(Duration.seconds(1.5));
+                    reset.setOnFinished(done -> copy.setIcon("copy"));
+                    reset.play();
+                });
         network = manager.authClient().startNetworkMonitoring();
         networkSignal = new NetworkSignalWidget();
         networkSignal.update(null, network.snapshot());
-        HBox statusLine = Ui.row(8, networkSignal); statusLine.setAlignment(Pos.CENTER_LEFT);
+        HBox statusLine = Ui.row(8, networkSignal);
+        statusLine.setAlignment(Pos.CENTER_LEFT);
         if (videoRoom) {
             connectionStatus.setId("meeting-connection-status");
             connectionStatus.textProperty().bind(mediaSession.noticeProperty());
-            connectionStatus.visibleProperty().bind(mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
+            connectionStatus
+                    .visibleProperty()
+                    .bind(
+                            mediaSession
+                                    .stateProperty()
+                                    .isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
             connectionStatus.managedProperty().bind(connectionStatus.visibleProperty());
             statusLine.getChildren().add(0, connectionStatus);
             adaptiveStatus.setId("adaptive-video-status");
-            adaptiveStatus.textProperty().bind(Bindings.createStringBinding(
-                    () -> mediaController.qualityProperty().get().label, mediaController.qualityProperty()));
-            adaptiveStatus.visibleProperty().bind(mediaController.qualityProperty().isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.LOW));
+            adaptiveStatus
+                    .textProperty()
+                    .bind(
+                            Bindings.createStringBinding(
+                                    () -> mediaController.qualityProperty().get().label,
+                                    mediaController.qualityProperty()));
+            adaptiveStatus
+                    .visibleProperty()
+                    .bind(
+                            mediaController
+                                    .qualityProperty()
+                                    .isNotEqualTo(client.media.AdaptiveVideoPolicy.Profile.LOW));
             adaptiveStatus.managedProperty().bind(adaptiveStatus.visibleProperty());
             statusLine.getChildren().add(0, adaptiveStatus);
         }
-        Label title = Ui.label(manager.room().name(), "meeting-title"); title.setMaxWidth(350);
-        HBox top = Ui.row(12, IconButton.icon("camera"), Ui.column(5, title, Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)), copy, Ui.spacer(), participantCount, duration, statusLine); top.getStyleClass().add("meeting-top"); setTop(top); updateLock();
-        participantPanel = new ParticipantPanel(managedPeople, manager.authenticatedUser().id(), this::hostCommand,
-                person -> sharingScreen(person.userId()), this::stopScreen);
+        Label title = Ui.label(manager.room().name(), "meeting-title");
+        title.setMaxWidth(350);
+        HBox top =
+                Ui.row(
+                        12,
+                        IconButton.icon("camera"),
+                        Ui.column(
+                                5,
+                                title,
+                                Ui.row(8, Ui.label(manager.room().code(), "caption"), lockLabel)),
+                        copy,
+                        Ui.spacer(),
+                        participantCount,
+                        duration,
+                        statusLine);
+        top.getStyleClass().add("meeting-top");
+        setTop(top);
+        updateLock();
+        participantPanel =
+                new ParticipantPanel(
+                        managedPeople,
+                        manager.authenticatedUser().id(),
+                        this::hostCommand,
+                        person -> sharingScreen(person.userId()),
+                        this::stopScreen);
         Tab participants = new Tab("Thành viên", participantPanel);
         filePanel = new FilePanel(manager);
         chatPanel = new ChatPanel(manager);
-        Tab chat = new Tab("Chat", chatPanel); Tab files = new Tab("Tệp", filePanel);
-        admissionTab.setId("waiting-room-tab"); admissionTab.setDisable(true);
+        Tab chat = new Tab("Chat", chatPanel);
+        Tab files = new Tab("Tệp", filePanel);
+        admissionTab.setId("waiting-room-tab");
+        admissionTab.setDisable(true);
         tabs.setId("meeting-tabs");
-        tabs.getTabs().addAll(participants, chat, files, admissionTab); tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE); VBox.setVgrow(tabs, Priority.ALWAYS);
-        IconButton close = new IconButton("close", "Đóng panel"); close.setOnAction(e -> togglePanel(-1));
-        HBox panelHeader = Ui.row(8, Ui.label("Trong cuộc họp", "strong"), Ui.spacer(), close); panelHeader.setPadding(new Insets(12, 14, 8, 16)); panel.getChildren().addAll(panelHeader, tabs); panel.getStyleClass().add("meeting-panel");
-        panel.setMinWidth(0); panel.setPrefWidth(320); panel.setMaxWidth(320);
-        Rectangle clip = new Rectangle(); clip.widthProperty().bind(panel.widthProperty()); clip.heightProperty().bind(panel.heightProperty()); panel.setClip(clip);
+        tabs.getTabs().addAll(participants, chat, files, admissionTab);
+        tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+        VBox.setVgrow(tabs, Priority.ALWAYS);
+        IconButton close = new IconButton("close", "Đóng panel");
+        close.setOnAction(e -> togglePanel(-1));
+        HBox panelHeader = Ui.row(8, Ui.label("Trong cuộc họp", "strong"), Ui.spacer(), close);
+        panelHeader.setPadding(new Insets(12, 14, 8, 16));
+        panel.getChildren().addAll(panelHeader, tabs);
+        panel.getStyleClass().add("meeting-panel");
+        panel.setMinWidth(0);
+        panel.setPrefWidth(320);
+        panel.setMaxWidth(320);
+        Rectangle clip = new Rectangle();
+        clip.widthProperty().bind(panel.widthProperty());
+        clip.heightProperty().bind(panel.heightProperty());
+        panel.setClip(clip);
         videoContent.setMinSize(0, 0);
-        canvas.setId("meeting-video-area"); canvas.setMinSize(0, 0); HBox.setHgrow(canvas, Priority.ALWAYS); canvas.setPadding(new Insets(20));
-        StackPane videoArea = new StackPane(canvas); videoArea.setMinSize(0, 0); HBox.setHgrow(videoArea, Priority.ALWAYS);
-        HBox body = new HBox(videoArea, panel); body.setMinSize(0, 0); setCenter(body);
-        controls = new ControlBar(videoRoom ? false : manager.mic(), videoRoom ? manager.sfuSession().video().cameraRequestedProperty().get() : manager.camera(),
-                this::toggleMic, this::toggleCamera, this::toggleShare, () -> togglePanel(1), () -> togglePanel(0),
-                this::deviceSettings, this::leave);
+        canvas.setId("meeting-video-area");
+        canvas.setMinSize(0, 0);
+        HBox.setHgrow(canvas, Priority.ALWAYS);
+        canvas.setPadding(new Insets(20));
+        StackPane videoArea = new StackPane(canvas);
+        videoArea.setMinSize(0, 0);
+        HBox.setHgrow(videoArea, Priority.ALWAYS);
+        HBox body = new HBox(videoArea, panel);
+        body.setMinSize(0, 0);
+        setCenter(body);
+        controls =
+                new ControlBar(
+                        videoRoom ? false : manager.mic(),
+                        videoRoom
+                                ? manager.sfuSession().video().cameraRequestedProperty().get()
+                                : manager.camera(),
+                        this::toggleMic,
+                        this::toggleCamera,
+                        this::toggleShare,
+                        () -> togglePanel(1),
+                        () -> togglePanel(0),
+                        this::deviceSettings,
+                        this::leave);
         controls.users.active(true);
-        roomError.setWrapText(true); roomError.setId("meeting-room-error");
-        roomError.visibleProperty().bind(roomError.textProperty().isNotEmpty()); roomError.managedProperty().bind(roomError.visibleProperty());
-        bottom = new MeetingToolbar(controls, roomError); bottom.setPadding(new Insets(8, 16, 8, 16)); setBottom(bottom);
-        videoArea.getChildren().add(bottom.revealControl()); StackPane.setAlignment(bottom.revealControl(), Pos.TOP_LEFT); StackPane.setMargin(bottom.revealControl(), new Insets(12));
+        roomError.setWrapText(true);
+        roomError.setId("meeting-room-error");
+        roomError.visibleProperty().bind(roomError.textProperty().isNotEmpty());
+        roomError.managedProperty().bind(roomError.visibleProperty());
+        bottom = new MeetingToolbar(controls, roomError);
+        bottom.setPadding(new Insets(8, 16, 8, 16));
+        setBottom(bottom);
+        videoArea.getChildren().add(bottom.revealControl());
+        StackPane.setAlignment(bottom.revealControl(), Pos.TOP_LEFT);
+        StackPane.setMargin(bottom.revealControl(), new Insets(12));
         if (videoRoom) {
             var video = manager.sfuSession().video();
             audioControls = new AudioControls(video.audio(), null, false);
-            video.audio().requestedProperty().addListener(micListener); controls.mic(video.audio().requestedProperty().get());
-            audioControls.setManaged(false);audioControls.setVisible(false);bottom.content().getChildren().add(audioControls);
-            audioControls.errorProperty().addListener(audioErrorListener); video.screen().statusProperty().addListener(audioErrorListener);
-            video.screen().requestedProperty().addListener(shareListener);controls.share.active(video.screen().requestedProperty().get());
+            video.audio().requestedProperty().addListener(micListener);
+            controls.mic(video.audio().requestedProperty().get());
+            audioControls.setManaged(false);
+            audioControls.setVisible(false);
+            bottom.content().getChildren().add(audioControls);
+            audioControls.errorProperty().addListener(audioErrorListener);
+            video.screen().statusProperty().addListener(audioErrorListener);
+            video.screen().requestedProperty().addListener(shareListener);
+            controls.share.active(video.screen().requestedProperty().get());
             video.screen().systemAudioEnabledProperty().addListener(systemAudioListener);
             video.screen().systemAudioStatusProperty().addListener(audioErrorListener);
             video.cameraRequestedProperty().addListener(cameraListener);
             video.cameraPendingProperty().addListener(cameraPendingListener);
-            controls.camera.disableProperty().bind(mediaSession.stateProperty().isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
+            controls.camera
+                    .disableProperty()
+                    .bind(
+                            mediaSession
+                                    .stateProperty()
+                                    .isEqualTo(client.meeting.MeetingSession.State.RECONNECTING));
             if (video.latestStats() != null) {
-                networkSignal.update(video.latestStats(), network != null ? network.snapshot() : null);
+                networkSignal.update(
+                        video.latestStats(), network != null ? network.snapshot() : null);
             }
-            manager.sfuSession().roomProperty().addListener(videoRoomListener); renderNativeParticipants();
-            mediaSession.stateProperty().addListener(connectionListener); connectionState(mediaSession.stateProperty().get());
+            manager.sfuSession().roomProperty().addListener(videoRoomListener);
+            renderNativeParticipants();
+            mediaSession.stateProperty().addListener(connectionListener);
+            connectionState(mediaSession.stateProperty().get());
         }
-        people.addListener((ListChangeListener<MockData.Participant>) change -> {
-            peakPeople = Math.max(peakPeople, people.size());
-            if (!videoRoom) renderVideos();
-        });
-        tabs.getSelectionModel().selectedIndexProperty().addListener((obs, old, value) -> updatePanelButtons()); renderVideos();
-        clock = new Timeline(new KeyFrame(Duration.seconds(1), e -> { duration.setText(MockData.duration(elapsed())); refreshNetwork(); })); clock.setCycleCount(Animation.INDEFINITE); clock.play();
+        people.addListener(
+                (ListChangeListener<MeetingUiModels.Participant>)
+                        change -> {
+                            peakPeople = Math.max(peakPeople, people.size());
+                            if (!videoRoom) renderVideos();
+                        });
+        tabs.getSelectionModel()
+                .selectedIndexProperty()
+                .addListener((obs, old, value) -> updatePanelButtons());
+        renderVideos();
+        clock =
+                new Timeline(
+                        new KeyFrame(
+                                Duration.seconds(1),
+                                e -> {
+                                    duration.setText(DisplayFormat.duration(elapsed()));
+                                    refreshNetwork();
+                                }));
+        clock.setCycleCount(Animation.INDEFINITE);
+        clock.play();
         roomPoll = new Timeline(new KeyFrame(Duration.seconds(1), event -> refreshRoom()));
-        roomPoll.setCycleCount(Animation.INDEFINITE); roomPoll.play(); if (videoRoom) refreshRoom();
+        roomPoll.setCycleCount(Animation.INDEFINITE);
+        roomPoll.play();
+        if (videoRoom) refreshRoom();
     }
+
     private void applyParticipants(RoomInfo room) {
         if (room == null) return;
         long selfId = manager.authenticatedUser().id();
-        List<RoomParticipant> next = room.participants().stream()
-            .sorted(java.util.Comparator.comparingInt(p -> p.userId() == selfId ? 0 : 1)).toList();
+        List<RoomParticipant> next =
+                room.participants().stream()
+                        .sorted(
+                                java.util.Comparator.comparingInt(
+                                        p -> p.userId() == selfId ? 0 : 1))
+                        .toList();
         if (next.equals(participantSnapshot)) return;
         pinnedIndex = -1;
         participantSnapshot = next;
-        people.setAll(next.stream().map(p -> new MockData.Participant(p.displayName(), p.userId() == room.hostId(),
-            p.userId() != selfId || !manager.mic(), p.userId() == selfId && manager.camera(), MockData.avatarColor(p.displayName()))).toList());
+        people.setAll(
+                next.stream()
+                        .map(
+                                p ->
+                                        new MeetingUiModels.Participant(
+                                                p.displayName(),
+                                                p.userId() == room.hostId(),
+                                                p.userId() != selfId || !manager.mic(),
+                                                p.userId() == selfId && manager.camera(),
+                                                DisplayFormat.avatarColor(p.displayName())))
+                        .toList());
     }
+
     private void refreshRoom() {
         if (disposed || polling || leaving || reconnecting) return;
         if (videoRoom) {
             polling = true;
-            manager.runMeetingRequest(manager.roomCommand("ROOM_POLL", 0), response -> {
-                polling = false; if (disposed || leaving || response == null || !response.success()) return;
-                managedState = response; updateManagedPeople(response.members());
-                updateManagement(response); participantPanel.status("");
-                updateLock();
-            }, error -> {
-                polling = false; if (!disposed && !leaving) participantPanel.status(SceneManager.connectionError(error));
-            });
+            manager.runMeetingRequest(
+                    manager.roomCommand("ROOM_POLL", 0),
+                    response -> {
+                        polling = false;
+                        if (disposed || leaving || response == null || !response.success()) return;
+                        managedState = response;
+                        updateManagedPeople(response.members());
+                        updateManagement(response);
+                        participantPanel.status("");
+                        updateLock();
+                    },
+                    error -> {
+                        polling = false;
+                        if (!disposed && !leaving)
+                            participantPanel.status(SceneManager.connectionError(error));
+                    });
             return;
         }
-        polling = true; String token = manager.sessionToken(); long id = manager.roomInfo().id();
-        manager.runBackgroundRoomRequest(() -> manager.authClient().getRoom(token, id), response -> {
-            if (disposed) return; polling = false;
-            if (leaving) return;
-            if (manager.sessionExpired(response)) return;
-            if (response.success() && response.room() != null) {
-                manager.updateRoom(response.room()); applyParticipants(response.room()); updateLock();
-                participantCount.setText(response.room().people() + "/" + response.room().capacity() + " người"); roomError.setText("");
-            } else roomError.setText(response.message());
-        }, cause -> { if (!disposed) { polling = false; if (!leaving) roomError.setText(SceneManager.connectionError(cause)); } });
+        polling = true;
+        String token = manager.sessionToken();
+        long id = manager.roomInfo().id();
+        manager.runBackgroundRoomRequest(
+                () -> manager.authClient().getRoom(token, id),
+                response -> {
+                    if (disposed) return;
+                    polling = false;
+                    if (leaving) return;
+                    if (manager.sessionExpired(response)) return;
+                    if (response.success() && response.room() != null) {
+                        manager.updateRoom(response.room());
+                        applyParticipants(response.room());
+                        updateLock();
+                        participantCount.setText(
+                                response.room().people()
+                                        + "/"
+                                        + response.room().capacity()
+                                        + " người");
+                        roomError.setText("");
+                    } else roomError.setText(response.message());
+                },
+                cause -> {
+                    if (!disposed) {
+                        polling = false;
+                        if (!leaving) roomError.setText(SceneManager.connectionError(cause));
+                    }
+                });
     }
-    private void updateLock() { lockLabel.setText(manager.locked() ? "● Phòng đã khóa" : "● Phòng đang mở"); }
-    private long elapsed() { return (System.nanoTime() - startNanos) / 1_000_000_000; }
+
+    private void updateLock() {
+        lockLabel.setText(manager.locked() ? "● Phòng đã khóa" : "● Phòng đang mở");
+    }
+
+    private long elapsed() {
+        return (System.nanoTime() - startNanos) / 1_000_000_000;
+    }
+
     private void toggleMic() {
         if (videoRoom) {
             if (reconnecting || disposed) return;
             audioControls.toggle();
             return;
         }
-        manager.mic(!manager.mic()); controls.mic(manager.mic()); updateSelf();
+        manager.mic(!manager.mic());
+        controls.mic(manager.mic());
+        updateSelf();
     }
+
     private void toggleCamera() {
         if (videoRoom) {
             if (reconnecting || disposed) return;
             watchCameraOperation(mediaController.toggleSelectedCamera(), true);
             return;
         }
-        manager.camera(!manager.camera()); controls.camera(manager.camera()); updateSelf();
+        manager.camera(!manager.camera());
+        controls.camera(manager.camera());
+        updateSelf();
     }
-    public void publishPreparedCamera() { watchCameraOperation(mediaController.publishPreparedCamera(), false); }
-    private void watchCameraOperation(java.util.concurrent.CompletableFuture<Void> operation, boolean openSettings) {
+
+    public void publishPreparedCamera() {
+        watchCameraOperation(mediaController.publishPreparedCamera(), false);
+    }
+
+    private void watchCameraOperation(
+            java.util.concurrent.CompletableFuture<Void> operation, boolean openSettings) {
         if (operation == cameraOperation) return;
-        clearCameraError(); cameraOperation = operation;
-        operation.whenComplete((value, failure) -> javafx.application.Platform.runLater(() -> {
-            if (disposed || cameraOperation != operation) return;
-            if (failure == null) { clearCameraError(); return; }
-            if (client.media.CameraErrors.unwrap(failure) instanceof java.util.concurrent.CancellationException) return;
-            cameraError = client.media.CameraErrors.message(failure); roomError.setText(cameraError);
-            if (openSettings) deviceSettings();
-        }));
+        clearCameraError();
+        cameraOperation = operation;
+        operation.whenComplete(
+                (value, failure) ->
+                        javafx.application.Platform.runLater(
+                                () -> {
+                                    if (disposed || cameraOperation != operation) return;
+                                    if (failure == null) {
+                                        clearCameraError();
+                                        return;
+                                    }
+                                    if (client.media.CameraErrors.unwrap(failure)
+                                            instanceof java.util.concurrent.CancellationException)
+                                        return;
+                                    cameraError = client.media.CameraErrors.message(failure);
+                                    roomError.setText(cameraError);
+                                    if (openSettings) deviceSettings();
+                                }));
     }
+
     private void deviceSettings() {
         if (reconnecting) return;
         if (disposed) return;
         if (videoRoom) {
             if (cameraSettings != null && cameraSettings.isShowing()) return;
-            cameraSettings = new CameraSettingsDialog(manager.stage(), mediaController, managedState, mediaSession.isHost(), this::managedSettings);
+            cameraSettings =
+                    new CameraSettingsDialog(
+                            manager.stage(),
+                            mediaController,
+                            managedState,
+                            mediaSession.isHost(),
+                            this::managedSettings);
             cameraSettings.show();
-        }
-        else new DeviceSettingsDialog(manager.stage()).show();
+        } else new DeviceSettingsDialog(manager.stage()).show();
     }
+
     private void updateSelf() {
-        if (!people.isEmpty() && !participantSnapshot.isEmpty() && participantSnapshot.getFirst().userId() == manager.authenticatedUser().id()) {
-            MockData.Participant p = people.getFirst(); people.set(0, new MockData.Participant(p.name(), p.host(), !manager.mic(), manager.camera(), p.color()));
+        if (!people.isEmpty()
+                && !participantSnapshot.isEmpty()
+                && participantSnapshot.getFirst().userId() == manager.authenticatedUser().id()) {
+            MeetingUiModels.Participant p = people.getFirst();
+            people.set(
+                    0,
+                    new MeetingUiModels.Participant(
+                            p.name(), p.host(), !manager.mic(), manager.camera(), p.color()));
         }
     }
+
     private void toggleShare() {
-        if(videoRoom) {
-            if(mediaController.screen().requestedProperty().get()) {roomAction(mediaController.screen().stopShare());return;}
-            if(screenPicker!=null && screenPicker.isShowing()) return;
-            screenPicker=new ScreenSourceDialog(manager.stage(),mediaController.screen(),mediaSession.selfParticipantId());
-            screenPicker.showAndWait().ifPresent(choice -> roomAction(mediaController.screen().publishPreparedScreen()));return;
+        if (videoRoom) {
+            if (mediaController.screen().requestedProperty().get()) {
+                roomAction(mediaController.screen().stopShare());
+                return;
+            }
+            if (screenPicker != null && screenPicker.isShowing()) return;
+            screenPicker =
+                    new ScreenSourceDialog(
+                            manager.stage(),
+                            mediaController.screen(),
+                            mediaSession.selfParticipantId());
+            screenPicker
+                    .showAndWait()
+                    .ifPresent(
+                            choice -> roomAction(mediaController.screen().publishPreparedScreen()));
+            return;
         }
-        sharing = !sharing; controls.share.active(sharing); renderVideos(); }
-    private void pin(int index) { pinnedIndex = pinnedIndex == index ? -1 : index; renderVideos(); }
+        sharing = !sharing;
+        controls.share.active(sharing);
+        renderVideos();
+    }
+
+    private void pin(int index) {
+        pinnedIndex = pinnedIndex == index ? -1 : index;
+        renderVideos();
+    }
+
     private void renderVideos() {
         participantCount.setText(people.size() + "/" + manager.room().capacity() + " người");
         if (pinnedIndex >= people.size()) pinnedIndex = -1;
-        String screenOwner=displayedRoom!=null ? displayedRoom.participants().stream().filter(p -> p.mediaState().sharePublishing() || (p.participantId().equals(mediaSelf) && mediaController.screen().requestedProperty().get())).map(common.meeting.ParticipantView::participantId).findFirst().orElse(null) : null;
-        var viewport=videoRoom?client.media.VideoViewport.page(people.size(),pinnedIndex,screenOwner!=null,page):null;
-        int pageSize=videoRoom?(screenOwner!=null || pinnedIndex>=0?5:PAGE_SIZE):12;
-        int pages = videoRoom?viewport.pages():Math.max(1, (people.size() + pageSize - 1) / pageSize);
+        String screenOwner =
+                displayedRoom != null
+                        ? displayedRoom.participants().stream()
+                                .filter(
+                                        p ->
+                                                p.mediaState().sharePublishing()
+                                                        || (p.participantId().equals(mediaSelf)
+                                                                && mediaController
+                                                                        .screen()
+                                                                        .requestedProperty()
+                                                                        .get()))
+                                .map(common.meeting.ParticipantView::participantId)
+                                .findFirst()
+                                .orElse(null)
+                        : null;
+        var viewport =
+                videoRoom
+                        ? client.media.VideoViewport.page(
+                                people.size(), pinnedIndex, screenOwner != null, page)
+                        : null;
+        int pageSize = videoRoom ? (screenOwner != null || pinnedIndex >= 0 ? 5 : PAGE_SIZE) : 12;
+        int pages =
+                videoRoom
+                        ? viewport.pages()
+                        : Math.max(1, (people.size() + pageSize - 1) / pageSize);
         page = Math.max(0, Math.min(page, pages - 1));
         int start = page * pageSize, end = Math.min(start + pageSize, people.size());
-        var visibleIndices=videoRoom?viewport.cameras():java.util.stream.IntStream.range(start,end).boxed().toList();
-        int focusIndex=videoRoom?viewport.primary():pinnedIndex>=0?pinnedIndex:start;
-        List<common.meeting.ParticipantView> ordered = videoRoom && displayedRoom != null
-                ? displayedRoom.participants().stream().sorted(java.util.Comparator.comparingInt(p -> p.participantId().equals(mediaSelf) ? 0 : 1)).toList()
-                : List.of();
-        if(videoRoom && displayedRoom!=null) {
-            var visible=new java.util.LinkedHashSet<String>();
-            if(screenOwner==null && focusIndex>=0 && focusIndex<ordered.size()) visible.add(ordered.get(focusIndex).participantId());
-            for(int i:visibleIndices) if(i<ordered.size()) visible.add(ordered.get(i).participantId());
+        var visibleIndices =
+                videoRoom
+                        ? viewport.cameras()
+                        : java.util.stream.IntStream.range(start, end).boxed().toList();
+        int focusIndex = videoRoom ? viewport.primary() : pinnedIndex >= 0 ? pinnedIndex : start;
+        List<common.meeting.ParticipantView> ordered =
+                videoRoom && displayedRoom != null
+                        ? displayedRoom.participants().stream()
+                                .sorted(
+                                        java.util.Comparator.comparingInt(
+                                                p -> p.participantId().equals(mediaSelf) ? 0 : 1))
+                                .toList()
+                        : List.of();
+        if (videoRoom && displayedRoom != null) {
+            var visible = new java.util.LinkedHashSet<String>();
+            if (screenOwner == null && focusIndex >= 0 && focusIndex < ordered.size())
+                visible.add(ordered.get(focusIndex).participantId());
+            for (int i : visibleIndices)
+                if (i < ordered.size()) visible.add(ordered.get(i).participantId());
             mediaController.visibleParticipants(visible);
         }
-        List<String> orderedIds = videoRoom ? ordered.stream().map(common.meeting.ParticipantView::participantId).toList() : List.of();
-        VideoLayoutKey nextKey = new VideoLayoutKey(videoRoom, orderedIds, screenOwner, pinnedIndex, page, sharing);
+        List<String> orderedIds =
+                videoRoom
+                        ? ordered.stream()
+                                .map(common.meeting.ParticipantView::participantId)
+                                .toList()
+                        : List.of();
+        VideoLayoutKey nextKey =
+                new VideoLayoutKey(videoRoom, orderedIds, screenOwner, pinnedIndex, page, sharing);
         if (videoRoom && nextKey.equals(activeLayoutKey) && !tiles.isEmpty()) {
             for (int idx = 0; idx < ordered.size(); idx++) {
                 var p = ordered.get(idx);
@@ -328,89 +639,230 @@ public final class MeetingScreen extends BorderPane {
                 }
             }
             if (focusHeaderLabel != null && focusIndex >= 0 && focusIndex < people.size()) {
-                focusHeaderLabel.setText((pinnedIndex >= 0 ? "Đã ghim · " : "") + people.get(focusIndex).name());
+                focusHeaderLabel.setText(
+                        (pinnedIndex >= 0 ? "Đã ghim · " : "") + people.get(focusIndex).name());
             }
             return;
         }
         activeLayoutKey = nextKey;
         activeVideoTiles.clear();
         focusHeaderLabel = null;
-        if(screenImage!=null) {screenImage.imageProperty().unbind();screenImage=null;}
-        systemAudioToggle=null;
-        tiles.forEach(VideoTile::dispose); tiles.clear(); videoContent.getChildren().clear();
-        BorderPane frame = new BorderPane(videoContent); frame.setMinSize(0, 0);
+        if (screenImage != null) {
+            screenImage.imageProperty().unbind();
+            screenImage = null;
+        }
+        systemAudioToggle = null;
+        tiles.forEach(VideoTile::dispose);
+        tiles.clear();
+        videoContent.getChildren().clear();
+        BorderPane frame = new BorderPane(videoContent);
+        frame.setMinSize(0, 0);
         if (pages > 1) {
-            Button previous = Ui.button("← Trước", "small-button", () -> { page--; renderVideos(); }); previous.setDisable(page == 0);
-            Button next = Ui.button("Sau →", "small-button", () -> { page++; renderVideos(); }); next.setDisable(page == pages - 1);
-            HBox pager = Ui.row(12, previous, Ui.label("Trang " + (page + 1) + "/" + pages + " · Người " + (start + 1) + "–" + end, "caption"), next); pager.setAlignment(Pos.CENTER); pager.setPadding(new Insets(12, 0, 0, 0)); frame.setBottom(pager);
+            Button previous =
+                    Ui.button(
+                            "← Trước",
+                            "small-button",
+                            () -> {
+                                page--;
+                                renderVideos();
+                            });
+            previous.setDisable(page == 0);
+            Button next =
+                    Ui.button(
+                            "Sau →",
+                            "small-button",
+                            () -> {
+                                page++;
+                                renderVideos();
+                            });
+            next.setDisable(page == pages - 1);
+            HBox pager =
+                    Ui.row(
+                            12,
+                            previous,
+                            Ui.label(
+                                    "Trang "
+                                            + (page + 1)
+                                            + "/"
+                                            + pages
+                                            + " · Người "
+                                            + (start + 1)
+                                            + "–"
+                                            + end,
+                                    "caption"),
+                            next);
+            pager.setAlignment(Pos.CENTER);
+            pager.setPadding(new Insets(12, 0, 0, 0));
+            frame.setBottom(pager);
         }
         canvas.getChildren().setAll(frame);
-        if(videoRoom && screenOwner!=null) {
-            VBox thumbnails=new VBox(10);thumbnails.setPrefWidth(164);thumbnails.setMinWidth(130);
-            for(int i:visibleIndices) {VideoTile tile=tile(i);tile.setPrefHeight(108);tile.setMinHeight(108);tile.setMaxHeight(108);thumbnails.getChildren().add(tile);}
-            ScrollPane strip=Ui.scroll(thumbnails);strip.setPrefWidth(180);strip.setMinWidth(145);
-            boolean own=screenOwner.equals(mediaSelf);
-            String ownerName=displayedRoom.participants().stream().filter(p -> p.participantId().equals(screenOwner)).map(common.meeting.ParticipantView::displayName).findFirst().orElse("");
-            StackPane shared=new StackPane();shared.setMinSize(0,0);shared.getStyleClass().add("preview");
-            if(own) shared.getChildren().add(Ui.label("Bạn đang chia sẻ màn hình", "subtitle"));
-            else {
-                screenImage=new javafx.scene.image.ImageView();screenImage.setId("meeting-screen-image");screenImage.setPreserveRatio(true);
-                screenImage.fitWidthProperty().bind(Bindings.max(1, shared.widthProperty().subtract(16)));
-                screenImage.fitHeightProperty().bind(Bindings.max(1, shared.heightProperty().subtract(16)));
-                screenImage.imageProperty().bind(mediaController.screen().frames(screenOwner).imageProperty());shared.getChildren().add(screenImage);
+        if (videoRoom && screenOwner != null) {
+            VBox thumbnails = new VBox(10);
+            thumbnails.setPrefWidth(164);
+            thumbnails.setMinWidth(130);
+            for (int i : visibleIndices) {
+                VideoTile tile = tile(i);
+                tile.setPrefHeight(108);
+                tile.setMinHeight(108);
+                tile.setMaxHeight(108);
+                thumbnails.getChildren().add(tile);
             }
-            HBox badge=Ui.row(8,IconButton.icon("share"),Ui.label(ownerName+" • Đang chia sẻ", "accent-text"),Ui.spacer());
+            ScrollPane strip = Ui.scroll(thumbnails);
+            strip.setPrefWidth(180);
+            strip.setMinWidth(145);
+            boolean own = screenOwner.equals(mediaSelf);
+            String ownerName =
+                    displayedRoom.participants().stream()
+                            .filter(p -> p.participantId().equals(screenOwner))
+                            .map(common.meeting.ParticipantView::displayName)
+                            .findFirst()
+                            .orElse("");
+            StackPane shared = new StackPane();
+            shared.setMinSize(0, 0);
+            shared.getStyleClass().add("preview");
+            if (own) shared.getChildren().add(Ui.label("Bạn đang chia sẻ màn hình", "subtitle"));
+            else {
+                screenImage = new javafx.scene.image.ImageView();
+                screenImage.setId("meeting-screen-image");
+                screenImage.setPreserveRatio(true);
+                screenImage
+                        .fitWidthProperty()
+                        .bind(Bindings.max(1, shared.widthProperty().subtract(16)));
+                screenImage
+                        .fitHeightProperty()
+                        .bind(Bindings.max(1, shared.heightProperty().subtract(16)));
+                screenImage
+                        .imageProperty()
+                        .bind(mediaController.screen().frames(screenOwner).imageProperty());
+                shared.getChildren().add(screenImage);
+            }
+            HBox badge =
+                    Ui.row(
+                            8,
+                            IconButton.icon("share"),
+                            Ui.label(ownerName + " • Đang chia sẻ", "accent-text"),
+                            Ui.spacer());
             badge.setAlignment(Pos.CENTER_LEFT);
             badge.setMinHeight(36);
-            if(own) {
-                systemAudioToggle=new CheckBox("Âm thanh máy tính");systemAudioToggle.setId("meeting-system-audio");
-                systemAudioToggle.setSelected(mediaController.screen().systemAudioEnabledProperty().get());
+            if (own) {
+                systemAudioToggle = new CheckBox("Âm thanh máy tính");
+                systemAudioToggle.setId("meeting-system-audio");
+                systemAudioToggle.setSelected(
+                        mediaController.screen().systemAudioEnabledProperty().get());
                 systemAudioToggle.setDisable(!mediaController.screen().systemAudioSupported());
-                systemAudioToggle.setTooltip(new Tooltip("Chia sẻ âm thanh các ứng dụng, trừ MiniMeeting. Không thay đổi mic."));
-                CheckBox toggle=systemAudioToggle;
-                toggle.setOnAction(event -> mediaController.screen().setSystemAudioEnabled(toggle.isSelected()).whenComplete((v,failure) -> {
-                    if(failure!=null) Platform.runLater(() -> showMediaError(mediaController.screen().systemAudioStatusProperty().get()));
-                }));
+                systemAudioToggle.setTooltip(
+                        new Tooltip(
+                                "Chia sẻ âm thanh các ứng dụng, trừ MiniMeeting. Không thay đổi"
+                                        + " mic."));
+                CheckBox toggle = systemAudioToggle;
+                toggle.setOnAction(
+                        event ->
+                                mediaController
+                                        .screen()
+                                        .setSystemAudioEnabled(toggle.isSelected())
+                                        .whenComplete(
+                                                (v, failure) -> {
+                                                    if (failure != null)
+                                                        Platform.runLater(
+                                                                () ->
+                                                                        showMediaError(
+                                                                                mediaController
+                                                                                        .screen()
+                                                                                        .systemAudioStatusProperty()
+                                                                                        .get()));
+                                                }));
                 badge.getChildren().add(toggle);
             }
-            badge.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
-                    .then(new Insets(0, 0, 0, 52))
-                    .otherwise(Insets.EMPTY));
-            VBox large=Ui.column(12,badge,shared);VBox.setVgrow(shared,Priority.ALWAYS);HBox.setHgrow(large,Priority.ALWAYS);large.setMinSize(0, 0);
-            videoContent.getChildren().add(new HBox(14,large,strip));
+            badge.paddingProperty()
+                    .bind(
+                            Bindings.when(bottom.revealControl().visibleProperty())
+                                    .then(new Insets(0, 0, 0, 52))
+                                    .otherwise(Insets.EMPTY));
+            VBox large = Ui.column(12, badge, shared);
+            VBox.setVgrow(shared, Priority.ALWAYS);
+            HBox.setHgrow(large, Priority.ALWAYS);
+            large.setMinSize(0, 0);
+            videoContent.getChildren().add(new HBox(14, large, strip));
         } else if (sharing && !videoRoom) {
-            VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164); thumbnails.setMinWidth(130);
-            for (int i = start; i < end; i++) { VideoTile tile = tile(i); tile.setPrefHeight(108); tile.setMinHeight(108); tile.setMaxHeight(108); thumbnails.getChildren().add(tile); }
-            ScrollPane strip = Ui.scroll(thumbnails); strip.setPrefWidth(180); strip.setMinWidth(145);
-            VBox slide = Ui.column(20, Ui.label("MINI MEETING ROOM", "eyebrow"), Ui.label("Cùng xây dựng\nnhững ý tưởng tốt hơn.", "share-title"), Ui.label("01  /  Tổng quan sản phẩm", "brand-subtitle"), Ui.row(12, shareCard("Kết nối", "Nhóm nhỏ, tập trung"), shareCard("Cộng tác", "Chia sẻ tức thì")));
-            slide.setAlignment(Pos.CENTER_LEFT); slide.getStyleClass().add("shared-slide");
-            HBox badge = Ui.row(8, IconButton.icon("share"), Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text"));
+            VBox thumbnails = new VBox(10);
+            thumbnails.setPrefWidth(164);
+            thumbnails.setMinWidth(130);
+            for (int i = start; i < end; i++) {
+                VideoTile tile = tile(i);
+                tile.setPrefHeight(108);
+                tile.setMinHeight(108);
+                tile.setMaxHeight(108);
+                thumbnails.getChildren().add(tile);
+            }
+            ScrollPane strip = Ui.scroll(thumbnails);
+            strip.setPrefWidth(180);
+            strip.setMinWidth(145);
+            VBox slide =
+                    Ui.column(
+                            20,
+                            Ui.label("MINI MEETING ROOM", "eyebrow"),
+                            Ui.label("Cùng xây dựng\nnhững ý tưởng tốt hơn.", "share-title"),
+                            Ui.label("01  /  Tổng quan sản phẩm", "brand-subtitle"),
+                            Ui.row(
+                                    12,
+                                    shareCard("Kết nối", "Nhóm nhỏ, tập trung"),
+                                    shareCard("Cộng tác", "Chia sẻ tức thì")));
+            slide.setAlignment(Pos.CENTER_LEFT);
+            slide.getStyleClass().add("shared-slide");
+            HBox badge =
+                    Ui.row(
+                            8,
+                            IconButton.icon("share"),
+                            Ui.label("Bạn đang chia sẻ màn hình • mô phỏng", "accent-text"));
             badge.setAlignment(Pos.CENTER_LEFT);
             badge.setMinHeight(36);
-            badge.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
-                    .then(new Insets(0, 0, 0, 52))
-                    .otherwise(Insets.EMPTY));
-            VBox large = Ui.column(14, badge, slide); VBox.setVgrow(slide, Priority.ALWAYS); HBox.setHgrow(large, Priority.ALWAYS); large.setMinSize(0, 0);
-            HBox layout = new HBox(14, large, strip); videoContent.getChildren().add(layout);
+            badge.paddingProperty()
+                    .bind(
+                            Bindings.when(bottom.revealControl().visibleProperty())
+                                    .then(new Insets(0, 0, 0, 52))
+                                    .otherwise(Insets.EMPTY));
+            VBox large = Ui.column(14, badge, slide);
+            VBox.setVgrow(slide, Priority.ALWAYS);
+            HBox.setHgrow(large, Priority.ALWAYS);
+            large.setMinSize(0, 0);
+            HBox layout = new HBox(14, large, strip);
+            videoContent.getChildren().add(layout);
         } else if (pinnedIndex >= 0 || videoRoom && !people.isEmpty()) {
             VideoTile focused = tile(focusIndex);
-            BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused)); VBox.setVgrow(focus, Priority.ALWAYS);
-            focusHeaderLabel = Ui.label((pinnedIndex>=0?"Đã ghim · ":"") + people.get(focusIndex).name(), "strong");
+            BalancedVideoGrid focus = new BalancedVideoGrid(List.of(focused));
+            VBox.setVgrow(focus, Priority.ALWAYS);
+            focusHeaderLabel =
+                    Ui.label(
+                            (pinnedIndex >= 0 ? "Đã ghim · " : "") + people.get(focusIndex).name(),
+                            "strong");
             HBox focusHeader = Ui.row(8, IconButton.icon("pin"), focusHeaderLabel, Ui.spacer());
             focusHeader.setAlignment(Pos.CENTER_LEFT);
             focusHeader.setMinHeight(36);
-            focusHeader.paddingProperty().bind(Bindings.when(bottom.revealControl().visibleProperty())
-                    .then(new Insets(0, 0, 0, 52))
-                    .otherwise(Insets.EMPTY));
+            focusHeader
+                    .paddingProperty()
+                    .bind(
+                            Bindings.when(bottom.revealControl().visibleProperty())
+                                    .then(new Insets(0, 0, 0, 52))
+                                    .otherwise(Insets.EMPTY));
             VBox main = Ui.column(12, focusHeader, focus);
-            main.setMinSize(0, 0); HBox.setHgrow(main, Priority.ALWAYS);
+            main.setMinSize(0, 0);
+            HBox.setHgrow(main, Priority.ALWAYS);
             if (people.size() > 1) {
-                VBox thumbnails = new VBox(10); thumbnails.setPrefWidth(164);
-                int shown=0;
-                for (int i:visibleIndices) if (i != focusIndex && shown++<5) {
-                    VideoTile thumbnail = tile(i); thumbnail.setPrefHeight(108); thumbnail.setMinHeight(108); thumbnail.setMaxHeight(108); thumbnails.getChildren().add(thumbnail);
-                }
-                ScrollPane strip = Ui.scroll(thumbnails); strip.setPrefWidth(180); strip.setMinWidth(180); strip.setMaxWidth(180);
+                VBox thumbnails = new VBox(10);
+                thumbnails.setPrefWidth(164);
+                int shown = 0;
+                for (int i : visibleIndices)
+                    if (i != focusIndex && shown++ < 5) {
+                        VideoTile thumbnail = tile(i);
+                        thumbnail.setPrefHeight(108);
+                        thumbnail.setMinHeight(108);
+                        thumbnail.setMaxHeight(108);
+                        thumbnails.getChildren().add(thumbnail);
+                    }
+                ScrollPane strip = Ui.scroll(thumbnails);
+                strip.setPrefWidth(180);
+                strip.setMinWidth(180);
+                strip.setMaxWidth(180);
                 videoContent.getChildren().add(new HBox(14, main, strip));
             } else videoContent.getChildren().add(main);
         } else {
@@ -419,146 +871,300 @@ public final class MeetingScreen extends BorderPane {
             videoContent.getChildren().add(new BalancedVideoGrid(gallery));
         }
     }
-    private VBox shareCard(String title, String text) { VBox card = Ui.column(8, Ui.label(title, "subtitle"), Ui.label(text, "muted")); card.getStyleClass().add("share-card"); HBox.setHgrow(card, Priority.ALWAYS); return card; }
+
+    private VBox shareCard(String title, String text) {
+        VBox card = Ui.column(8, Ui.label(title, "subtitle"), Ui.label(text, "muted"));
+        card.getStyleClass().add("share-card");
+        HBox.setHgrow(card, Priority.ALWAYS);
+        return card;
+    }
+
     private VideoTile tile(int i) {
         if (videoRoom) {
-            var participant = displayedRoom.participants().stream()
-                    .sorted(java.util.Comparator.comparingInt(p -> p.participantId().equals(mediaSelf) ? 0 : 1)).toList().get(i);
-            VideoTile tile = new VideoTile(participant, participant.participantId().equals(mediaSelf),
-                    mediaController.frames(participant.participantId()).imageProperty());
+            var participant =
+                    displayedRoom.participants().stream()
+                            .sorted(
+                                    java.util.Comparator.comparingInt(
+                                            p -> p.participantId().equals(mediaSelf) ? 0 : 1))
+                            .toList()
+                            .get(i);
+            VideoTile tile =
+                    new VideoTile(
+                            participant,
+                            participant.participantId().equals(mediaSelf),
+                            mediaController.frames(participant.participantId()).imageProperty());
             tile.pinAction(participant.displayName(), pinnedIndex == i, () -> pin(i));
             tiles.add(tile);
             activeVideoTiles.put(participant.participantId(), tile);
             return tile;
         }
-        MockData.Participant p = people.get(i);
+        MeetingUiModels.Participant p = people.get(i);
         boolean self = participantSnapshot.get(i).userId() == manager.authenticatedUser().id();
-        if (self) p = new MockData.Participant(p.name(), p.host(), !manager.mic(), manager.camera(), p.color());
+        if (self)
+            p =
+                    new MeetingUiModels.Participant(
+                            p.name(), p.host(), !manager.mic(), manager.camera(), p.color());
         VideoTile tile = new VideoTile(p, self);
-        tile.pinAction(p.name(), pinnedIndex == i, () -> pin(i)); tiles.add(tile); return tile;
+        tile.pinAction(p.name(), pinnedIndex == i, () -> pin(i));
+        tiles.add(tile);
+        return tile;
     }
+
     private void togglePanel(int tab) {
-        boolean open = tab >= 0 && (!panelOpen || tabs.getSelectionModel().getSelectedIndex() != tab);
+        boolean open =
+                tab >= 0 && (!panelOpen || tabs.getSelectionModel().getSelectedIndex() != tab);
         if (tab >= 0) tabs.getSelectionModel().select(tab);
-        panelOpen = open; if (panelAnimation != null) panelAnimation.stop(); panel.setVisible(true);
-        panelAnimation = new Timeline(new KeyFrame(Duration.millis(220), new KeyValue(panel.prefWidthProperty(), open ? 320 : 0, Interpolator.EASE_BOTH), new KeyValue(panel.opacityProperty(), open ? 1 : 0, Interpolator.EASE_BOTH)));
-        panelAnimation.setOnFinished(e -> panel.setVisible(panelOpen)); panelAnimation.play(); updatePanelButtons();
+        panelOpen = open;
+        if (panelAnimation != null) panelAnimation.stop();
+        panel.setVisible(true);
+        panelAnimation =
+                new Timeline(
+                        new KeyFrame(
+                                Duration.millis(220),
+                                new KeyValue(
+                                        panel.prefWidthProperty(),
+                                        open ? 320 : 0,
+                                        Interpolator.EASE_BOTH),
+                                new KeyValue(
+                                        panel.opacityProperty(),
+                                        open ? 1 : 0,
+                                        Interpolator.EASE_BOTH)));
+        panelAnimation.setOnFinished(e -> panel.setVisible(panelOpen));
+        panelAnimation.play();
+        updatePanelButtons();
     }
-    private void updatePanelButtons() { controls.chat.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 1); controls.users.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 0); }
+
+    private void updatePanelButtons() {
+        controls.chat.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 1);
+        controls.users.active(panelOpen && tabs.getSelectionModel().getSelectedIndex() == 0);
+    }
+
     private void leave() {
         if (disposed || leaving) return;
-        leaving = true; setDisable(true); roomError.setText("Đang rời phòng…");
-        manager.leaveRoom(() -> { if (!disposed) manager.ended(elapsed(), peakPeople); }, message -> {
-            if (!disposed) { leaving = false; setDisable(false); roomError.setText(message); }
-        });
+        leaving = true;
+        setDisable(true);
+        roomError.setText("Đang rời phòng…");
+        manager.leaveRoom(
+                () -> {
+                    if (!disposed) manager.ended(elapsed(), peakPeople);
+                },
+                message -> {
+                    if (!disposed) {
+                        leaving = false;
+                        setDisable(false);
+                        roomError.setText(message);
+                    }
+                });
     }
-    public void pauseFileTransfers() { filePanel.close(); }
+
+    public void pauseFileTransfers() {
+        filePanel.close();
+    }
+
     public void restoreFileTransfers() {
         if (disposed) return;
         filePanel = new FilePanel(manager);
         tabs.getTabs().get(2).setContent(filePanel);
     }
+
     private void renderNativeParticipants() {
-        var room = displayedRoom; if (room == null) return;
+        var room = displayedRoom;
+        if (room == null) return;
         var ids = room.collaborationRoom().participants();
         java.util.List<common.meeting.Participant> next = new ArrayList<>();
         for (int i = 0; i < room.participants().size(); i++) {
             var person = room.participants().get(i);
-            next.add(new common.meeting.Participant(ids.get(i).userId(), person.displayName(), person.role() == common.meeting.RoomRole.HOST,
-                    person.mediaState().micRequested(), person.mediaState().cameraRequested()));
+            next.add(
+                    new common.meeting.Participant(
+                            ids.get(i).userId(),
+                            person.displayName(),
+                            person.role() == common.meeting.RoomRole.HOST,
+                            person.mediaState().micRequested(),
+                            person.mediaState().cameraRequested()));
         }
         updateManagedPeople(next);
     }
+
     private void updateManagedPeople(List<common.meeting.Participant> next) {
         if (!managedPeople.equals(next)) managedPeople.setAll(next);
         participantPanel.refreshMenu();
     }
+
     private common.meeting.ParticipantView screenParticipant(long userId) {
         if (!videoRoom || displayedRoom == null) return null;
         var room = displayedRoom;
         var ids = room.collaborationRoom().participants();
-        for (int i = 0; i < ids.size(); i++) if (ids.get(i).userId() == userId) return room.participants().get(i);
+        for (int i = 0; i < ids.size(); i++)
+            if (ids.get(i).userId() == userId) return room.participants().get(i);
         return null;
     }
+
     private boolean sharingScreen(long userId) {
         var participant = screenParticipant(userId);
         return participant != null && participant.mediaState().shareRequested();
     }
+
     private void stopScreen(long userId) {
         var participant = screenParticipant(userId);
         if (participant == null || !beginManagement()) return;
-        mediaSession.stopPublish(participant.participantId(), "SCREEN").whenComplete((value, failure) ->
-                javafx.application.Platform.runLater(() -> {
-                    setManagementPending(false);
-                    if (!disposed) roomError.setText(failure == null ? "" : SceneManager.connectionError(failure));
-                }));
+        mediaSession
+                .stopPublish(participant.participantId(), "SCREEN")
+                .whenComplete(
+                        (value, failure) ->
+                                javafx.application.Platform.runLater(
+                                        () -> {
+                                            setManagementPending(false);
+                                            if (!disposed)
+                                                roomError.setText(
+                                                        failure == null
+                                                                ? ""
+                                                                : SceneManager.connectionError(
+                                                                        failure));
+                                        }));
     }
+
     private void hostCommand(String action, Long target) {
         if (!beginManagement()) return;
-        manager.runMeetingRequest(manager.roomCommand(action, target), response -> {
-            setManagementPending(false); managedReply(response);
-        }, error -> {
-            setManagementPending(false);
-            if (!disposed) { admissions.retry(); roomError.setText(SceneManager.connectionError(error)); }
-        });
+        manager.runMeetingRequest(
+                manager.roomCommand(action, target),
+                response -> {
+                    setManagementPending(false);
+                    managedReply(response);
+                },
+                error -> {
+                    setManagementPending(false);
+                    if (!disposed) {
+                        admissions.retry();
+                        roomError.setText(SceneManager.connectionError(error));
+                    }
+                });
     }
+
     private boolean beginManagement() {
-        if (disposed || reconnecting || managementPending || !videoRoom || !mediaSession.isHost()) return false;
-        setManagementPending(true); return true;
+        if (disposed || reconnecting || managementPending || !videoRoom || !mediaSession.isHost())
+            return false;
+        setManagementPending(true);
+        return true;
     }
+
     private void setManagementPending(boolean pending) {
-        managementPending = pending; participantPanel.pending(pending); admissions.setDisable(pending);
+        managementPending = pending;
+        participantPanel.pending(pending);
+        admissions.setDisable(pending);
     }
+
     private void managedReply(common.meeting.RoomResponse response) {
         if (disposed) return;
-        if (!response.success()) { admissions.retry(); roomError.setText(response.message()); return; }
-        managedState = response; updateManagedPeople(response.members()); updateManagement(response);
+        if (!response.success()) {
+            admissions.retry();
+            roomError.setText(response.message());
+            return;
+        }
+        managedState = response;
+        updateManagedPeople(response.members());
+        updateManagement(response);
         if (response.room().closed()) manager.ended(elapsed(), peakPeople);
         else roomAction(manager.sfuSession().refresh());
     }
+
     private void updateManagement(common.meeting.RoomResponse response) {
-        boolean host = response.members().stream().anyMatch(person -> person.userId() == manager.authenticatedUser().id() && person.host());
+        boolean host =
+                response.members().stream()
+                        .anyMatch(
+                                person ->
+                                        person.userId() == manager.authenticatedUser().id()
+                                                && person.host());
         admissionTab.setDisable(!host || !response.room().approval());
-        admissionTab.setText("Chờ duyệt" + (host && !response.waiting().isEmpty() ? " (" + response.waiting().size() + ")" : ""));
-        if (admissionTab.isDisable() && tabs.getSelectionModel().getSelectedItem() == admissionTab) tabs.getSelectionModel().select(0);
+        admissionTab.setText(
+                "Chờ duyệt"
+                        + (host && !response.waiting().isEmpty()
+                                ? " (" + response.waiting().size() + ")"
+                                : ""));
+        if (admissionTab.isDisable() && tabs.getSelectionModel().getSelectedItem() == admissionTab)
+            tabs.getSelectionModel().select(0);
         admissions.update(response.waiting(), host, response.room().locked(), this::hostCommand);
         if (cameraSettings != null) cameraSettings.roomState(response, host);
     }
-    private java.util.concurrent.CompletableFuture<common.meeting.RoomResponse> managedSettings(Boolean locked, Boolean approval) {
+
+    private java.util.concurrent.CompletableFuture<common.meeting.RoomResponse> managedSettings(
+            Boolean locked, Boolean approval) {
         var completion = new java.util.concurrent.CompletableFuture<common.meeting.RoomResponse>();
-        if (disposed) { completion.completeExceptionally(new IllegalStateException("CONNECTION_CLOSED")); return completion; }
-        manager.runMeetingRequest(common.meeting.RoomRequest.settings(manager.sessionToken(), manager.roomInfo().id(), manager.sfuSession().selfParticipantId(), locked, approval),
-                response -> { managedReply(response); completion.complete(response); }, error -> {
-                    if (!disposed) roomError.setText(SceneManager.connectionError(error)); completion.completeExceptionally(error);
+        if (disposed) {
+            completion.completeExceptionally(new IllegalStateException("CONNECTION_CLOSED"));
+            return completion;
+        }
+        manager.runMeetingRequest(
+                common.meeting.RoomRequest.settings(
+                        manager.sessionToken(),
+                        manager.roomInfo().id(),
+                        manager.sfuSession().selfParticipantId(),
+                        locked,
+                        approval),
+                response -> {
+                    managedReply(response);
+                    completion.complete(response);
+                },
+                error -> {
+                    if (!disposed) roomError.setText(SceneManager.connectionError(error));
+                    completion.completeExceptionally(error);
                 });
         return completion;
     }
+
     private void roomAction(java.util.concurrent.CompletableFuture<?> action) {
-        action.whenComplete((value, error) -> javafx.application.Platform.runLater(() -> {
-            if (!disposed) roomError.setText(error == null ? "" : SceneManager.connectionError(error));
-        }));
+        action.whenComplete(
+                (value, error) ->
+                        javafx.application.Platform.runLater(
+                                () -> {
+                                    if (!disposed)
+                                        roomError.setText(
+                                                error == null
+                                                        ? ""
+                                                        : SceneManager.connectionError(error));
+                                }));
     }
+
     public void dispose() {
-        chatPanel.dispose(); manager.authClient().stopNetworkMonitoring(network);
-        if(screenPicker!=null) screenPicker.close();
-        if(screenImage!=null) screenImage.imageProperty().unbind();
-        if (cameraSettings != null) { cameraSettings.close(); cameraSettings = null; }
-        disposed = true; filePanel.close(); clock.stop(); roomPoll.stop(); if (panelAnimation != null) panelAnimation.stop();
-        tiles.forEach(VideoTile::dispose); activeVideoTiles.clear();
+        chatPanel.dispose();
+        manager.authClient().stopNetworkMonitoring(network);
+        if (screenPicker != null) screenPicker.close();
+        if (screenImage != null) screenImage.imageProperty().unbind();
+        if (cameraSettings != null) {
+            cameraSettings.close();
+            cameraSettings = null;
+        }
+        disposed = true;
+        filePanel.close();
+        clock.stop();
+        roomPoll.stop();
+        if (panelAnimation != null) panelAnimation.stop();
+        tiles.forEach(VideoTile::dispose);
+        activeVideoTiles.clear();
         networkSignal.dispose();
         if (videoRoom) {
             // Navigation removes bindings only; SceneManager/MeetingSession own the active media.
             mediaSession.stateProperty().removeListener(connectionListener);
-            connectionStatus.textProperty().unbind(); connectionStatus.visibleProperty().unbind(); connectionStatus.managedProperty().unbind();
-            adaptiveStatus.textProperty().unbind(); adaptiveStatus.visibleProperty().unbind(); adaptiveStatus.managedProperty().unbind();
+            connectionStatus.textProperty().unbind();
+            connectionStatus.visibleProperty().unbind();
+            connectionStatus.managedProperty().unbind();
+            adaptiveStatus.textProperty().unbind();
+            adaptiveStatus.visibleProperty().unbind();
+            adaptiveStatus.managedProperty().unbind();
             mediaSession.roomProperty().removeListener(videoRoomListener);
             mediaController.cameraRequestedProperty().removeListener(cameraListener);
             mediaController.cameraPendingProperty().removeListener(cameraPendingListener);
             controls.camera.disableProperty().unbind();
-            mediaController.audio().requestedProperty().removeListener(micListener); audioControls.errorProperty().removeListener(audioErrorListener); audioControls.dispose();
-            mediaController.screen().requestedProperty().removeListener(shareListener); mediaController.screen().statusProperty().removeListener(audioErrorListener);
-            mediaController.screen().systemAudioEnabledProperty().removeListener(systemAudioListener);
-            mediaController.screen().systemAudioStatusProperty().removeListener(audioErrorListener);systemAudioToggle=null;
+            mediaController.audio().requestedProperty().removeListener(micListener);
+            audioControls.errorProperty().removeListener(audioErrorListener);
+            audioControls.dispose();
+            mediaController.screen().requestedProperty().removeListener(shareListener);
+            mediaController.screen().statusProperty().removeListener(audioErrorListener);
+            mediaController
+                    .screen()
+                    .systemAudioEnabledProperty()
+                    .removeListener(systemAudioListener);
+            mediaController.screen().systemAudioStatusProperty().removeListener(audioErrorListener);
+            systemAudioToggle = null;
         }
     }
 }

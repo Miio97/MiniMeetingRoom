@@ -30,8 +30,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "MMR_VIDEO_INIT_FAILED")
 		os.Exit(2)
 	}
-	diagnostics := startDiagnostics()
-	defer diagnostics.close()
 	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "MMR_VIDEO_BIND_FAILED")
@@ -48,9 +46,6 @@ func main() {
 			select {
 			case <-ticker.C:
 				engine.expire()
-				if time.Now().Unix()%5 == 0 {
-					diagnostics.sample(engine)
-				}
 			case <-ctx.Done():
 				engine.close()
 				_ = server.Close()
@@ -63,5 +58,4 @@ func main() {
 		fmt.Fprintln(os.Stderr, "MMR_VIDEO_SERVE_FAILED")
 	}
 	engine.close()
-	diagnostics.sample(engine)
 }

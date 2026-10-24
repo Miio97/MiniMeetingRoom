@@ -22,7 +22,7 @@
             <artifactId>HikariCP</artifactId>
             <version>7.0.2</version>
         </dependency>
-        <!-- Pool configuration can contain credentials; application diagnostics own safe logging. -->
+        <!-- Keep pool configuration and credentials out of dependency logs. -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-nop</artifactId>
@@ -49,39 +49,18 @@
             <version>2.13.2</version>
         </dependency>
         <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>5.11.4</version>
-            <scope>test</scope>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>jakarta.mail</artifactId>
+            <version>2.0.3</version>
         </dependency>
         <dependency>
-            <groupId>com.h2database</groupId>
-            <artifactId>h2</artifactId>
-            <version>2.3.232</version>
-            <scope>test</scope>
+            <groupId>org.mindrot</groupId>
+            <artifactId>jbcrypt</artifactId>
+            <version>0.4</version>
         </dependency>
-         <dependency>
-        <groupId>org.eclipse.angus</groupId>
-        <artifactId>jakarta.mail</artifactId>
-        <version>2.0.3</version>
-    </dependency>
-    <dependency>
-        <groupId>org.mindrot</groupId>
-        <artifactId>jbcrypt</artifactId>
-        <version>0.4</version>
-    </dependency>
     </dependencies>
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.2</version>
-                <configuration>
-                    <!-- Also isolates a normal test run after a probe left compiled classes. -->
-                    <excludes><exclude>**/SystemAudioIntegrationTest.java</exclude><exclude>**/NativeMediaReuseTest.java</exclude><exclude>**/MediaToggleBenchmarkTest.java</exclude><exclude>**/MediaLeaseIntegrationTest.java</exclude><exclude>**/WebRtcClientProbeTest.java</exclude><exclude>**/VideoCallIntegrationTest.java</exclude><exclude>**/AudioCallIntegrationTest.java</exclude><exclude>**/ScreenCallIntegrationTest.java</exclude><exclude>**/AutoVideoHdIntegrationTest.java</exclude><exclude>**/NetworkStatsGroupIntegrationTest.java</exclude></excludes>
-                </configuration>
-            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
@@ -102,47 +81,4 @@
             </plugin>
         </plugins>
     </build>
-    <profiles>
-        <profile>
-            <id>video-integration</id>
-            <build><plugins>
-                <plugin><groupId>org.codehaus.mojo</groupId><artifactId>build-helper-maven-plugin</artifactId><version>3.6.0</version>
-                    <executions><execution><id>video-integration-source</id><phase>generate-test-sources</phase><goals><goal>add-test-source</goal></goals>
-                        <configuration><sources><source>src/video-test/java</source></sources></configuration>
-                    </execution></executions>
-                </plugin>
-                <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.2</version>
-                    <configuration><excludes combine.self="override" /></configuration>
-                </plugin>
-            </plugins></build>
-        </profile>
-        <!-- Historical Milestone 0 harness; native dependency is shared with production video. -->
-        <profile>
-            <id>media-probe</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <configuration><excludes combine.self="override" /></configuration>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.codehaus.mojo</groupId>
-                        <artifactId>build-helper-maven-plugin</artifactId>
-                        <version>3.6.0</version>
-                        <executions>
-                            <execution>
-                                <id>media-probe-sources</id>
-                                <phase>generate-test-sources</phase>
-                                <goals><goal>add-test-source</goal></goals>
-                                <configuration>
-                                    <sources><source>src/media-test/java</source></sources>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
 </project>
