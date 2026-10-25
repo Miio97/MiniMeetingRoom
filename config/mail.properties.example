@@ -1,9 +1,0 @@
-# SERVER ONLY. Copy to config/mail.private.properties (ignored by Git).
-# Gmail requires 2-Step Verification and an app password, not the Google account password.
-mail.smtp.host=smtp.gmail.com
-mail.smtp.port=587
-mail.smtp.user=your-address@gmail.com
-mail.smtp.password=your-16-character-app-password
-mail.from=your-address@gmail.com
-# Environment overrides: MMR_SMTP_HOST, MMR_SMTP_PORT, MMR_SMTP_USER,
-# MMR_SMTP_PASSWORD, MMR_SMTP_FROM. MMR_MAIL_CONFIG overrides the file path.
