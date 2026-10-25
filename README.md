@@ -14,7 +14,7 @@ và `server.Main`.
 - Thống kê media tại client, chất lượng video AUTO tối đa 720p/30 FPS.
 - Phục hồi signaling tối đa hai phút; dọn nội dung phòng đóng trước khi mở lại.
 
-Mặc định 20 người/phòng. Đây là giới hạn chính sách,
+Mặc định 10 người/phòng. Tối đa 20 người/ phòng
 
 ## Chạy nhanh
 
