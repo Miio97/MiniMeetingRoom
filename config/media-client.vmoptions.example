@@ -1,8 +1,0 @@
-# Client JVM options: NetBeans project Properties > Run > VM Options.
-# These are capture/sender targets, not measured quality or throughput.
--Dmmr.screen.width=1280
--Dmmr.screen.height=720
--Dmmr.screen.fps=10
--Dmmr.screen.bitrate=1800000
-# Supported bounded ranges: width 320..1280, height 240..720, fps 1..15,
-# bitrate 200000..5000000 bit/s. Renderer mailboxes are bounded to 1280x720.

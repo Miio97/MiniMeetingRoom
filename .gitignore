@@ -50,3 +50,8 @@ Desktop.ini
 /logs/
 /.tools/
 /config/*.private.properties
+
+# Local configuration, documentation and database files
+/config/
+/docs/
+/database/
