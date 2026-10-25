@@ -55,3 +55,6 @@ Desktop.ini
 /config/
 /docs/
 /database/
+
+# Local TLS setup script
+/scripts/init-local-tls.ps1
