@@ -1,4 +1,38 @@
-/target/
+# Java / Maven / Go build outputs (at every directory level)
+target/
+build/
+dist/
+out/
+bin/
+node_modules/
+*.jar
+*.war
+*.ear
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.a
+*.test
+*.out
+
+# Personal IDE and operating-system files
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local dependencies, configuration, logs and runtime data
 /.m2/
 /nbproject/private/
 /nbactions-private.xml
