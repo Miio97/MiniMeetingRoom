@@ -14,7 +14,7 @@ và `server.Main`.
 - Thống kê media tại client, chất lượng video AUTO tối đa 720p/30 FPS.
 - Phục hồi signaling tối đa hai phút; dọn nội dung phòng đóng trước khi mở lại.
 
-Mặc định 20 người/phòng, trần cấu hình 50. Đây là giới hạn chính sách,
+Mặc định 20 người/phòng. Đây là giới hạn chính sách,
 không phải cam kết 50 người cùng phát media trên mọi máy server.
 
 ## Chạy nhanh
@@ -69,12 +69,3 @@ Repository dùng GitHub nên cột Merge Requests ghi **Pull Request (PR)**.
 | 2380602267 | Lại Mỹ Toàn (`Miio97`) | Khởi tạo dự án Maven; bố cục PreJoin, theme và sidebar; chat realtime, thống kê mạng và giới hạn số người; quản lý lịch hẹn; sửa âm thanh phòng; lưu/khôi phục phiên đăng nhập theo thiết bị; chia sẻ âm thanh hệ thống; tích hợp các nhánh. Minh chứng: [151aaba](https://github.com/Miio97/MiniMeetingRoom/commit/151aaba), [1f9d03b](https://github.com/Miio97/MiniMeetingRoom/commit/1f9d03b), [45bab98](https://github.com/Miio97/MiniMeetingRoom/commit/45bab98). | [#3](https://github.com/Miio97/MiniMeetingRoom/pull/3), [#11](https://github.com/Miio97/MiniMeetingRoom/pull/11), [#13](https://github.com/Miio97/MiniMeetingRoom/pull/13), [#14](https://github.com/Miio97/MiniMeetingRoom/pull/14), [#19](https://github.com/Miio97/MiniMeetingRoom/pull/19), [#21](https://github.com/Miio97/MiniMeetingRoom/pull/21), [#23](https://github.com/Miio97/MiniMeetingRoom/pull/23), [#26](https://github.com/Miio97/MiniMeetingRoom/pull/26), [#28](https://github.com/Miio97/MiniMeetingRoom/pull/28), [#30](https://github.com/Miio97/MiniMeetingRoom/pull/30) |
 | 2380601083 | Trần Văn Khoa (`VanKhoa2005`) | Xây dựng đăng nhập/đăng ký, tạo phòng; sửa logic phòng; xác thực email qua Gmail/OTP. Minh chứng: [5a678d3](https://github.com/Miio97/MiniMeetingRoom/commit/5a678d3), [7c4ee89](https://github.com/Miio97/MiniMeetingRoom/commit/7c4ee89), [4e27beb](https://github.com/Miio97/MiniMeetingRoom/commit/4e27beb), [c1890e1](https://github.com/Miio97/MiniMeetingRoom/commit/c1890e1). | [#4](https://github.com/Miio97/MiniMeetingRoom/pull/4), [#10](https://github.com/Miio97/MiniMeetingRoom/pull/10), [#18](https://github.com/Miio97/MiniMeetingRoom/pull/18), [#25](https://github.com/Miio97/MiniMeetingRoom/pull/25) |
 | 2380600544 | Phạm Quý Gia Đức (tên nhóm cung cấp: `pduc2905`) | Quản lý phòng, chat realtime, theo dõi/thống kê mạng; tích hợp phòng, chat, video và truyền tệp trên nhánh `Duc`. Minh chứng Git ghi tác giả `PhamQuyGiaDuc` và người merge `pduc2950`: [94ac1a4](https://github.com/Miio97/MiniMeetingRoom/commit/94ac1a4), [85fff88](https://github.com/Miio97/MiniMeetingRoom/commit/85fff88), [33a7df0](https://github.com/Miio97/MiniMeetingRoom/commit/33a7df0). | [#9](https://github.com/Miio97/MiniMeetingRoom/pull/9) |
-
-## Tài liệu cục bộ
-
-Các thư mục `config/`, `docs/` và `database/` được giữ trên máy và bỏ qua bởi
-Git. Người clone repository cần được cung cấp riêng cấu hình, tài liệu và SQL
-cần thiết để triển khai ứng dụng.
-
-Các script SQL phải được người quản trị xem xét và chạy thủ công. Server không
-tự áp dụng migration. Dọn source không đồng nghĩa xóa dữ liệu database/storage.
