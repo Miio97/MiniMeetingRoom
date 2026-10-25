@@ -15,7 +15,6 @@ và `server.Main`.
 - Phục hồi signaling tối đa hai phút; dọn nội dung phòng đóng trước khi mở lại.
 
 Mặc định 20 người/phòng. Đây là giới hạn chính sách,
-không phải cam kết 50 người cùng phát media trên mọi máy server.
 
 ## Chạy nhanh
 
@@ -55,12 +54,7 @@ Chúng không phải thành phần cần chạy ứng dụng. `.tools`, `target`
 
 ## Bảng đóng góp thành viên
 
-Bảng được đối chiếu ngày **26/10/2026** sau khi chạy `git fetch origin --prune`,
-theo lịch sử `origin/main` tại commit
-[ c83f558 ](https://github.com/Miio97/MiniMeetingRoom/commit/c83f55881443b82dea175131938ad1219b12cb2a)
-(PR #32, ngày 24/10/2026). MSSV, họ tên và tên Git do nhóm cung cấp;
-công việc và PR được đối chiếu với commit và nhánh nguồn trong lịch sử Git.
-Repository dùng GitHub nên cột Merge Requests ghi **Pull Request (PR)**.
+Bảng được đối chiếu ngày **26/10/2026**
 
 | MSSV | Họ và Tên | Công việc đã thực hiện | Merge Requests |
 | --- | --- | --- | --- |
